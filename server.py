@@ -1,7 +1,6 @@
 """
 Pelagic — Kalshi API Proxy Server
-Handles RSA request signing so your browser can fetch Kalshi data securely.
-Deploy this to Railway, then point your HTML file at its URL.
+Handles RSA-PSS request signing so your browser can fetch Kalshi data securely.
 """
 
 import os
@@ -15,17 +14,14 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
 
 app = Flask(__name__)
-CORS(app)  # Allow your browser to call this server from anywhere
+CORS(app)
 
-# ── CONFIG (set these as Railway environment variables) ────────────────────
-KALSHI_API_KEY_ID    = os.environ.get("KALSHI_API_KEY_ID", "")
-KALSHI_PRIVATE_KEY   = os.environ.get("KALSHI_PRIVATE_KEY", "")  # Full PEM string
-KALSHI_BASE          = "https://trading-api.kalshi.com/trade-api/v2"
+KALSHI_API_KEY_ID  = os.environ.get("KALSHI_API_KEY_ID", "")
+KALSHI_PRIVATE_KEY = os.environ.get("KALSHI_PRIVATE_KEY", "")
+KALSHI_BASE        = "https://trading-api.kalshi.com/trade-api/v2"
 
 
-# ── SIGNING ────────────────────────────────────────────────────────────────
 def load_private_key():
-    """Load RSA private key from environment variable (PEM string)."""
     if not KALSHI_PRIVATE_KEY:
         return None
     try:
@@ -37,13 +33,21 @@ def load_private_key():
 
 
 def signed_headers(method: str, path: str) -> dict:
-    """Generate Kalshi RSA auth headers."""
+    """Generate Kalshi RSA-PSS auth headers."""
     key = load_private_key()
     if not key:
         return {}
     ts = str(int(time.time() * 1000))
-    message = f"{ts}{method.upper()}{path}".encode()
-    sig = key.sign(message, padding.PKCS1v15(), hashes.SHA256())
+    message = f"{ts}{method.upper()}{path}".encode('utf-8')
+    # Kalshi requires RSA-PSS with SHA256
+    sig = key.sign(
+        message,
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=hashes.SHA256.digest_size
+        ),
+        hashes.SHA256()
+    )
     return {
         "KALSHI-ACCESS-KEY":       KALSHI_API_KEY_ID,
         "KALSHI-ACCESS-TIMESTAMP": ts,
@@ -52,7 +56,6 @@ def signed_headers(method: str, path: str) -> dict:
     }
 
 
-# ── ROUTES ─────────────────────────────────────────────────────────────────
 @app.route("/health")
 def health():
     return jsonify({"status": "ok", "kalshi_key_set": bool(KALSHI_API_KEY_ID)})
@@ -60,11 +63,6 @@ def health():
 
 @app.route("/markets")
 def markets():
-    """
-    Fetch open Kalshi markets and return them in a normalized format
-    that matches Polymarket / Manifold so the frontend can treat all
-    three platforms identically.
-    """
     path = "/markets"
     params = {"limit": 200, "status": "open"}
     headers = signed_headers("GET", path)
@@ -103,7 +101,6 @@ def markets():
 
 @app.route("/balance")
 def balance():
-    """Return Kalshi account balance in USD."""
     path = "/portfolio/balance"
     headers = signed_headers("GET", path)
     try:
