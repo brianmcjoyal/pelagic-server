@@ -538,15 +538,15 @@ def run_bot_scan():
 
     BOT_STATE["last_scan"] = now.isoformat()
 
-    if not BOT_CONFIG["enabled"]:
-        return
-
     try:
         all_markets = fetch_all_markets()
         BOT_STATE["last_scan_markets"] = len(all_markets)
 
         mispricings = find_consensus_mispricings(all_markets)
         BOT_STATE["last_scan_mispriced"] = len(mispricings)
+
+        if not BOT_CONFIG["enabled"]:
+            return
 
         for opp in mispricings:
             if BOT_STATE["daily_spent_usd"] >= BOT_CONFIG["max_daily_usd"]:
