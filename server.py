@@ -368,6 +368,34 @@ def similarity(a, b, raw_a="", raw_b=""):
 # Arbitrage scanner (existing)
 # ---------------------------------------------------------------------------
 
+def _build_keyword_index(entries):
+    """Build inverted index: keyword -> set of entry indices."""
+    idx = {}
+    for i, (nq, m) in enumerate(entries):
+        for word in set(nq.split()):
+            if word not in idx:
+                idx[word] = set()
+            idx[word].add(i)
+    return idx
+
+
+def _candidate_pairs(entries, keyword_index, min_shared=2):
+    """Yield (i, j) pairs that share at least min_shared keywords."""
+    seen = set()
+    for i, (nq, _) in enumerate(entries):
+        words = set(nq.split())
+        candidate_counts = {}
+        for w in words:
+            for j in keyword_index.get(w, ()):
+                if j <= i:
+                    continue
+                candidate_counts[j] = candidate_counts.get(j, 0) + 1
+        for j, count in candidate_counts.items():
+            if count >= min_shared and (i, j) not in seen:
+                seen.add((i, j))
+                yield i, j
+
+
 def find_opportunities(all_markets, min_similarity=0.55, max_cost=0.98):
     entries = []
     for m in all_markets:
@@ -376,50 +404,50 @@ def find_opportunities(all_markets, min_similarity=0.55, max_cost=0.98):
             continue
         entries.append((nq, m))
 
+    keyword_index = _build_keyword_index(entries)
     opportunities = []
     seen = set()
 
-    for i, (nq_a, a) in enumerate(entries):
-        for j, (nq_b, b) in enumerate(entries):
-            if j <= i:
-                continue
-            if a["platform"] == b["platform"]:
-                continue
-            pair_key = tuple(sorted([a["platform"] + a["id"], b["platform"] + b["id"]]))
-            if pair_key in seen:
-                continue
-            sim = similarity(nq_a, nq_b, a["question"], b["question"])
-            if sim < min_similarity:
-                continue
-            seen.add(pair_key)
+    for i, j in _candidate_pairs(entries, keyword_index, min_shared=2):
+        nq_a, a = entries[i]
+        nq_b, b = entries[j]
+        if a["platform"] == b["platform"]:
+            continue
+        pair_key = tuple(sorted([a["platform"] + a["id"], b["platform"] + b["id"]]))
+        if pair_key in seen:
+            continue
+        sim = similarity(nq_a, nq_b, a["question"], b["question"])
+        if sim < min_similarity:
+            continue
+        seen.add(pair_key)
 
-            fee_a = PLATFORM_FEES.get(a["platform"], 0)
-            fee_b = PLATFORM_FEES.get(b["platform"], 0)
-            cost_1 = a["yes"] + b["no"]
-            avg_fee = (fee_a + fee_b) / 2
-            profit_1 = (1 - avg_fee) - cost_1
-            cost_2 = a["no"] + b["yes"]
-            profit_2 = (1 - avg_fee) - cost_2
-            best_cost = min(cost_1, cost_2)
-            best_profit = max(profit_1, profit_2)
-            if best_cost >= max_cost or best_profit <= 0:
-                continue
-            if cost_1 <= cost_2:
-                buy_yes_platform, buy_no_platform = a, b
-                cost, profit = cost_1, profit_1
-            else:
-                buy_yes_platform, buy_no_platform = b, a
-                cost, profit = cost_2, profit_2
-            opportunities.append({
-                "question_a": a["question"],
-                "question_b": b["question"],
-                "similarity": round(sim, 3),
-                "buy_yes": {"platform": buy_yes_platform["platform"], "price": buy_yes_platform["yes"], "url": buy_yes_platform["url"]},
-                "buy_no":  {"platform": buy_no_platform["platform"],  "price": buy_no_platform["no"],  "url": buy_no_platform["url"]},
-                "cost": round(cost, 4),
-                "estimated_profit": round(profit, 4),
-                "profit_pct": round(profit / cost * 100, 2) if cost > 0 else 0,
-            })
+        fee_a = PLATFORM_FEES.get(a["platform"], 0)
+        fee_b = PLATFORM_FEES.get(b["platform"], 0)
+        cost_1 = a["yes"] + b["no"]
+        avg_fee = (fee_a + fee_b) / 2
+        profit_1 = (1 - avg_fee) - cost_1
+        cost_2 = a["no"] + b["yes"]
+        profit_2 = (1 - avg_fee) - cost_2
+        best_cost = min(cost_1, cost_2)
+        best_profit = max(profit_1, profit_2)
+        if best_cost >= max_cost or best_profit <= 0:
+            continue
+        if cost_1 <= cost_2:
+            buy_yes_platform, buy_no_platform = a, b
+            cost, profit = cost_1, profit_1
+        else:
+            buy_yes_platform, buy_no_platform = b, a
+            cost, profit = cost_2, profit_2
+        opportunities.append({
+            "question_a": a["question"],
+            "question_b": b["question"],
+            "similarity": round(sim, 3),
+            "buy_yes": {"platform": buy_yes_platform["platform"], "price": buy_yes_platform["yes"], "url": buy_yes_platform["url"]},
+            "buy_no":  {"platform": buy_no_platform["platform"],  "price": buy_no_platform["no"],  "url": buy_no_platform["url"]},
+            "cost": round(cost, 4),
+            "estimated_profit": round(profit, 4),
+            "profit_pct": round(profit / cost * 100, 2) if cost > 0 else 0,
+        })
 
     opportunities.sort(key=lambda x: x["estimated_profit"], reverse=True)
     return opportunities
@@ -720,8 +748,13 @@ def mispriced():
     })
 
 
+_picks_cache = {"data": None, "time": None}
+
 @app.route("/top-picks")
 def top_picks():
+    now = datetime.datetime.utcnow()
+    if _picks_cache["time"] and (now - _picks_cache["time"]).total_seconds() < 25 and _picks_cache["data"] is not None:
+        return jsonify(_picks_cache["data"])
     all_markets = fetch_all_markets()
     picks = []
 
@@ -737,9 +770,24 @@ def top_picks():
         else:
             other_markets.append((nq, m))
 
+    # Build keyword index for other markets for fast lookup
+    other_kw_index = {}
+    for idx_o, (nq_o, om) in enumerate(other_markets):
+        for word in set(nq_o.split()):
+            if word not in other_kw_index:
+                other_kw_index[word] = set()
+            other_kw_index[word].add(idx_o)
+
     for nq_k, km in kalshi_markets:
         matches = []
-        for nq_o, om in other_markets:
+        # Find candidate other markets sharing 2+ keywords
+        candidate_counts = {}
+        for w in set(nq_k.split()):
+            for idx_o in other_kw_index.get(w, ()):
+                candidate_counts[idx_o] = candidate_counts.get(idx_o, 0) + 1
+        candidates = [idx_o for idx_o, cnt in candidate_counts.items() if cnt >= 2]
+        for idx_o in candidates:
+            nq_o, om = other_markets[idx_o]
             sim = similarity(nq_k, nq_o, km["question"], om["question"])
             if sim >= 0.50:
                 matches.append({"platform": om["platform"], "yes": om["yes"], "no": om["no"], "similarity": round(sim, 3)})
@@ -899,7 +947,10 @@ def top_picks():
     for i, p in enumerate(picks):
         p["rank"] = i + 1
 
-    return jsonify({"picks": picks, "total_scanned": len(all_markets)})
+    result = {"picks": picks, "total_scanned": len(all_markets)}
+    _picks_cache["data"] = result
+    _picks_cache["time"] = datetime.datetime.utcnow()
+    return jsonify(result)
 
 
 @app.route("/config", methods=["POST"])
