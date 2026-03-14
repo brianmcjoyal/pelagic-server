@@ -5,6 +5,7 @@ Pelagic — Kalshi API Proxy Server
 import os
 import time
 import base64
+import datetime
 import requests
 from flask import Flask, jsonify
 from flask_cors import CORS
@@ -50,24 +51,36 @@ aJAsTvQqOe5yY1rOZzlIjxak2ucwFpYulsTNzxHcuuyfIdqma/egcw==
 def load_private_key():
     try:
         key = serialization.load_pem_private_key(PRIVATE_KEY_PEM.strip().encode(), password=None, backend=default_backend())
-        print("Key loaded OK")
         return key
     except Exception as e:
         print(f"Key load error: {e}")
         return None
 
 
+def sign_pss_text(private_key, text):
+    message = text.encode("utf-8")
+    signature = private_key.sign(
+        message,
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=padding.PSS.DIGEST_LENGTH
+        ),
+        hashes.SHA256()
+    )
+    return base64.b64encode(signature).decode("utf-8")
+
+
 def signed_headers(method, path):
     key = load_private_key()
     if not key:
         return {}
-    ts = str(int(time.time() * 1000))
-    message = f"{ts}{method.upper()}{path}".encode("utf-8")
-    sig = key.sign(message, padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=hashes.SHA256.digest_size), hashes.SHA256())
+    ts = str(int(datetime.datetime.now().timestamp() * 1000))
+    msg_string = ts + method.upper() + path.split("?")[0]
+    sig = sign_pss_text(key, msg_string)
     return {
         "KALSHI-ACCESS-KEY":       KALSHI_API_KEY_ID,
         "KALSHI-ACCESS-TIMESTAMP": ts,
-        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
+        "KALSHI-ACCESS-SIGNATURE": sig,
         "Content-Type":            "application/json",
     }
 
