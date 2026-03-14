@@ -669,12 +669,26 @@ def balance():
 
 @app.route("/status")
 def status():
+    # If no scan has run yet, do a quick live count
+    markets = BOT_STATE["last_scan_markets"]
+    mispriced = BOT_STATE["last_scan_mispriced"]
+    if markets == 0 and BOT_STATE["last_scan"] is None:
+        try:
+            all_m = fetch_all_markets()
+            markets = len(all_m)
+            BOT_STATE["last_scan_markets"] = markets
+            mis = find_consensus_mispricings(all_m)
+            mispriced = len(mis)
+            BOT_STATE["last_scan_mispriced"] = mispriced
+            BOT_STATE["last_scan"] = datetime.datetime.utcnow().isoformat()
+        except Exception:
+            pass
     return jsonify({
         "bot_enabled": BOT_CONFIG["enabled"],
         "config": BOT_CONFIG,
         "last_scan": BOT_STATE["last_scan"],
-        "last_scan_markets": BOT_STATE["last_scan_markets"],
-        "last_scan_mispriced": BOT_STATE["last_scan_mispriced"],
+        "last_scan_markets": markets,
+        "last_scan_mispriced": mispriced,
         "trades_today": len(BOT_STATE["trades_today"]),
         "daily_spent_usd": BOT_STATE["daily_spent_usd"],
         "total_trades_all_time": len(BOT_STATE["all_trades"]),
@@ -1018,33 +1032,36 @@ a:hover { text-decoration: underline; }
 .ticker-bar span { margin-right: 24px; }
 .ticker-bar .up { color: #00ff88; }
 .ticker-bar .down { color: #ff4444; }
-/* Top Picks */
+/* Top Picks - compact grid */
 .top-picks { margin-bottom: 16px; }
-.pick-card { background: #0a0a0a; border: 1px solid #333; padding: 14px 16px; margin-bottom: 8px; position: relative; }
+.picks-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+@media (max-width: 900px) { .picks-grid { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 600px) { .picks-grid { grid-template-columns: repeat(2, 1fr); } }
+.pick-card { background: #0a0a0a; border: 1px solid #333; padding: 10px; position: relative; display: flex; flex-direction: column; }
 .pick-card:hover { border-color: #ff8c00; }
-.pick-rank { position: absolute; top: 10px; right: 14px; font-size: 28px; font-weight: 800; color: #1a1a1a; font-family: 'Courier New', monospace; }
-.pick-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
-.pick-signal { font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 2px; text-transform: uppercase; letter-spacing: 1px; }
+.pick-rank { position: absolute; top: 6px; right: 8px; font-size: 20px; font-weight: 800; color: #1a1a1a; font-family: 'Courier New', monospace; }
+.pick-header { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; flex-wrap: wrap; }
+.pick-signal { font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 2px; text-transform: uppercase; letter-spacing: 0.5px; }
 .pick-signal.yes { background: rgba(0,255,136,0.12); color: #00ff88; border: 1px solid #00ff88; }
 .pick-signal.no { background: rgba(255,68,68,0.12); color: #ff4444; border: 1px solid #ff4444; }
-.pick-conf { font-size: 9px; padding: 2px 8px; border-radius: 2px; text-transform: uppercase; letter-spacing: 1px; font-weight: 600; }
+.pick-conf { font-size: 8px; padding: 1px 5px; border-radius: 2px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
 .pick-conf.high { color: #00ff88; border: 1px solid #00ff88; }
 .pick-conf.medium { color: #ff8c00; border: 1px solid #ff8c00; }
 .pick-conf.low { color: #ff4444; border: 1px solid #ff4444; }
-.pick-question { font-size: 13px; color: #ddd; margin-bottom: 6px; font-weight: 600; }
+.pick-question { font-size: 10px; color: #ddd; margin-bottom: 4px; font-weight: 600; line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .pick-question a { color: #ddd; }
 .pick-question a:hover { color: #ff8c00; }
-.pick-edge { font-size: 11px; color: #ff8c00; margin-bottom: 4px; font-weight: 600; }
-.pick-thesis { font-size: 11px; color: #999; line-height: 1.5; margin-bottom: 10px; }
-.pick-footer { display: flex; align-items: center; gap: 14px; }
-.pick-meta { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 1px; }
+.pick-edge { font-size: 9px; color: #ff8c00; margin-bottom: 2px; font-weight: 600; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.pick-thesis { display: none; }
+.pick-chart { width: 100%; height: 60px; margin: 4px 0; position: relative; flex-shrink: 0; }
+.pick-chart canvas { width: 100%; height: 100%; }
+.pick-footer { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: auto; }
+.pick-meta { font-size: 8px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; }
 .pick-meta b { color: #ff8c00; }
-.pick-profit { font-size: 12px; color: #00ff88; font-weight: 700; font-family: 'Courier New', monospace; }
-.pick-execute { background: transparent; color: #00ff88; border: 1px solid #00ff88; padding: 6px 20px; border-radius: 2px; cursor: pointer; font-size: 11px; font-weight: 700; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 1px; margin-left: auto; }
+.pick-profit { font-size: 10px; color: #00ff88; font-weight: 700; font-family: 'Courier New', monospace; }
+.pick-execute { background: transparent; color: #00ff88; border: 1px solid #00ff88; padding: 4px 8px; border-radius: 2px; cursor: pointer; font-size: 9px; font-weight: 700; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 0.5px; width: 100%; margin-top: 6px; }
 .pick-execute:hover { background: #00ff88; color: #000; }
 .pick-execute:disabled { border-color: #333; color: #555; cursor: not-allowed; background: transparent; }
-.pick-chart { width: 100%; height: 80px; margin: 8px 0; position: relative; }
-.pick-chart canvas { width: 100%; height: 100%; }
 </style>
 </head>
 <body>
@@ -1113,7 +1130,7 @@ a:hover { text-decoration: underline; }
 
 <div class="top-picks">
   <div class="section-title">Top 5 Picks <span class="badge" id="picks-badge">0</span><button class="refresh-btn" onclick="loadTopPicks()">Refresh</button></div>
-  <div id="top-picks-list"><div class="loading">Analyzing markets...</div></div>
+  <div id="top-picks-list" class="picks-grid"><div class="loading" style="grid-column:1/-1">Analyzing markets...</div></div>
 </div>
 
 <div class="section">
@@ -1307,13 +1324,13 @@ function drawPickChart(canvasId, prices, signal) {
 }
 
 async function loadTopPicks() {
-  document.getElementById('top-picks-list').innerHTML = '<div class="loading">Scanning 4 platforms for top opportunities...</div>';
+  document.getElementById('top-picks-list').innerHTML = '<div class="loading" style="grid-column:1/-1">Scanning 4 platforms...</div>';
   try {
     const data = await fetch(API + '/top-picks').then(r => r.json());
     const picks = data.picks || [];
     document.getElementById('picks-badge').textContent = picks.length;
     if (picks.length === 0) {
-      document.getElementById('top-picks-list').innerHTML = '<div class="empty">No high-confidence picks right now. Markets are efficiently priced.</div>';
+      document.getElementById('top-picks-list').innerHTML = '<div class="empty" style="grid-column:1/-1">No picks right now. Markets are efficiently priced.</div>';
       return;
     }
     let html = '';
@@ -1348,7 +1365,7 @@ async function loadTopPicks() {
       drawPickChart('pick-chart-' + idx, p.prices || {}, p.signal);
     });
   } catch(e) {
-    document.getElementById('top-picks-list').innerHTML = '<div class="empty">Error: ' + e.message + '</div>';
+    document.getElementById('top-picks-list').innerHTML = '<div class="empty" style="grid-column:1/-1">Error: ' + e.message + '</div>';
   }
 }
 
