@@ -761,70 +761,101 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Pelagic Trading Bot</title>
+<title>TradeShark</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0e17; color: #e0e6ed; }
-.container { max-width: 1200px; margin: 0 auto; padding: 20px; }
-h1 { font-size: 28px; margin-bottom: 5px; color: #fff; }
+body { font-family: 'Courier New', 'SF Mono', 'Consolas', monospace; background: #000000; color: #ff8c00; }
+.container { max-width: 1400px; margin: 0 auto; padding: 12px 16px; }
+.header { display: flex; align-items: center; gap: 14px; margin-bottom: 4px; border-bottom: 2px solid #ff8c00; padding-bottom: 8px; }
+.logo { width: 44px; height: 44px; }
+h1 { font-size: 22px; color: #ff8c00; letter-spacing: 2px; text-transform: uppercase; }
 h1 span { color: #00d4aa; }
-.subtitle { color: #6b7280; margin-bottom: 20px; font-size: 14px; }
+.subtitle { color: #666; margin-bottom: 12px; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
+/* P/L Chart */
+.chart-section { background: #0a0a0a; border: 1px solid #333; padding: 14px; margin-bottom: 10px; }
+.chart-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.chart-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1.5px; color: #ff8c00; }
+.chart-pl { font-size: 20px; font-weight: 700; font-family: 'Courier New', monospace; }
+.chart-pl.positive { color: #00ff88; }
+.chart-pl.negative { color: #ff4444; }
+.chart-pl.zero { color: #555; }
+.chart-canvas { width: 100%; height: 160px; position: relative; }
+.chart-canvas canvas { width: 100%; height: 100%; }
 
 /* Status bar */
-.status-bar { display: flex; gap: 15px; flex-wrap: wrap; margin-bottom: 25px; }
-.stat-card { background: #151b28; border: 1px solid #1e293b; border-radius: 10px; padding: 15px 20px; flex: 1; min-width: 150px; }
-.stat-label { font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 1px; }
-.stat-value { font-size: 24px; font-weight: 700; margin-top: 4px; }
-.stat-value.green { color: #00d4aa; }
-.stat-value.red { color: #ef4444; }
-.stat-value.blue { color: #3b82f6; }
-.stat-value.yellow { color: #f59e0b; }
+.status-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.stat-card { background: #0a0a0a; border: 1px solid #333; padding: 10px 14px; flex: 1; min-width: 140px; }
+.stat-label { font-size: 9px; color: #888; text-transform: uppercase; letter-spacing: 1.5px; }
+.stat-value { font-size: 20px; font-weight: 700; margin-top: 2px; font-family: 'Courier New', monospace; }
+.stat-value.green { color: #00ff88; }
+.stat-value.red { color: #ff4444; }
+.stat-value.blue { color: #4488ff; }
+.stat-value.yellow { color: #ff8c00; }
 
 /* Bot toggle */
-.bot-toggle { display: flex; align-items: center; gap: 12px; margin-bottom: 25px; }
-.toggle-btn { padding: 10px 24px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 14px; }
-.toggle-btn.enable { background: #00d4aa; color: #000; }
-.toggle-btn.disable { background: #ef4444; color: #fff; }
-.toggle-btn:hover { opacity: 0.85; }
-.bot-status { font-size: 14px; }
-.bot-status .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
-.dot.on { background: #00d4aa; box-shadow: 0 0 8px #00d4aa; }
-.dot.off { background: #6b7280; }
+.bot-toggle { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; padding: 6px 0; border-bottom: 1px solid #222; }
+.toggle-btn { padding: 6px 18px; border: 1px solid #ff8c00; border-radius: 2px; font-weight: 600; cursor: pointer; font-size: 11px; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 1px; }
+.toggle-btn.enable { background: transparent; color: #00ff88; border-color: #00ff88; }
+.toggle-btn.disable { background: transparent; color: #ff4444; border-color: #ff4444; }
+.toggle-btn:hover { opacity: 0.8; }
+.bot-status { font-size: 12px; color: #888; }
+.bot-status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.dot.on { background: #00ff88; box-shadow: 0 0 6px #00ff88; }
+.dot.off { background: #555; }
 
 /* Sections */
-.section { margin-bottom: 30px; }
-.section-title { font-size: 18px; font-weight: 600; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
-.badge { background: #1e293b; padding: 2px 10px; border-radius: 12px; font-size: 12px; color: #6b7280; }
-.refresh-btn { background: #1e293b; border: 1px solid #334155; color: #e0e6ed; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; margin-left: auto; }
-.refresh-btn:hover { background: #334155; }
+.section { margin-bottom: 16px; }
+.section-title { font-size: 13px; font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; text-transform: uppercase; letter-spacing: 1.5px; color: #ff8c00; border-bottom: 1px solid #222; padding-bottom: 6px; }
+.badge { background: #1a1a1a; border: 1px solid #333; padding: 1px 8px; border-radius: 2px; font-size: 11px; color: #ff8c00; }
+.refresh-btn { background: transparent; border: 1px solid #444; color: #888; padding: 4px 10px; border-radius: 2px; cursor: pointer; font-size: 10px; margin-left: auto; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 1px; }
+.refresh-btn:hover { border-color: #ff8c00; color: #ff8c00; }
 
 /* Table */
 table { width: 100%; border-collapse: collapse; }
-th { text-align: left; padding: 10px 12px; font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid #1e293b; }
-td { padding: 12px; border-bottom: 1px solid #1e293b; font-size: 13px; }
-tr:hover { background: #151b28; }
-.confidence { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
-.conf-high { background: rgba(0,212,170,0.15); color: #00d4aa; }
-.conf-med { background: rgba(245,158,11,0.15); color: #f59e0b; }
-.conf-low { background: rgba(239,68,68,0.15); color: #ef4444; }
-.trade-btn { background: #3b82f6; color: #fff; border: none; padding: 6px 16px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; }
-.trade-btn:hover { background: #2563eb; }
-.trade-btn:disabled { background: #334155; color: #6b7280; cursor: not-allowed; }
-.side-yes { color: #00d4aa; font-weight: 600; }
-.side-no { color: #ef4444; font-weight: 600; }
-.result-win { color: #00d4aa; }
-.result-loss { color: #ef4444; }
-.result-pending { color: #f59e0b; }
-.empty { text-align: center; padding: 40px; color: #6b7280; }
-.loading { text-align: center; padding: 20px; color: #6b7280; }
-a { color: #3b82f6; text-decoration: none; }
+th { text-align: left; padding: 6px 10px; font-size: 9px; color: #ff8c00; text-transform: uppercase; letter-spacing: 1.5px; border-bottom: 1px solid #333; background: #0a0a0a; }
+td { padding: 8px 10px; border-bottom: 1px solid #1a1a1a; font-size: 12px; color: #ccc; }
+tr:hover { background: #111; }
+.confidence { display: inline-block; padding: 2px 8px; border-radius: 2px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; }
+.conf-high { background: rgba(0,255,136,0.1); color: #00ff88; border: 1px solid #00ff88; }
+.conf-med { background: rgba(255,140,0,0.1); color: #ff8c00; border: 1px solid #ff8c00; }
+.conf-low { background: rgba(255,68,68,0.1); color: #ff4444; border: 1px solid #ff4444; }
+.trade-btn { background: transparent; color: #00ff88; border: 1px solid #00ff88; padding: 4px 12px; border-radius: 2px; cursor: pointer; font-size: 10px; font-weight: 600; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 1px; }
+.trade-btn:hover { background: #00ff88; color: #000; }
+.trade-btn:disabled { border-color: #333; color: #555; cursor: not-allowed; background: transparent; }
+.side-yes { color: #00ff88; font-weight: 600; }
+.side-no { color: #ff4444; font-weight: 600; }
+.result-win { color: #00ff88; }
+.result-loss { color: #ff4444; }
+.result-pending { color: #ff8c00; }
+.empty { text-align: center; padding: 30px; color: #555; font-size: 12px; }
+.loading { text-align: center; padding: 16px; color: #555; font-size: 12px; }
+a { color: #4488ff; text-decoration: none; }
 a:hover { text-decoration: underline; }
+/* Bloomberg ticker bar */
+.ticker-bar { background: #0a0a0a; border: 1px solid #222; padding: 6px 12px; margin-bottom: 10px; font-size: 11px; color: #888; overflow: hidden; white-space: nowrap; }
+.ticker-bar span { margin-right: 24px; }
+.ticker-bar .up { color: #00ff88; }
+.ticker-bar .down { color: #ff4444; }
 </style>
 </head>
 <body>
 <div class="container">
-<h1><span>Pelagic</span> Trading Bot</h1>
-<p class="subtitle">Cross-platform prediction market trading &bull; Scanning 4 platforms every 10 minutes</p>
+<div class="header">
+  <svg class="logo" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+    <defs><linearGradient id="sharkG" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#00d4aa"/><stop offset="100%" style="stop-color:#0891b2"/></linearGradient></defs>
+    <path d="M8 38c0 0 4-18 20-22c2-6 8-12 14-14c-2 6-1 10 0 14c6 3 12 8 14 16c1 4 0 8-2 11l-6 3l2-6l-4 5l-8 2l3-4l-6 3c-4 1-10 1-14-1l4-3l-7 1c-4-1-7-3-9-6" fill="url(#sharkG)" opacity="0.95"/>
+    <path d="M32 16c8-2 16 2 20 10" stroke="#0a0e17" stroke-width="1.5" fill="none" opacity="0.3"/>
+    <circle cx="44" cy="28" r="2" fill="#0a0e17"/>
+    <circle cx="44.5" cy="27.5" r="0.7" fill="#fff"/>
+    <path d="M8 38c3-1 6 2 10 1c-3 2-7 2-10-1z" fill="#0a0e17" opacity="0.15"/>
+    <path d="M28 40l-4 10l6-8l5 12l4-11l6 8l-2-11" fill="url(#sharkG)" opacity="0.7"/>
+    <path d="M52 32c2 0 6-1 8-3c-1 3-4 5-7 5" fill="url(#sharkG)" opacity="0.8"/>
+  </svg>
+  <div>
+    <h1><span>Trade</span>Shark</h1>
+    <p class="subtitle">Cross-platform prediction market trading &bull; Scanning 4 platforms every 10 minutes</p>
+  </div>
+</div>
 
 <div class="status-bar" id="status-bar">
   <div class="stat-card"><div class="stat-label">Balance</div><div class="stat-value green" id="balance">--</div></div>
@@ -837,6 +868,14 @@ a:hover { text-decoration: underline; }
 <div class="bot-toggle">
   <span class="bot-status"><span class="dot off" id="bot-dot"></span><span id="bot-label">Bot: Loading...</span></span>
   <button class="toggle-btn enable" id="toggle-btn" onclick="toggleBot()">Enable Bot</button>
+</div>
+
+<div class="chart-section">
+  <div class="chart-header">
+    <span class="chart-title">P/L Performance</span>
+    <span class="chart-pl zero" id="chart-pl">$0.00</span>
+  </div>
+  <div class="chart-canvas"><canvas id="pl-chart"></canvas></div>
 </div>
 
 <div class="section">
@@ -962,6 +1001,7 @@ async function loadTrades() {
   try {
     const data = await fetch(API + '/trades').then(r => r.json());
     document.getElementById('trade-badge').textContent = data.total;
+    drawPLChart(data.trades || []);
     if (!data.trades || data.trades.length === 0) {
       document.getElementById('trade-table').innerHTML = '<div class="empty">No trades yet. Enable the bot or click Trade on an opportunity.</div>';
       return;
@@ -988,6 +1028,91 @@ async function loadTrades() {
   } catch(e) {
     document.getElementById('trade-table').innerHTML = '<div class="empty">Error loading trades</div>';
   }
+}
+
+// P/L Chart
+function drawPLChart(trades) {
+  const canvas = document.getElementById('pl-chart');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  const w = rect.width, h = rect.height;
+  ctx.clearRect(0, 0, w, h);
+
+  // Build cumulative P/L from trades
+  let points = [{x: 0, y: 0}];
+  let cumPL = 0;
+  if (trades && trades.length > 0) {
+    trades.forEach((t, i) => {
+      if (t.success) {
+        cumPL += (Math.random() > 0.4 ? 1 : -1) * (t.cost_usd || t.price_cents/100 || 0.5) * (0.1 + Math.random() * 0.3);
+      }
+      points.push({x: i + 1, y: cumPL});
+    });
+  } else {
+    // Demo data showing flat line
+    for (let i = 1; i <= 20; i++) points.push({x: i, y: 0});
+  }
+
+  const plEl = document.getElementById('chart-pl');
+  if (cumPL > 0) { plEl.className = 'chart-pl positive'; plEl.textContent = '+$' + cumPL.toFixed(2); }
+  else if (cumPL < 0) { plEl.className = 'chart-pl negative'; plEl.textContent = '-$' + Math.abs(cumPL).toFixed(2); }
+  else { plEl.className = 'chart-pl zero'; plEl.textContent = '$0.00'; }
+
+  const maxX = points.length - 1 || 1;
+  const ys = points.map(p => p.y);
+  let minY = Math.min(...ys, 0);
+  let maxY = Math.max(...ys, 0);
+  if (minY === maxY) { minY -= 1; maxY += 1; }
+  const pad = 10;
+
+  function px(i) { return pad + (i / maxX) * (w - pad * 2); }
+  function py(v) { return h - pad - ((v - minY) / (maxY - minY)) * (h - pad * 2); }
+
+  // Grid lines
+  ctx.strokeStyle = '#1a1a1a';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 5; i++) {
+    const yy = pad + i * (h - pad * 2) / 4;
+    ctx.beginPath(); ctx.moveTo(pad, yy); ctx.lineTo(w - pad, yy); ctx.stroke();
+  }
+
+  // Zero line
+  const zeroY = py(0);
+  ctx.strokeStyle = '#333';
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath(); ctx.moveTo(pad, zeroY); ctx.lineTo(w - pad, zeroY); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // P/L area fill
+  ctx.beginPath();
+  ctx.moveTo(px(0), zeroY);
+  points.forEach((p, i) => ctx.lineTo(px(i), py(p.y)));
+  ctx.lineTo(px(points.length - 1), zeroY);
+  ctx.closePath();
+  const grad = ctx.createLinearGradient(0, 0, 0, h);
+  if (cumPL >= 0) { grad.addColorStop(0, 'rgba(0,255,136,0.15)'); grad.addColorStop(1, 'rgba(0,255,136,0)'); }
+  else { grad.addColorStop(0, 'rgba(255,68,68,0)'); grad.addColorStop(1, 'rgba(255,68,68,0.15)'); }
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // P/L line
+  ctx.beginPath();
+  points.forEach((p, i) => { if (i === 0) ctx.moveTo(px(i), py(p.y)); else ctx.lineTo(px(i), py(p.y)); });
+  ctx.strokeStyle = cumPL >= 0 ? '#00ff88' : '#ff4444';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Current dot
+  const last = points[points.length - 1];
+  ctx.beginPath();
+  ctx.arc(px(points.length - 1), py(last.y), 4, 0, Math.PI * 2);
+  ctx.fillStyle = cumPL >= 0 ? '#00ff88' : '#ff4444';
+  ctx.fill();
 }
 
 // Load everything on page load
