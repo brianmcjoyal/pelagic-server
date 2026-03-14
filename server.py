@@ -44,7 +44,7 @@ STOP_WORDS = {
     "yes", "if", "than", "what", "who", "how", "when", "where", "which",
 }
 
-TIMEOUT = 15
+TIMEOUT = 8
 
 # ---------------------------------------------------------------------------
 # Bot configuration and state
@@ -272,7 +272,13 @@ ALL_FETCHERS = {
 }
 
 
+_market_cache = {"data": [], "time": None}
+
 def fetch_all_markets():
+    # Cache for 20 seconds to avoid hammering APIs on concurrent requests
+    now = datetime.datetime.utcnow()
+    if _market_cache["time"] and (now - _market_cache["time"]).total_seconds() < 20 and _market_cache["data"]:
+        return _market_cache["data"]
     all_markets = []
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = {pool.submit(fn): name for name, fn in ALL_FETCHERS.items()}
@@ -281,6 +287,9 @@ def fetch_all_markets():
                 all_markets.extend(future.result())
             except Exception:
                 continue
+    if all_markets:
+        _market_cache["data"] = all_markets
+        _market_cache["time"] = now
     return all_markets
 
 # ---------------------------------------------------------------------------
@@ -602,6 +611,7 @@ scheduler.add_job(
     seconds=BOT_CONFIG["scan_interval_seconds"],
     id="consensus_scan",
     replace_existing=True,
+    next_run_time=datetime.datetime.utcnow(),  # run immediately on startup
 )
 scheduler.start()
 atexit.register(scheduler.shutdown)
@@ -673,20 +683,8 @@ def balance():
 
 @app.route("/status")
 def status():
-    # If no scan has run yet, do a quick live count
     markets = BOT_STATE["last_scan_markets"]
     mispriced = BOT_STATE["last_scan_mispriced"]
-    if markets == 0 and BOT_STATE["last_scan"] is None:
-        try:
-            all_m = fetch_all_markets()
-            markets = len(all_m)
-            BOT_STATE["last_scan_markets"] = markets
-            mis = find_consensus_mispricings(all_m)
-            mispriced = len(mis)
-            BOT_STATE["last_scan_mispriced"] = mispriced
-            BOT_STATE["last_scan"] = datetime.datetime.utcnow().isoformat()
-        except Exception:
-            pass
     return jsonify({
         "bot_enabled": BOT_CONFIG["enabled"],
         "config": BOT_CONFIG,
