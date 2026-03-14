@@ -1,6 +1,5 @@
 """
 Pelagic — Kalshi API Proxy Server
-Handles RSA-PSS request signing so your browser can fetch Kalshi data securely.
 """
 
 import os
@@ -23,23 +22,27 @@ KALSHI_BASE        = "https://trading-api.kalshi.com/trade-api/v2"
 
 def load_private_key():
     if not KALSHI_PRIVATE_KEY:
+        print("ERROR: KALSHI_PRIVATE_KEY is empty")
         return None
     try:
-        pem = KALSHI_PRIVATE_KEY.replace("\\n", "\n").encode()
-        return serialization.load_pem_private_key(pem, password=None, backend=default_backend())
+        pem = KALSHI_PRIVATE_KEY.replace("\\n", "\n").strip()
+        if "BEGIN" not in pem:
+            pem = "-----BEGIN RSA PRIVATE KEY-----\n" + pem + "\n-----END RSA PRIVATE KEY-----\n"
+        print(f"Key starts with: {pem[:50]}")
+        key = serialization.load_pem_private_key(pem.encode(), password=None, backend=default_backend())
+        print("Key loaded successfully!")
+        return key
     except Exception as e:
         print(f"Key load error: {e}")
         return None
 
 
 def signed_headers(method: str, path: str) -> dict:
-    """Generate Kalshi RSA-PSS auth headers."""
     key = load_private_key()
     if not key:
         return {}
     ts = str(int(time.time() * 1000))
     message = f"{ts}{method.upper()}{path}".encode('utf-8')
-    # Kalshi requires RSA-PSS with SHA256
     sig = key.sign(
         message,
         padding.PSS(
@@ -58,7 +61,13 @@ def signed_headers(method: str, path: str) -> dict:
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "kalshi_key_set": bool(KALSHI_API_KEY_ID)})
+    key = load_private_key()
+    return jsonify({
+        "status": "ok",
+        "kalshi_key_set": bool(KALSHI_API_KEY_ID),
+        "private_key_loaded": key is not None,
+        "key_preview": KALSHI_PRIVATE_KEY[:40] if KALSHI_PRIVATE_KEY else "empty"
+    })
 
 
 @app.route("/markets")
@@ -67,13 +76,12 @@ def markets():
     params = {"limit": 200, "status": "open"}
     headers = signed_headers("GET", path)
 
+    if not headers:
+        return jsonify({"error": "Failed to load private key", "markets": []}), 200
+
     try:
-        resp = requests.get(
-            KALSHI_BASE + path,
-            headers=headers,
-            params=params,
-            timeout=10
-        )
+        resp = requests.get(KALSHI_BASE + path, headers=headers, params=params, timeout=10)
+        print(f"Kalshi response: {resp.status_code}")
         resp.raise_for_status()
         raw = resp.json().get("markets", [])
     except Exception as e:
