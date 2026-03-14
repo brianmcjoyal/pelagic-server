@@ -860,7 +860,7 @@ def top_picks():
 
     # Strategy 3: Best Kalshi value plays (high implied probability divergence from 50/50)
     # Fill remaining slots with the most volatile/interesting Kalshi markets
-    if len(picks) < 5:
+    if len(picks) < 10:
         sorted_kalshi = sorted(kalshi_markets, key=lambda x: abs(x[1]["yes"] - 0.5))
         for nq_k, km in sorted_kalshi:
             if any(p["kalshi_ticker"] == km["id"] for p in picks):
@@ -892,12 +892,12 @@ def top_picks():
                 "score": 0.01,
                 "prices": {"kalshi_yes": round(km["yes"] * 100, 1), "kalshi_no": round(km["no"] * 100, 1)},
             })
-            if len(picks) >= 5:
+            if len(picks) >= 10:
                 break
 
-    # Sort by score (best opportunities first) and take top 5
+    # Sort by score (best opportunities first) and take top 10
     picks.sort(key=lambda x: x["score"], reverse=True)
-    picks = picks[:5]
+    picks = picks[:10]
     for i, p in enumerate(picks):
         p["rank"] = i + 1
 
@@ -1144,7 +1144,7 @@ a:hover { text-decoration: underline; }
 </div>
 
 <div class="top-picks">
-  <div class="section-title">Top 5 Picks <span class="badge" id="picks-badge">0</span><button class="refresh-btn" onclick="loadTopPicks()">Refresh</button></div>
+  <div class="section-title">Top 10 Picks <span class="badge" id="picks-badge">0</span><button class="refresh-btn" onclick="loadTopPicks()">Refresh</button></div>
   <div id="top-picks-list" class="picks-grid"><div class="loading" style="grid-column:1/-1">Analyzing markets...</div></div>
 </div>
 
