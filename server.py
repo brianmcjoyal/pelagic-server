@@ -15,8 +15,8 @@ from cryptography.hazmat.backends import default_backend
 app = Flask(__name__)
 CORS(app)
 
-KALSHI_API_KEY_ID  = os.environ.get("KALSHI_API_KEY_ID", "b5321140-8a40-47f5-a99e-edff618c887c")
-KALSHI_BASE        = "https://trading-api.kalshi.com/trade-api/v2"
+KALSHI_API_KEY_ID = os.environ.get("KALSHI_API_KEY_ID", "b5321140-8a40-47f5-a99e-edff618c887c")
+KALSHI_BASE       = "https://trading-api.kalshi.com/trade-api/v2"
 
 PRIVATE_KEY_PEM = """-----BEGIN RSA PRIVATE KEY-----
 MIIEpAIBAAKCAQEA4oW7ktFaur26QL9GG4/2fddvEJXlSyAlQmthV/F9jX9jK/0D
@@ -46,25 +46,24 @@ zsBg2A08Rp5kk/VS5sEtYjTzbVtSptmX5iPvExUHRJnVpEcndvsRVvUIwTu5QZuh
 aJAsTvQqOe5yY1rOZzlIjxak2ucwFpYulsTNzxHcuuyfIdqma/egcw==
 -----END RSA PRIVATE KEY-----"""
 
+
 def load_private_key():
     try:
         key = serialization.load_pem_private_key(PRIVATE_KEY_PEM.strip().encode(), password=None, backend=default_backend())
+        print("Key loaded OK")
         return key
     except Exception as e:
         print(f"Key load error: {e}")
         return None
 
-def signed_headers(method: str, path: str) -> dict:
+
+def signed_headers(method, path):
     key = load_private_key()
     if not key:
         return {}
     ts = str(int(time.time() * 1000))
-    message = f"{ts}{method.upper()}{path}".encode('utf-8')
-    sig = key.sign(
-        message,
-        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=hashes.SHA256.digest_size),
-        hashes.SHA256()
-    )
+    message = f"{ts}{method.upper()}{path}".encode("utf-8")
+    sig = key.sign(message, padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=hashes.SHA256.digest_size), hashes.SHA256())
     return {
         "KALSHI-ACCESS-KEY":       KALSHI_API_KEY_ID,
         "KALSHI-ACCESS-TIMESTAMP": ts,
@@ -72,10 +71,12 @@ def signed_headers(method: str, path: str) -> dict:
         "Content-Type":            "application/json",
     }
 
+
 @app.route("/health")
 def health():
-    key = load_private_key()
-    return jsonify({"status": "ok", "private_key_loaded": key is not None})
+    k = load_private_key()
+    return jsonify({"status": "ok", "private_key_loaded": k is not None})
+
 
 @app.route("/markets")
 def markets():
@@ -107,6 +108,7 @@ def markets():
             continue
     return jsonify({"markets": normalized})
 
+
 @app.route("/balance")
 def balance():
     path = "/portfolio/balance"
@@ -117,6 +119,7 @@ def balance():
         return jsonify({"balance_usd": resp.json().get("balance", 0) / 100})
     except Exception as e:
         return jsonify({"error": str(e)})
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
