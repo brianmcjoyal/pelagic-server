@@ -51,8 +51,8 @@ TIMEOUT = 15
 # ---------------------------------------------------------------------------
 BOT_CONFIG = {
     "enabled": False,
-    "max_bet_usd": 5.0,
-    "max_daily_usd": 20.0,
+    "max_bet_usd": 10.0,
+    "max_daily_usd": 50.0,
     "min_deviation": 0.15,
     "min_platforms": 2,
     "scan_interval_seconds": 30,
@@ -496,7 +496,7 @@ def place_kalshi_order(ticker, side, price_cents, count=1):
         "type": "limit",
         "count": count,
         "client_order_id": str(uuid.uuid4()),
-        "time_in_force": "fill_or_kill",
+        "time_in_force": "gtc",
     }
     if side == "yes":
         payload["yes_price"] = price_cents
@@ -552,21 +552,25 @@ def run_bot_scan():
             if BOT_STATE["daily_spent_usd"] >= BOT_CONFIG["max_daily_usd"]:
                 break
 
-            cost_usd = opp["price_cents"] / 100.0
+            pc = opp["price_cents"]
+            count = max(1, 500 // pc) if pc > 0 else 1  # target $5 per trade
+            cost_usd = (pc * count) / 100.0
             if cost_usd > BOT_CONFIG["max_bet_usd"]:
-                continue
+                count = max(1, int(BOT_CONFIG["max_bet_usd"] * 100 / pc))
+                cost_usd = (pc * count) / 100.0
             if BOT_STATE["daily_spent_usd"] + cost_usd > BOT_CONFIG["max_daily_usd"]:
                 continue
 
             side = opp["signal"].replace("buy_", "")
-            result = place_kalshi_order(opp["kalshi_ticker"], side, opp["price_cents"], count=1)
+            result = place_kalshi_order(opp["kalshi_ticker"], side, pc, count=count)
 
             trade_record = {
                 "timestamp": now.isoformat(),
                 "ticker": opp["kalshi_ticker"],
                 "question": opp["kalshi_question"],
                 "side": side,
-                "price_cents": opp["price_cents"],
+                "price_cents": pc,
+                "count": count,
                 "cost_usd": cost_usd,
                 "deviation": opp["deviation"],
                 "consensus_price": opp["consensus_yes_price"],
@@ -920,14 +924,17 @@ def execute_trade():
     price_cents = data.get("price_cents")
     if not all([ticker, side, price_cents]):
         return jsonify({"error": "Missing ticker, side, or price_cents"}), 400
-    result = place_kalshi_order(ticker, side, int(price_cents), count=1)
+    pc = int(price_cents)
+    count = max(1, 500 // pc) if pc > 0 else 1  # target $5 per trade
+    result = place_kalshi_order(ticker, side, pc, count=count)
     trade_record = {
         "timestamp": datetime.datetime.utcnow().isoformat(),
         "ticker": ticker,
         "question": data.get("question", ""),
         "side": side,
-        "price_cents": int(price_cents),
-        "cost_usd": int(price_cents) / 100.0,
+        "price_cents": pc,
+        "count": count,
+        "cost_usd": (pc * count) / 100.0,
         "deviation": data.get("deviation", 0),
         "consensus_price": data.get("consensus_price", 0),
         "kalshi_price": data.get("kalshi_price", 0),
@@ -1062,6 +1069,14 @@ a:hover { text-decoration: underline; }
 .pick-execute { background: transparent; color: #00ff88; border: 1px solid #00ff88; padding: 4px 8px; border-radius: 2px; cursor: pointer; font-size: 9px; font-weight: 700; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 0.5px; width: 100%; margin-top: 6px; }
 .pick-execute:hover { background: #00ff88; color: #000; }
 .pick-execute:disabled { border-color: #333; color: #555; cursor: not-allowed; background: transparent; }
+/* Toast notifications */
+.toast-container { position: fixed; top: 16px; right: 16px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+.toast { pointer-events: auto; padding: 12px 18px; border-radius: 3px; font-size: 11px; font-family: 'Courier New', monospace; color: #fff; max-width: 380px; animation: toastIn 0.3s ease, toastOut 0.4s ease 4.6s; opacity: 0; word-break: break-word; }
+.toast.success { background: #0d2818; border: 1px solid #00ff88; color: #00ff88; }
+.toast.error { background: #2a0a0a; border: 1px solid #ff4444; color: #ff4444; }
+.toast.info { background: #1a1a0a; border: 1px solid #ff8c00; color: #ff8c00; }
+@keyframes toastIn { from { opacity: 0; transform: translateX(40px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes toastOut { from { opacity: 1; } to { opacity: 0; } }
 </style>
 </head>
 <body>
@@ -1144,8 +1159,20 @@ a:hover { text-decoration: underline; }
 </div>
 </div>
 
+<div class="toast-container" id="toast-container"></div>
+
 <script>
 const API = window.location.origin;
+
+function showToast(msg, type) {
+  const c = document.getElementById('toast-container');
+  const t = document.createElement('div');
+  t.className = 'toast ' + type;
+  t.textContent = msg;
+  c.appendChild(t);
+  requestAnimationFrame(() => t.style.opacity = '1');
+  setTimeout(() => { t.remove(); }, 5000);
+}
 
 async function loadStatus() {
   try {
@@ -1240,15 +1267,19 @@ async function executeTrade(btn, mJson) {
     if (data.success) {
       btn.textContent = 'Done!';
       btn.style.background = '#00d4aa';
+      showToast('Order filled: ' + m.kalshi_ticker, 'success');
     } else {
       btn.textContent = 'Failed';
       btn.style.background = '#ef4444';
+      const errMsg = data.result && data.result.response_body ? data.result.response_body : (data.result && data.result.error ? data.result.error : 'Unknown error');
+      showToast('Trade failed: ' + errMsg, 'error');
     }
     loadStatus();
     loadTrades();
   } catch(e) {
     btn.textContent = 'Error';
     btn.style.background = '#ef4444';
+    showToast('Network error: ' + e.message, 'error');
   }
 }
 
@@ -1355,7 +1386,9 @@ async function loadTopPicks() {
       html += '<div class="pick-footer">';
       html += '<span class="pick-meta">COST <b>' + p.price_cents + '¢</b></span>';
       html += '<span class="pick-profit">+$' + p.potential_profit_usd.toFixed(2) + ' potential</span>';
-      html += '<button class="pick-execute" onclick="executePickTrade(this, ' + JSON.stringify(JSON.stringify(p)) + ')">Execute Trade $' + (p.price_cents/100).toFixed(2) + '</button>';
+      var ct = Math.max(1, Math.floor(500 / p.price_cents));
+      var cost = (p.price_cents * ct / 100).toFixed(2);
+      html += '<button class="pick-execute" onclick="executePickTrade(this, ' + JSON.stringify(JSON.stringify(p)) + ')">Trade ' + ct + 'x @ $' + cost + '</button>';
       html += '</div>';
       html += '</div>';
     });
@@ -1373,6 +1406,8 @@ async function executePickTrade(btn, mJson) {
   const m = JSON.parse(mJson);
   btn.disabled = true;
   btn.textContent = 'PLACING...';
+  btn.style.borderColor = '#ff8c00';
+  btn.style.color = '#ff8c00';
   try {
     const res = await fetch(API + '/execute-trade', {
       method: 'POST',
@@ -1392,11 +1427,16 @@ async function executePickTrade(btn, mJson) {
     if (data.success) {
       btn.textContent = 'FILLED';
       btn.style.borderColor = '#00ff88';
+      btn.style.color = '#00ff88';
       btn.style.background = 'rgba(0,255,136,0.15)';
+      showToast('Order filled: ' + m.kalshi_ticker + ' ' + m.signal.replace('buy_','').toUpperCase() + ' @ ' + (m.price_cents/100).toFixed(2), 'success');
     } else {
       btn.textContent = 'FAILED';
       btn.style.borderColor = '#ff4444';
       btn.style.color = '#ff4444';
+      const errMsg = data.result && data.result.response_body ? data.result.response_body : (data.result && data.result.error ? data.result.error : 'Unknown error');
+      showToast('Trade failed: ' + errMsg, 'error');
+      setTimeout(() => { btn.disabled = false; btn.textContent = 'Retry $' + (m.price_cents/100).toFixed(2); btn.style.borderColor = '#ff8c00'; btn.style.color = '#ff8c00'; }, 3000);
     }
     loadStatus();
     loadTrades();
@@ -1404,6 +1444,7 @@ async function executePickTrade(btn, mJson) {
     btn.textContent = 'ERROR';
     btn.style.borderColor = '#ff4444';
     btn.style.color = '#ff4444';
+    showToast('Network error: ' + e.message, 'error');
   }
 }
 
@@ -1416,18 +1457,20 @@ async function loadTrades() {
       document.getElementById('trade-table').innerHTML = '<div class="empty">No trades yet. Enable the bot or click Trade on an opportunity.</div>';
       return;
     }
-    let html = '<table><tr><th>Time</th><th>Market</th><th>Side</th><th>Price</th><th>Deviation</th><th>Result</th><th>Source</th></tr>';
+    let html = '<table><tr><th>Time</th><th>Market</th><th>Side</th><th>Qty</th><th>Cost</th><th>Deviation</th><th>Result</th><th>Source</th></tr>';
     data.trades.slice().reverse().forEach(t => {
       const time = new Date(t.timestamp + 'Z').toLocaleString();
       const sideClass = t.side === 'yes' ? 'side-yes' : 'side-no';
       const resultClass = t.success ? 'result-win' : 'result-loss';
       const resultLabel = t.success ? 'Filled' : 'Failed';
       const source = t.manual ? 'Manual' : 'Auto';
+      const qty = t.count || 1;
       html += '<tr>';
       html += '<td>' + time + '</td>';
       html += '<td>' + (t.question || t.ticker).substring(0, 50) + '</td>';
-      html += '<td class="' + sideClass + '">' + t.side.toUpperCase() + '</td>';
-      html += '<td>' + t.price_cents + '¢</td>';
+      html += '<td class="' + sideClass + '">' + qty + 'x ' + t.side.toUpperCase() + '</td>';
+      html += '<td>' + qty + '</td>';
+      html += '<td>$' + (t.cost_usd || t.price_cents/100).toFixed(2) + '</td>';
       html += '<td>' + ((t.deviation || 0) * 100).toFixed(1) + '%</td>';
       html += '<td class="' + resultClass + '">' + resultLabel + '</td>';
       html += '<td>' + source + '</td>';
