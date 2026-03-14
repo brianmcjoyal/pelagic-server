@@ -1209,10 +1209,12 @@ async function toggleBot() {
   loadStatus();
 }
 
+let _mispricedFirstLoad = true;
 async function loadMispriced() {
-  document.getElementById('opp-table').innerHTML = '<div class="loading">Scanning markets...</div>';
+  if (_mispricedFirstLoad) document.getElementById('opp-table').innerHTML = '<div class="loading">Scanning markets...</div>';
   try {
     const data = await fetch(API + '/mispriced').then(r => r.json());
+    _mispricedFirstLoad = false;
     document.getElementById('opp-badge').textContent = data.mispriced_count;
     if (!data.mispricings || data.mispricings.length === 0) {
       document.getElementById('opp-table').innerHTML = '<div class="empty">No mispriced markets found right now. The bot scans every 10 minutes.</div>';
@@ -1354,10 +1356,14 @@ function drawPickChart(canvasId, prices, signal) {
   ctx.fillText('50¢', 2, midY - 2);
 }
 
+let _picksFirstLoad = true;
 async function loadTopPicks() {
-  document.getElementById('top-picks-list').innerHTML = '<div class="loading" style="grid-column:1/-1">Scanning 4 platforms...</div>';
+  if (_picksFirstLoad) {
+    document.getElementById('top-picks-list').innerHTML = '<div class="loading" style="grid-column:1/-1">Scanning 4 platforms...</div>';
+  }
   try {
     const data = await fetch(API + '/top-picks').then(r => r.json());
+    _picksFirstLoad = false;
     const picks = data.picks || [];
     document.getElementById('picks-badge').textContent = picks.length;
     if (picks.length === 0) {
