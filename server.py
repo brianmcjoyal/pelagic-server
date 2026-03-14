@@ -704,6 +704,42 @@ def mispriced():
     })
 
 
+@app.route("/top-picks")
+def top_picks():
+    all_markets = fetch_all_markets()
+    mispricings = find_consensus_mispricings(all_markets)
+    picks = []
+    for m in mispricings[:5]:
+        plats = [p["platform"] for p in m["matching_platforms"]]
+        plat_prices = [f"{p['platform'].title()} {p['yes']*100:.0f}¢" for p in m["matching_platforms"]]
+        k_price = m["kalshi_yes_price"] * 100
+        c_price = m["consensus_yes_price"] * 100
+        dev_pct = m["deviation"] * 100
+
+        if m["signal"] == "buy_yes":
+            edge = f"Kalshi YES is {k_price:.0f}¢ but {len(plats)} other platforms average {c_price:.0f}¢"
+            thesis = f"The market consensus ({', '.join(plat_prices)}) prices this {dev_pct:.0f}% higher than Kalshi. "
+            thesis += f"Buy YES at {k_price:.0f}¢ — if the consensus is right, this contract should settle closer to {c_price:.0f}¢."
+            potential = round((c_price - k_price) / 100, 2)
+        else:
+            edge = f"Kalshi YES is {k_price:.0f}¢ but consensus is only {c_price:.0f}¢"
+            thesis = f"The market consensus ({', '.join(plat_prices)}) prices this {dev_pct:.0f}% lower than Kalshi. "
+            thesis += f"Buy NO at {m['price_cents']}¢ — if the consensus is right, the YES price should drop toward {c_price:.0f}¢."
+            potential = round((k_price - c_price) / 100, 2)
+
+        confidence = "HIGH" if m["deviation"] >= 0.25 else "MEDIUM" if m["deviation"] >= 0.18 else "LOW"
+        picks.append({
+            **m,
+            "rank": len(picks) + 1,
+            "edge_summary": edge,
+            "thesis": thesis,
+            "potential_profit_usd": potential,
+            "confidence": confidence,
+            "platform_count": len(plats),
+        })
+    return jsonify({"picks": picks, "total_scanned": len(all_markets)})
+
+
 @app.route("/config", methods=["POST"])
 def config():
     data = request.get_json(force=True)
@@ -836,20 +872,69 @@ a:hover { text-decoration: underline; }
 .ticker-bar span { margin-right: 24px; }
 .ticker-bar .up { color: #00ff88; }
 .ticker-bar .down { color: #ff4444; }
+/* Top Picks */
+.top-picks { margin-bottom: 16px; }
+.pick-card { background: #0a0a0a; border: 1px solid #333; padding: 14px 16px; margin-bottom: 8px; position: relative; }
+.pick-card:hover { border-color: #ff8c00; }
+.pick-rank { position: absolute; top: 10px; right: 14px; font-size: 28px; font-weight: 800; color: #1a1a1a; font-family: 'Courier New', monospace; }
+.pick-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.pick-signal { font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 2px; text-transform: uppercase; letter-spacing: 1px; }
+.pick-signal.yes { background: rgba(0,255,136,0.12); color: #00ff88; border: 1px solid #00ff88; }
+.pick-signal.no { background: rgba(255,68,68,0.12); color: #ff4444; border: 1px solid #ff4444; }
+.pick-conf { font-size: 9px; padding: 2px 8px; border-radius: 2px; text-transform: uppercase; letter-spacing: 1px; font-weight: 600; }
+.pick-conf.high { color: #00ff88; border: 1px solid #00ff88; }
+.pick-conf.medium { color: #ff8c00; border: 1px solid #ff8c00; }
+.pick-conf.low { color: #ff4444; border: 1px solid #ff4444; }
+.pick-question { font-size: 13px; color: #ddd; margin-bottom: 6px; font-weight: 600; }
+.pick-question a { color: #ddd; }
+.pick-question a:hover { color: #ff8c00; }
+.pick-edge { font-size: 11px; color: #ff8c00; margin-bottom: 4px; font-weight: 600; }
+.pick-thesis { font-size: 11px; color: #999; line-height: 1.5; margin-bottom: 10px; }
+.pick-footer { display: flex; align-items: center; gap: 14px; }
+.pick-meta { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 1px; }
+.pick-meta b { color: #ff8c00; }
+.pick-profit { font-size: 12px; color: #00ff88; font-weight: 700; font-family: 'Courier New', monospace; }
+.pick-execute { background: transparent; color: #00ff88; border: 1px solid #00ff88; padding: 6px 20px; border-radius: 2px; cursor: pointer; font-size: 11px; font-weight: 700; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 1px; margin-left: auto; }
+.pick-execute:hover { background: #00ff88; color: #000; }
+.pick-execute:disabled { border-color: #333; color: #555; cursor: not-allowed; background: transparent; }
 </style>
 </head>
 <body>
 <div class="container">
 <div class="header">
   <svg class="logo" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
-    <defs><linearGradient id="sharkG" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#00d4aa"/><stop offset="100%" style="stop-color:#0891b2"/></linearGradient></defs>
-    <path d="M8 38c0 0 4-18 20-22c2-6 8-12 14-14c-2 6-1 10 0 14c6 3 12 8 14 16c1 4 0 8-2 11l-6 3l2-6l-4 5l-8 2l3-4l-6 3c-4 1-10 1-14-1l4-3l-7 1c-4-1-7-3-9-6" fill="url(#sharkG)" opacity="0.95"/>
-    <path d="M32 16c8-2 16 2 20 10" stroke="#0a0e17" stroke-width="1.5" fill="none" opacity="0.3"/>
-    <circle cx="44" cy="28" r="2" fill="#0a0e17"/>
-    <circle cx="44.5" cy="27.5" r="0.7" fill="#fff"/>
-    <path d="M8 38c3-1 6 2 10 1c-3 2-7 2-10-1z" fill="#0a0e17" opacity="0.15"/>
-    <path d="M28 40l-4 10l6-8l5 12l4-11l6 8l-2-11" fill="url(#sharkG)" opacity="0.7"/>
-    <path d="M52 32c2 0 6-1 8-3c-1 3-4 5-7 5" fill="url(#sharkG)" opacity="0.8"/>
+    <defs>
+      <linearGradient id="metalBase" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" style="stop-color:#e8e8e8"/>
+        <stop offset="25%" style="stop-color:#a8a8a8"/>
+        <stop offset="50%" style="stop-color:#d0d0d0"/>
+        <stop offset="75%" style="stop-color:#888"/>
+        <stop offset="100%" style="stop-color:#b0b0b0"/>
+      </linearGradient>
+      <linearGradient id="metalShine" x1="20%" y1="0%" x2="80%" y2="100%">
+        <stop offset="0%" style="stop-color:#fff;stop-opacity:0.6"/>
+        <stop offset="40%" style="stop-color:#fff;stop-opacity:0"/>
+        <stop offset="60%" style="stop-color:#fff;stop-opacity:0.2"/>
+        <stop offset="100%" style="stop-color:#fff;stop-opacity:0"/>
+      </linearGradient>
+      <linearGradient id="metalDark" x1="0%" y1="100%" x2="100%" y2="0%">
+        <stop offset="0%" style="stop-color:#555"/>
+        <stop offset="50%" style="stop-color:#999"/>
+        <stop offset="100%" style="stop-color:#666"/>
+      </linearGradient>
+      <filter id="metalShadow"><feDropShadow dx="1" dy="1" stdDeviation="1" flood-color="#000" flood-opacity="0.4"/></filter>
+    </defs>
+    <path d="M8 38c0 0 4-18 20-22c2-6 8-12 14-14c-2 6-1 10 0 14c6 3 12 8 14 16c1 4 0 8-2 11l-6 3l2-6l-4 5l-8 2l3-4l-6 3c-4 1-10 1-14-1l4-3l-7 1c-4-1-7-3-9-6" fill="url(#metalBase)" filter="url(#metalShadow)"/>
+    <path d="M8 38c0 0 4-18 20-22c2-6 8-12 14-14c-2 6-1 10 0 14c6 3 12 8 14 16c1 4 0 8-2 11l-6 3l2-6l-4 5l-8 2l3-4l-6 3c-4 1-10 1-14-1l4-3l-7 1c-4-1-7-3-9-6" fill="url(#metalShine)"/>
+    <path d="M32 16c8-2 16 2 20 10" stroke="#666" stroke-width="1.5" fill="none" opacity="0.4"/>
+    <path d="M20 28c6-1 14 0 22 4" stroke="#ccc" stroke-width="0.5" fill="none" opacity="0.5"/>
+    <path d="M18 32c8-1 18 0 26 2" stroke="#fff" stroke-width="0.3" fill="none" opacity="0.3"/>
+    <circle cx="44" cy="28" r="2.2" fill="#333"/>
+    <circle cx="44.5" cy="27.3" r="0.8" fill="#fff" opacity="0.9"/>
+    <path d="M8 38c3-1 6 2 10 1c-3 2-7 2-10-1z" fill="#777" opacity="0.3"/>
+    <path d="M28 40l-4 10l6-8l5 12l4-11l6 8l-2-11" fill="url(#metalDark)" filter="url(#metalShadow)"/>
+    <path d="M28 40l-4 10l6-8l5 12l4-11l6 8l-2-11" fill="url(#metalShine)" opacity="0.4"/>
+    <path d="M52 32c2 0 6-1 8-3c-1 3-4 5-7 5" fill="url(#metalBase)" opacity="0.9"/>
   </svg>
   <div>
     <h1><span>Trade</span>Shark</h1>
@@ -876,6 +961,11 @@ a:hover { text-decoration: underline; }
     <span class="chart-pl zero" id="chart-pl">$0.00</span>
   </div>
   <div class="chart-canvas"><canvas id="pl-chart"></canvas></div>
+</div>
+
+<div class="top-picks">
+  <div class="section-title">Top 5 Picks <span class="badge" id="picks-badge">0</span><button class="refresh-btn" onclick="loadTopPicks()">Refresh</button></div>
+  <div id="top-picks-list"><div class="loading">Analyzing markets...</div></div>
 </div>
 
 <div class="section">
@@ -994,6 +1084,83 @@ async function executeTrade(btn, mJson) {
   } catch(e) {
     btn.textContent = 'Error';
     btn.style.background = '#ef4444';
+  }
+}
+
+async function loadTopPicks() {
+  document.getElementById('top-picks-list').innerHTML = '<div class="loading">Scanning 4 platforms for top opportunities...</div>';
+  try {
+    const data = await fetch(API + '/top-picks').then(r => r.json());
+    const picks = data.picks || [];
+    document.getElementById('picks-badge').textContent = picks.length;
+    if (picks.length === 0) {
+      document.getElementById('top-picks-list').innerHTML = '<div class="empty">No high-confidence picks right now. Markets are efficiently priced.</div>';
+      return;
+    }
+    let html = '';
+    picks.forEach(p => {
+      const sigClass = p.signal === 'buy_yes' ? 'yes' : 'no';
+      const sigLabel = p.signal === 'buy_yes' ? 'BUY YES' : 'BUY NO';
+      const confClass = p.confidence.toLowerCase();
+      html += '<div class="pick-card">';
+      html += '<div class="pick-rank">#' + p.rank + '</div>';
+      html += '<div class="pick-header">';
+      html += '<span class="pick-signal ' + sigClass + '">' + sigLabel + '</span>';
+      html += '<span class="pick-conf ' + confClass + '">' + p.confidence + '</span>';
+      html += '<span class="pick-meta">DEV <b>' + (p.deviation * 100).toFixed(1) + '%</b></span>';
+      html += '<span class="pick-meta">' + p.platform_count + ' PLATFORMS</span>';
+      html += '</div>';
+      html += '<div class="pick-question"><a href="' + p.kalshi_url + '" target="_blank">' + p.kalshi_question + '</a></div>';
+      html += '<div class="pick-edge">' + p.edge_summary + '</div>';
+      html += '<div class="pick-thesis">' + p.thesis + '</div>';
+      html += '<div class="pick-footer">';
+      html += '<span class="pick-meta">COST <b>' + p.price_cents + '¢</b></span>';
+      html += '<span class="pick-profit">+$' + p.potential_profit_usd.toFixed(2) + ' potential</span>';
+      html += '<button class="pick-execute" onclick="executePickTrade(this, ' + JSON.stringify(JSON.stringify(p)) + ')">Execute Trade $' + (p.price_cents/100).toFixed(2) + '</button>';
+      html += '</div>';
+      html += '</div>';
+    });
+    document.getElementById('top-picks-list').innerHTML = html;
+  } catch(e) {
+    document.getElementById('top-picks-list').innerHTML = '<div class="empty">Error: ' + e.message + '</div>';
+  }
+}
+
+async function executePickTrade(btn, mJson) {
+  const m = JSON.parse(mJson);
+  btn.disabled = true;
+  btn.textContent = 'PLACING...';
+  try {
+    const res = await fetch(API + '/execute-trade', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        ticker: m.kalshi_ticker,
+        side: m.signal.replace('buy_', ''),
+        price_cents: m.price_cents,
+        question: m.kalshi_question,
+        deviation: m.deviation,
+        consensus_price: m.consensus_yes_price,
+        kalshi_price: m.kalshi_yes_price,
+        matching_platforms: m.matching_platforms,
+      })
+    });
+    const data = await res.json();
+    if (data.success) {
+      btn.textContent = 'FILLED';
+      btn.style.borderColor = '#00ff88';
+      btn.style.background = 'rgba(0,255,136,0.15)';
+    } else {
+      btn.textContent = 'FAILED';
+      btn.style.borderColor = '#ff4444';
+      btn.style.color = '#ff4444';
+    }
+    loadStatus();
+    loadTrades();
+  } catch(e) {
+    btn.textContent = 'ERROR';
+    btn.style.borderColor = '#ff4444';
+    btn.style.color = '#ff4444';
   }
 }
 
@@ -1117,6 +1284,7 @@ function drawPLChart(trades) {
 
 // Load everything on page load
 loadStatus();
+loadTopPicks();
 loadMispriced();
 loadTrades();
 // Auto-refresh every 60 seconds
