@@ -27,6 +27,19 @@ def load_private_key():
     if not pem:
         print("KALSHI_PRIVATE_KEY environment variable is not set")
         return None
+    # Handle base64-encoded PEM (Railway may encode it)
+    if not pem.startswith("-----"):
+        try:
+            pem = base64.b64decode(pem).decode("utf-8")
+        except Exception:
+            pass
+    # Handle escaped newlines
+    pem = pem.replace("\\n", "\n")
+    # If bare key body (no PEM headers), wrap it
+    if "BEGIN" not in pem and len(pem) > 100:
+        raw = pem.replace("\n", "").replace("\r", "").replace(" ", "")
+        lines = [raw[i:i+64] for i in range(0, len(raw), 64)]
+        pem = "-----BEGIN RSA PRIVATE KEY-----\n" + "\n".join(lines) + "\n-----END RSA PRIVATE KEY-----"
     try:
         key = serialization.load_pem_private_key(pem.encode(), password=None, backend=default_backend())
         return key
@@ -69,6 +82,25 @@ def signed_headers(method, path):
 def health():
     k = load_private_key()
     return jsonify({"status": "ok", "private_key_loaded": k is not None})
+
+
+@app.route("/debug")
+def debug():
+    path = "/markets"
+    headers = signed_headers("GET", path)
+    if not headers:
+        return jsonify({"error": "Failed to load private key"})
+    try:
+        resp = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + path, headers=headers, params={"limit": 1}, timeout=10)
+        return jsonify({
+            "status_code": resp.status_code,
+            "response_body": resp.text[:500],
+            "signed_path": KALSHI_API_PREFIX + path,
+            "api_key_id": KALSHI_API_KEY_ID,
+            "key_loaded": load_private_key() is not None,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 
 @app.route("/markets")
