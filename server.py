@@ -55,7 +55,7 @@ BOT_CONFIG = {
     "max_daily_usd": 20.0,
     "min_deviation": 0.15,
     "min_platforms": 2,
-    "scan_interval_minutes": 10,
+    "scan_interval_seconds": 30,
 }
 
 BOT_STATE = {
@@ -595,7 +595,7 @@ scheduler = BackgroundScheduler()
 scheduler.add_job(
     run_bot_scan,
     "interval",
-    minutes=BOT_CONFIG["scan_interval_minutes"],
+    seconds=BOT_CONFIG["scan_interval_seconds"],
     id="consensus_scan",
     replace_existing=True,
 )
@@ -707,36 +707,182 @@ def mispriced():
 @app.route("/top-picks")
 def top_picks():
     all_markets = fetch_all_markets()
-    mispricings = find_consensus_mispricings(all_markets)
     picks = []
-    for m in mispricings[:5]:
-        plats = [p["platform"] for p in m["matching_platforms"]]
-        plat_prices = [f"{p['platform'].title()} {p['yes']*100:.0f}¢" for p in m["matching_platforms"]]
-        k_price = m["kalshi_yes_price"] * 100
-        c_price = m["consensus_yes_price"] * 100
-        dev_pct = m["deviation"] * 100
 
-        if m["signal"] == "buy_yes":
-            edge = f"Kalshi YES is {k_price:.0f}¢ but {len(plats)} other platforms average {c_price:.0f}¢"
-            thesis = f"The market consensus ({', '.join(plat_prices)}) prices this {dev_pct:.0f}% higher than Kalshi. "
-            thesis += f"Buy YES at {k_price:.0f}¢ — if the consensus is right, this contract should settle closer to {c_price:.0f}¢."
+    # Strategy 1: Consensus mispricings (any deviation with 1+ platform match)
+    kalshi_markets = []
+    other_markets = []
+    for m in all_markets:
+        nq = normalize_question(m["question"])
+        if len(nq.split()) < 3:
+            continue
+        if m["platform"] == "kalshi":
+            kalshi_markets.append((nq, m))
+        else:
+            other_markets.append((nq, m))
+
+    for nq_k, km in kalshi_markets:
+        matches = []
+        for nq_o, om in other_markets:
+            sim = similarity(nq_k, nq_o, km["question"], om["question"])
+            if sim >= 0.50:
+                matches.append({"platform": om["platform"], "yes": om["yes"], "no": om["no"], "similarity": round(sim, 3)})
+        if not matches:
+            continue
+        consensus_yes = sum(m["yes"] for m in matches) / len(matches)
+        deviation = abs(km["yes"] - consensus_yes)
+        if deviation < 0.02:
+            continue
+        plat_prices = [f"{p['platform'].title()} {p['yes']*100:.0f}¢" for p in matches]
+        k_price = km["yes"] * 100
+        c_price = consensus_yes * 100
+        dev_pct = deviation * 100
+        if km["yes"] < consensus_yes:
+            signal = "buy_yes"
+            price_cents = int(km["yes"] * 100)
+            edge = f"Kalshi YES at {k_price:.0f}¢ vs {len(matches)} platform avg of {c_price:.0f}¢"
+            thesis = f"Cross-platform consensus ({', '.join(plat_prices)}) prices this {dev_pct:.0f}% higher than Kalshi. "
+            thesis += f"Buy YES at {k_price:.0f}¢ — if consensus is correct, expect convergence toward {c_price:.0f}¢."
             potential = round((c_price - k_price) / 100, 2)
         else:
-            edge = f"Kalshi YES is {k_price:.0f}¢ but consensus is only {c_price:.0f}¢"
-            thesis = f"The market consensus ({', '.join(plat_prices)}) prices this {dev_pct:.0f}% lower than Kalshi. "
-            thesis += f"Buy NO at {m['price_cents']}¢ — if the consensus is right, the YES price should drop toward {c_price:.0f}¢."
+            signal = "buy_no"
+            price_cents = int(km["no"] * 100)
+            edge = f"Kalshi YES at {k_price:.0f}¢ but consensus only {c_price:.0f}¢"
+            thesis = f"Cross-platform consensus ({', '.join(plat_prices)}) prices this {dev_pct:.0f}% lower than Kalshi. "
+            thesis += f"Buy NO at {price_cents}¢ — if consensus is correct, the YES price should drop toward {c_price:.0f}¢."
             potential = round((k_price - c_price) / 100, 2)
-
-        confidence = "HIGH" if m["deviation"] >= 0.25 else "MEDIUM" if m["deviation"] >= 0.18 else "LOW"
+        confidence = "HIGH" if deviation >= 0.20 else "MEDIUM" if deviation >= 0.10 else "LOW"
         picks.append({
-            **m,
-            "rank": len(picks) + 1,
+            "type": "consensus",
+            "kalshi_ticker": km["id"],
+            "kalshi_question": km["question"],
+            "kalshi_yes_price": km["yes"],
+            "kalshi_url": km["url"],
+            "consensus_yes_price": round(consensus_yes, 4),
+            "deviation": round(deviation, 4),
+            "signal": signal,
+            "price_cents": price_cents,
+            "matching_platforms": matches,
             "edge_summary": edge,
             "thesis": thesis,
             "potential_profit_usd": potential,
             "confidence": confidence,
-            "platform_count": len(plats),
+            "platform_count": len(matches),
+            "score": deviation * len(matches),
+            "prices": {
+                "kalshi": round(k_price, 1),
+                **{p["platform"]: round(p["yes"] * 100, 1) for p in matches}
+            },
         })
+
+    # Strategy 2: Arbitrage pairs (cross-platform price gaps)
+    opps = find_opportunities(all_markets, min_similarity=0.50, max_cost=1.0)
+    for opp in opps[:20]:
+        buy_yes = opp["buy_yes"]
+        buy_no = opp["buy_no"]
+        # Only include if Kalshi is involved
+        kalshi_side = None
+        if buy_yes["platform"] == "kalshi":
+            kalshi_side = buy_yes
+            other_side = buy_no
+            signal = "buy_yes"
+            ticker = ""
+            for nq_k, km in kalshi_markets:
+                if similarity(nq_k, normalize_question(opp["question_a"]), km["question"], opp["question_a"]) > 0.5:
+                    ticker = km["id"]
+                    break
+                if similarity(nq_k, normalize_question(opp["question_b"]), km["question"], opp["question_b"]) > 0.5:
+                    ticker = km["id"]
+                    break
+        elif buy_no["platform"] == "kalshi":
+            kalshi_side = buy_no
+            other_side = buy_yes
+            signal = "buy_no"
+            ticker = ""
+            for nq_k, km in kalshi_markets:
+                if similarity(nq_k, normalize_question(opp["question_a"]), km["question"], opp["question_a"]) > 0.5:
+                    ticker = km["id"]
+                    break
+                if similarity(nq_k, normalize_question(opp["question_b"]), km["question"], opp["question_b"]) > 0.5:
+                    ticker = km["id"]
+                    break
+        if not kalshi_side or not ticker:
+            continue
+        # Skip duplicates already found via consensus
+        if any(p["kalshi_ticker"] == ticker for p in picks):
+            continue
+        price_cents = int(kalshi_side["price"] * 100)
+        spread = abs(buy_yes["price"] - (1 - buy_no["price"]))
+        edge = f"Arbitrage: buy {signal.replace('buy_','')} on Kalshi at {price_cents}¢, hedge on {other_side['platform'].title()}"
+        thesis = f"Price spread of {opp['profit_pct']:.1f}% between Kalshi and {other_side['platform'].title()}. "
+        thesis += f"Kalshi {signal.replace('buy_','')} at {price_cents}¢ vs {other_side['platform'].title()} at {int(other_side['price']*100)}¢. "
+        thesis += f"Estimated profit: ${opp['estimated_profit']:.4f} per contract after fees."
+        picks.append({
+            "type": "arbitrage",
+            "kalshi_ticker": ticker,
+            "kalshi_question": opp["question_a"],
+            "kalshi_yes_price": buy_yes["price"] if buy_yes["platform"] == "kalshi" else 1 - buy_no["price"],
+            "kalshi_url": kalshi_side["url"],
+            "consensus_yes_price": buy_yes["price"] if buy_yes["platform"] != "kalshi" else 1 - buy_no["price"],
+            "deviation": round(spread, 4),
+            "signal": signal,
+            "price_cents": price_cents,
+            "matching_platforms": [{"platform": other_side["platform"], "yes": round(1 - other_side["price"], 4) if signal == "buy_no" else other_side["price"], "similarity": opp["similarity"]}],
+            "edge_summary": edge,
+            "thesis": thesis,
+            "potential_profit_usd": round(opp["estimated_profit"], 2),
+            "confidence": "HIGH" if opp["estimated_profit"] > 0.05 else "MEDIUM" if opp["estimated_profit"] > 0.02 else "LOW",
+            "platform_count": 1,
+            "score": opp["estimated_profit"] * 10,
+            "prices": {
+                "kalshi": round(kalshi_side["price"] * 100, 1),
+                other_side["platform"]: round(other_side["price"] * 100, 1),
+            },
+        })
+
+    # Strategy 3: Best Kalshi value plays (high implied probability divergence from 50/50)
+    # Fill remaining slots with the most volatile/interesting Kalshi markets
+    if len(picks) < 5:
+        sorted_kalshi = sorted(kalshi_markets, key=lambda x: abs(x[1]["yes"] - 0.5))
+        for nq_k, km in sorted_kalshi:
+            if any(p["kalshi_ticker"] == km["id"] for p in picks):
+                continue
+            if km["yes"] < 0.15 or km["yes"] > 0.85:
+                continue
+            price_cents = min(int(km["yes"] * 100), int(km["no"] * 100))
+            cheaper_side = "buy_yes" if km["yes"] <= km["no"] else "buy_no"
+            edge = f"Kalshi near 50/50 — {cheaper_side.replace('buy_','').upper()} at {price_cents}¢"
+            thesis = f"This market is priced near even odds (YES {km['yes']*100:.0f}¢ / NO {km['no']*100:.0f}¢). "
+            thesis += f"Near-even markets offer the best risk/reward — a small edge compounds quickly at these odds. "
+            thesis += f"Max loss {price_cents}¢, max gain {100-price_cents}¢ per contract."
+            picks.append({
+                "type": "value",
+                "kalshi_ticker": km["id"],
+                "kalshi_question": km["question"],
+                "kalshi_yes_price": km["yes"],
+                "kalshi_url": km["url"],
+                "consensus_yes_price": 0.5,
+                "deviation": round(abs(km["yes"] - 0.5), 4),
+                "signal": cheaper_side,
+                "price_cents": price_cents,
+                "matching_platforms": [],
+                "edge_summary": edge,
+                "thesis": thesis,
+                "potential_profit_usd": round((100 - price_cents) / 100, 2),
+                "confidence": "LOW",
+                "platform_count": 0,
+                "score": 0.01,
+                "prices": {"kalshi_yes": round(km["yes"] * 100, 1), "kalshi_no": round(km["no"] * 100, 1)},
+            })
+            if len(picks) >= 5:
+                break
+
+    # Sort by score (best opportunities first) and take top 5
+    picks.sort(key=lambda x: x["score"], reverse=True)
+    picks = picks[:5]
+    for i, p in enumerate(picks):
+        p["rank"] = i + 1
+
     return jsonify({"picks": picks, "total_scanned": len(all_markets)})
 
 
@@ -897,6 +1043,8 @@ a:hover { text-decoration: underline; }
 .pick-execute { background: transparent; color: #00ff88; border: 1px solid #00ff88; padding: 6px 20px; border-radius: 2px; cursor: pointer; font-size: 11px; font-weight: 700; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 1px; margin-left: auto; }
 .pick-execute:hover { background: #00ff88; color: #000; }
 .pick-execute:disabled { border-color: #333; color: #555; cursor: not-allowed; background: transparent; }
+.pick-chart { width: 100%; height: 80px; margin: 8px 0; position: relative; }
+.pick-chart canvas { width: 100%; height: 100%; }
 </style>
 </head>
 <body>
@@ -938,7 +1086,7 @@ a:hover { text-decoration: underline; }
   </svg>
   <div>
     <h1><span>Trade</span>Shark</h1>
-    <p class="subtitle">Cross-platform prediction market trading &bull; Scanning 4 platforms every 10 minutes</p>
+    <p class="subtitle">Cross-platform prediction market trading &bull; Scanning 4 platforms every 30 seconds</p>
   </div>
 </div>
 
@@ -1087,6 +1235,77 @@ async function executeTrade(btn, mJson) {
   }
 }
 
+function drawPickChart(canvasId, prices, signal) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  const w = rect.width, h = rect.height;
+  ctx.clearRect(0, 0, w, h);
+
+  const entries = Object.entries(prices);
+  if (entries.length === 0) return;
+  const barW = Math.min(60, (w - 40) / entries.length - 10);
+  const maxVal = 100;
+  const padTop = 14, padBot = 18;
+  const chartH = h - padTop - padBot;
+  const startX = (w - (entries.length * (barW + 10) - 10)) / 2;
+
+  entries.forEach(([plat, price], i) => {
+    const x = startX + i * (barW + 10);
+    const barH = (price / maxVal) * chartH;
+    const y = padTop + chartH - barH;
+
+    // Bar color: Kalshi in orange, others in teal
+    const isKalshi = plat.toLowerCase().includes('kalshi');
+    const grad = ctx.createLinearGradient(x, y, x, y + barH);
+    if (isKalshi) {
+      grad.addColorStop(0, '#ff8c00');
+      grad.addColorStop(1, '#cc7000');
+    } else {
+      grad.addColorStop(0, '#00d4aa');
+      grad.addColorStop(1, '#0891b2');
+    }
+    ctx.fillStyle = grad;
+    ctx.fillRect(x, y, barW, barH);
+
+    // Highlight border
+    ctx.strokeStyle = isKalshi ? '#ffaa33' : '#00ffcc';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x, y, barW, barH);
+
+    // Price label on top
+    ctx.fillStyle = '#fff';
+    ctx.font = '10px Courier New';
+    ctx.textAlign = 'center';
+    ctx.fillText(price.toFixed(0) + '¢', x + barW/2, y - 3);
+
+    // Platform label below
+    ctx.fillStyle = '#888';
+    ctx.font = '8px Courier New';
+    const label = plat.replace('kalshi_yes','KALSHI Y').replace('kalshi_no','KALSHI N').replace('kalshi','KALSHI').replace('polymarket','POLY').replace('predictit','PREDIT').replace('manifold','MANIFD').toUpperCase();
+    ctx.fillText(label.substring(0, 7), x + barW/2, h - 4);
+  });
+
+  // Dashed 50¢ reference line
+  const midY = padTop + chartH * 0.5;
+  ctx.strokeStyle = '#333';
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.moveTo(10, midY);
+  ctx.lineTo(w - 10, midY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#444';
+  ctx.font = '8px Courier New';
+  ctx.textAlign = 'left';
+  ctx.fillText('50¢', 2, midY - 2);
+}
+
 async function loadTopPicks() {
   document.getElementById('top-picks-list').innerHTML = '<div class="loading">Scanning 4 platforms for top opportunities...</div>';
   try {
@@ -1098,20 +1317,23 @@ async function loadTopPicks() {
       return;
     }
     let html = '';
-    picks.forEach(p => {
+    picks.forEach((p, idx) => {
       const sigClass = p.signal === 'buy_yes' ? 'yes' : 'no';
       const sigLabel = p.signal === 'buy_yes' ? 'BUY YES' : 'BUY NO';
       const confClass = p.confidence.toLowerCase();
+      const typeLabel = p.type === 'consensus' ? 'CONSENSUS' : p.type === 'arbitrage' ? 'ARBITRAGE' : 'VALUE';
       html += '<div class="pick-card">';
       html += '<div class="pick-rank">#' + p.rank + '</div>';
       html += '<div class="pick-header">';
       html += '<span class="pick-signal ' + sigClass + '">' + sigLabel + '</span>';
       html += '<span class="pick-conf ' + confClass + '">' + p.confidence + '</span>';
+      html += '<span class="pick-meta">' + typeLabel + '</span>';
       html += '<span class="pick-meta">DEV <b>' + (p.deviation * 100).toFixed(1) + '%</b></span>';
-      html += '<span class="pick-meta">' + p.platform_count + ' PLATFORMS</span>';
+      if (p.platform_count > 0) html += '<span class="pick-meta">' + p.platform_count + ' PLATFORMS</span>';
       html += '</div>';
       html += '<div class="pick-question"><a href="' + p.kalshi_url + '" target="_blank">' + p.kalshi_question + '</a></div>';
       html += '<div class="pick-edge">' + p.edge_summary + '</div>';
+      html += '<div class="pick-chart"><canvas id="pick-chart-' + idx + '"></canvas></div>';
       html += '<div class="pick-thesis">' + p.thesis + '</div>';
       html += '<div class="pick-footer">';
       html += '<span class="pick-meta">COST <b>' + p.price_cents + '¢</b></span>';
@@ -1121,6 +1343,10 @@ async function loadTopPicks() {
       html += '</div>';
     });
     document.getElementById('top-picks-list').innerHTML = html;
+    // Draw charts after DOM update
+    picks.forEach((p, idx) => {
+      drawPickChart('pick-chart-' + idx, p.prices || {}, p.signal);
+    });
   } catch(e) {
     document.getElementById('top-picks-list').innerHTML = '<div class="empty">Error: ' + e.message + '</div>';
   }
@@ -1287,8 +1513,8 @@ loadStatus();
 loadTopPicks();
 loadMispriced();
 loadTrades();
-// Auto-refresh every 60 seconds
-setInterval(() => { loadStatus(); loadTrades(); }, 60000);
+// Auto-refresh every 30 seconds
+setInterval(() => { loadStatus(); loadTopPicks(); loadTrades(); }, 30000);
 </script>
 </body>
 </html>
