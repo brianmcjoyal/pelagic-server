@@ -25,10 +25,9 @@ def load_private_key():
         print("ERROR: KALSHI_PRIVATE_KEY is empty")
         return None
     try:
-        pem = KALSHI_PRIVATE_KEY
-        # Handle both \\n (double backslash) and \n (single backslash)
-        pem = pem.replace("\\\\n", "\n").replace("\\n", "\n").strip()
-        print(f"Key preview after replace: {repr(pem[:60])}")
+        # Decode from base64 first
+        pem = base64.b64decode(KALSHI_PRIVATE_KEY).decode()
+        print(f"Key starts with: {pem[:40]}")
         key = serialization.load_pem_private_key(pem.encode(), password=None, backend=default_backend())
         print("Key loaded successfully!")
         return key
@@ -66,7 +65,6 @@ def health():
         "status": "ok",
         "kalshi_key_set": bool(KALSHI_API_KEY_ID),
         "private_key_loaded": key is not None,
-        "key_preview": repr(KALSHI_PRIVATE_KEY[:60]) if KALSHI_PRIVATE_KEY else "empty"
     })
 
 
