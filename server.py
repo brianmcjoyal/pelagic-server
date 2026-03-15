@@ -186,6 +186,7 @@ def fetch_kalshi():
                 "yes":      round(yes, 4),
                 "no":       round(no, 4),
                 "volume":   m.get("volume", 0),
+                "close_time": m.get("close_time") or m.get("expected_expiration_time"),
                 "url":      "https://kalshi.com/markets/" + ticker,
             })
         except Exception:
@@ -1050,6 +1051,63 @@ def top_picks():
     return jsonify(result)
 
 
+@app.route("/today-picks")
+def today_picks():
+    """Return Kalshi markets that settle today — quick win/loss opportunities."""
+    all_markets = fetch_all_markets()
+    now = datetime.datetime.utcnow()
+    today_end = now.replace(hour=23, minute=59, second=59)
+    tomorrow_end = today_end + datetime.timedelta(hours=12)  # include early morning settles
+
+    today_markets = []
+    for m in all_markets:
+        if m["platform"] != "kalshi":
+            continue
+        ct = m.get("close_time")
+        if not ct:
+            continue
+        try:
+            close_dt = datetime.datetime.fromisoformat(ct.replace("Z", "+00:00").replace("+00:00", ""))
+        except Exception:
+            try:
+                close_dt = datetime.datetime.strptime(ct[:19], "%Y-%m-%dT%H:%M:%S")
+            except Exception:
+                continue
+        if close_dt < now or close_dt > tomorrow_end:
+            continue
+        # Calculate time remaining
+        diff = close_dt - now
+        hrs = int(diff.total_seconds() // 3600)
+        mins = int((diff.total_seconds() % 3600) // 60)
+        if hrs > 0:
+            time_left = f"{hrs}h {mins}m"
+        else:
+            time_left = f"{mins}m"
+
+        price_cents = min(int(m["yes"] * 100), int(m["no"] * 100))
+        cheaper_side = "buy_yes" if m["yes"] <= m["no"] else "buy_no"
+        potential = round((100 - price_cents) / 100, 2)
+
+        today_markets.append({
+            "kalshi_ticker": m["id"],
+            "kalshi_question": m["question"],
+            "kalshi_url": m["url"],
+            "kalshi_yes_price": m["yes"],
+            "signal": cheaper_side,
+            "price_cents": price_cents,
+            "close_time": ct,
+            "time_left": time_left,
+            "time_left_seconds": int(diff.total_seconds()),
+            "potential_profit_usd": potential,
+            "yes_price": round(m["yes"] * 100),
+            "no_price": round(m["no"] * 100),
+        })
+
+    # Sort by soonest to settle
+    today_markets.sort(key=lambda x: x["time_left_seconds"])
+    return jsonify({"picks": today_markets[:20], "total": len(today_markets)})
+
+
 @app.route("/config", methods=["POST"])
 def config():
     data = request.get_json(force=True)
@@ -1285,6 +1343,11 @@ a:hover { text-decoration: underline; }
 <div class="top-picks">
   <div class="section-title">Top 10 Picks <span class="badge" id="picks-badge">0</span><button class="refresh-btn" onclick="loadTopPicks()">Refresh</button></div>
   <div id="top-picks-list" class="picks-grid"><div class="loading" style="grid-column:1/-1">Analyzing markets...</div></div>
+</div>
+
+<div class="section">
+  <div class="section-title">Settling Today <span class="badge" id="today-badge">0</span><button class="refresh-btn" onclick="loadTodayPicks()">Refresh</button></div>
+  <div id="today-table"><div class="loading">Loading today's markets...</div></div>
 </div>
 
 <div class="section">
@@ -1728,6 +1791,75 @@ function drawPLChart(trades) {
   ctx.fill();
 }
 
+let _todayData = [];
+async function loadTodayPicks() {
+  try {
+    const data = await fetch(API + '/today-picks').then(r => r.json());
+    const picks = data.picks || [];
+    _todayData = picks;
+    document.getElementById('today-badge').textContent = picks.length;
+    if (picks.length === 0) {
+      document.getElementById('today-table').innerHTML = '<div class="empty">No markets settling today.</div>';
+      return;
+    }
+    let html = '<table><tr><th>Market</th><th>YES</th><th>NO</th><th>Signal</th><th>Settles In</th><th>Potential</th><th>Action</th></tr>';
+    picks.forEach((p, idx) => {
+      const sigClass = p.signal === 'buy_yes' ? 'side-yes' : 'side-no';
+      const sigLabel = p.signal === 'buy_yes' ? 'BUY YES' : 'BUY NO';
+      var ct = Math.max(1, Math.floor(500 / p.price_cents));
+      var cost = (p.price_cents * ct / 100).toFixed(2);
+      html += '<tr>';
+      html += '<td><a href="' + p.kalshi_url + '" target="_blank">' + p.kalshi_question.substring(0, 55) + '</a></td>';
+      html += '<td>' + p.yes_price + '¢</td>';
+      html += '<td>' + p.no_price + '¢</td>';
+      html += '<td class="' + sigClass + '">' + sigLabel + '</td>';
+      html += '<td style="color:#ff8c00;font-weight:700">' + p.time_left + '</td>';
+      html += '<td class="result-win">+$' + p.potential_profit_usd.toFixed(2) + '</td>';
+      html += '<td><button class="trade-btn" onclick="executeTodayTrade(this,' + idx + ')">Trade ' + ct + 'x $' + cost + '</button></td>';
+      html += '</tr>';
+    });
+    html += '</table>';
+    document.getElementById('today-table').innerHTML = html;
+  } catch(e) {
+    document.getElementById('today-table').innerHTML = '<div class="empty">Error: ' + e.message + '</div>';
+  }
+}
+
+async function executeTodayTrade(btn, idx) {
+  const m = _todayData[idx];
+  btn.disabled = true;
+  btn.textContent = 'PLACING...';
+  try {
+    const res = await fetch(API + '/execute-trade', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        ticker: m.kalshi_ticker,
+        side: m.signal.replace('buy_', ''),
+        price_cents: m.price_cents,
+        question: m.kalshi_question,
+      })
+    });
+    const data = await res.json();
+    if (data.success) {
+      btn.textContent = 'PLACED';
+      btn.style.background = '#00d4aa';
+      showToast('Order placed: ' + m.kalshi_ticker + ' settles in ' + m.time_left, 'success');
+    } else {
+      btn.textContent = 'FAILED';
+      btn.style.background = '#ef4444';
+      const errMsg = data.result && data.result.response_body ? data.result.response_body : 'Unknown error';
+      showToast('Trade failed: ' + errMsg, 'error');
+    }
+    loadStatus();
+    loadPositions();
+    loadTrades();
+  } catch(e) {
+    btn.textContent = 'ERROR';
+    showToast('Network error: ' + e.message, 'error');
+  }
+}
+
 async function loadPositions() {
   try {
     const data = await fetch(API + '/positions').then(r => r.json());
@@ -1780,11 +1912,12 @@ async function loadPositions() {
 // Load everything on page load
 loadStatus();
 loadTopPicks();
+loadTodayPicks();
 loadPositions();
 loadMispriced();
 loadTrades();
 // Auto-refresh every 30 seconds
-setInterval(() => { loadStatus(); loadTopPicks(); loadPositions(); loadTrades(); }, 30000);
+setInterval(() => { loadStatus(); loadTopPicks(); loadTodayPicks(); loadPositions(); loadTrades(); }, 30000);
 </script>
 </body>
 </html>
