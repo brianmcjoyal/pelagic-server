@@ -639,7 +639,7 @@ scheduler.add_job(
     seconds=BOT_CONFIG["scan_interval_seconds"],
     id="consensus_scan",
     replace_existing=True,
-    next_run_time=datetime.datetime.utcnow(),  # run immediately on startup
+    next_run_time=datetime.datetime.utcnow() + datetime.timedelta(seconds=5),  # first scan 5s after startup
 )
 scheduler.start()
 atexit.register(scheduler.shutdown)
