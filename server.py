@@ -337,29 +337,33 @@ def fetch_kalshi():
             if _is_parlay_title(title):
                 skipped_parlays += 1
                 continue
-            # Handle both old and new Kalshi API field names
-            # New API uses _dollars suffix with string values
-            yes_ask_raw = m.get("yes_ask") or m.get("yes_ask_dollars")
-            no_ask_raw = m.get("no_ask") or m.get("no_ask_dollars")
-            last_price_raw = m.get("last_price") or m.get("last_price_dollars")
-            # Convert to cents (int)
-            def _to_cents(v):
-                if v is None:
-                    return None
-                if isinstance(v, str):
-                    try:
-                        return int(float(v) * 100)
-                    except:
-                        return None
-                return int(v) if v <= 1 else int(v)  # already cents if > 1
+            # Handle Kalshi API field names — v2 uses _dollars suffix with string values
+            def _dollars_to_cents(field_names):
+                """Try multiple field names, convert dollar string to cents."""
+                for fn in field_names:
+                    v = m.get(fn)
+                    if v is not None:
+                        if isinstance(v, str):
+                            try:
+                                return max(0, int(round(float(v) * 100)))
+                            except:
+                                continue
+                        elif isinstance(v, (int, float)):
+                            return int(v) if v > 1 else int(round(v * 100))
+                return None
 
-            yes_ask = _to_cents(yes_ask_raw) or _to_cents(last_price_raw) or 50
-            no_ask = _to_cents(no_ask_raw) or (100 - yes_ask)
+            yes_ask = _dollars_to_cents(["yes_ask_dollars", "yes_ask"])
+            no_ask = _dollars_to_cents(["no_ask_dollars", "no_ask"])
+            last_price = _dollars_to_cents(["last_price_dollars", "last_price"])
+            if yes_ask is None:
+                yes_ask = last_price if last_price is not None else 50
+            if no_ask is None:
+                no_ask = 100 - yes_ask
             yes = yes_ask / 100
             no  = no_ask / 100
             ticker = m["ticker"]
-            # Volume: try both field names
-            vol_raw = m.get("volume") or m.get("volume_fp") or m.get("volume_24h_fp") or 0
+            # Volume: try multiple field names
+            vol_raw = m.get("volume") or m.get("volume_fp") or m.get("volume_24h_fp") or "0"
             vol = int(float(vol_raw))
             out.append({
                 "platform": "kalshi",
