@@ -50,7 +50,7 @@ TIMEOUT = 8
 # Bot configuration and state
 # ---------------------------------------------------------------------------
 BOT_CONFIG = {
-    "enabled": True,
+    "enabled": False,
     "max_bet_usd": 10.0,
     "max_daily_usd": 50.0,
     "min_deviation": 0.15,
@@ -602,9 +602,6 @@ def find_consensus_mispricings(all_markets):
         if len(nq.split()) < 3:
             continue
         if m["platform"] == "kalshi":
-            # Skip parlays
-            if m["question"].count(",") >= 2:
-                continue
             kalshi.append((nq, m))
         else:
             others.append((nq, m))
@@ -988,9 +985,6 @@ def top_picks():
         if len(nq.split()) < 3:
             continue
         if m["platform"] == "kalshi":
-            # Skip parlay markets — they can't match single-outcome questions
-            if m["question"].count(",") >= 2:
-                continue
             kalshi_markets.append((nq, m))
         else:
             other_markets.append((nq, m))
@@ -1151,9 +1145,6 @@ def top_picks():
         sorted_kalshi = sorted(kalshi_markets, key=lambda x: abs(x[1]["yes"] - 0.5), reverse=True)
         for nq_k, km in sorted_kalshi:
             if any(p["kalshi_ticker"] == km["id"] for p in picks):
-                continue
-            # Skip parlay/multivariate markets (comma-separated outcomes)
-            if km["question"].count(",") >= 2:
                 continue
             # Only show markets with strong directional signal (>65% or <35%)
             if 0.35 <= km["yes"] <= 0.65:
@@ -1497,6 +1488,13 @@ a:hover { text-decoration: underline; }
   <div class="stat-card"><div class="stat-label">Mispriced Found</div><div class="stat-value yellow" id="mispriced-count">--</div></div>
   <div class="stat-card"><div class="stat-label">Trades Today</div><div class="stat-value" id="trades-today">--</div></div>
   <div class="stat-card"><div class="stat-label">Daily Spent</div><div class="stat-value red" id="daily-spent">--</div></div>
+  <div class="stat-card" style="display:flex;align-items:center;justify-content:center;min-width:180px">
+    <button id="auto-trade-btn" onclick="toggleAutoTrade()" style="
+      padding: 10px 20px; font-family: 'JetBrains Mono', monospace; font-size: 0.85em; font-weight: 700;
+      border: 2px solid #ff4444; background: rgba(255,68,68,0.15); color: #ff4444;
+      cursor: pointer; text-transform: uppercase; letter-spacing: 1px; width: 100%;
+    ">AUTO-TRADE: --</button>
+  </div>
 </div>
 
 <div class="tab-bar">
@@ -1593,19 +1591,17 @@ async function loadStatus() {
     document.getElementById('mispriced-count').textContent = status.last_scan_mispriced || 0;
     document.getElementById('trades-today').textContent = status.trades_today || 0;
     document.getElementById('daily-spent').textContent = '$' + (status.daily_spent_usd || 0).toFixed(2);
-    const dot = document.getElementById('bot-dot');
-    const label = document.getElementById('bot-label');
-    const btn = document.getElementById('toggle-btn');
+    const atBtn = document.getElementById('auto-trade-btn');
     if (status.bot_enabled) {
-      dot.className = 'dot on';
-      label.textContent = 'Bot: Active';
-      btn.textContent = 'Disable Bot';
-      btn.className = 'toggle-btn disable';
+      atBtn.textContent = 'AUTO-TRADE: ON';
+      atBtn.style.border = '2px solid #00ff88';
+      atBtn.style.background = 'rgba(0,255,136,0.15)';
+      atBtn.style.color = '#00ff88';
     } else {
-      dot.className = 'dot off';
-      label.textContent = 'Bot: Disabled';
-      btn.textContent = 'Enable Bot';
-      btn.className = 'toggle-btn enable';
+      atBtn.textContent = 'AUTO-TRADE: OFF';
+      atBtn.style.border = '2px solid #ff4444';
+      atBtn.style.background = 'rgba(255,68,68,0.15)';
+      atBtn.style.color = '#ff4444';
     }
     window._botEnabled = status.bot_enabled;
   } catch(e) { console.error(e); }
@@ -1614,6 +1610,21 @@ async function loadStatus() {
 async function toggleBot() {
   const enable = !window._botEnabled;
   await fetch(API + '/config', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({enabled: enable}) });
+  loadStatus();
+}
+
+async function toggleAutoTrade() {
+  const enable = !window._botEnabled;
+  const atBtn = document.getElementById('auto-trade-btn');
+  atBtn.textContent = enable ? 'ENABLING...' : 'DISABLING...';
+  atBtn.style.opacity = '0.5';
+  try {
+    await fetch(API + '/config', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({enabled: enable}) });
+    showToast(enable ? 'Auto-trading ENABLED' : 'Auto-trading DISABLED', enable ? 'success' : 'error');
+  } catch(e) {
+    showToast('Failed to toggle: ' + e.message, 'error');
+  }
+  atBtn.style.opacity = '1';
   loadStatus();
 }
 
