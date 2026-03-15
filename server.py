@@ -9,6 +9,9 @@ import atexit
 import base64
 import datetime
 import requests
+import xml.etree.ElementTree as ET
+from html import unescape as html_unescape
+from urllib.parse import quote_plus
 from difflib import SequenceMatcher
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, jsonify, request
@@ -460,6 +463,128 @@ ALL_FETCHERS = {
 
 # Platform weights for consensus — higher liquidity = more trusted
 PLAT_WEIGHT_GLOBAL = {"polymarket": 3.0, "predictit": 2.0, "manifold": 1.0, "metaculus": 1.5}
+
+# ---------------------------------------------------------------------------
+# News Research Engine — fetch headlines from trusted sources
+# ---------------------------------------------------------------------------
+
+_news_cache = {}  # query -> {"headlines": [...], "time": datetime}
+_NEWS_CACHE_TTL = 300  # 5 minutes
+
+def _extract_search_terms(question):
+    """Extract 2-4 key search terms from a market question."""
+    q = re.sub(r"[^a-zA-Z0-9\s]", "", question)
+    tokens = q.split()
+    # Remove common prediction market words
+    skip = {"will", "the", "be", "in", "on", "at", "to", "of", "by", "for",
+            "is", "it", "do", "does", "did", "has", "have", "had", "was",
+            "were", "been", "are", "this", "that", "before", "after",
+            "above", "below", "over", "under", "more", "less", "than",
+            "how", "many", "much", "what", "when", "where", "which", "who",
+            "yes", "no", "or", "and", "not", "if", "a", "an", "with", "from"}
+    important = [t for t in tokens if t.lower() not in skip and len(t) > 1]
+    # Keep proper nouns (capitalized) and numbers as highest priority
+    proper = [t for t in important if t[0].isupper() or t[0].isdigit()]
+    if len(proper) >= 2:
+        return " ".join(proper[:4])
+    return " ".join(important[:4])
+
+
+def fetch_news_headlines(query, max_results=5):
+    """Fetch recent news headlines from Google News RSS for a query."""
+    now = datetime.datetime.utcnow()
+    cache_key = query.lower().strip()
+    if cache_key in _news_cache:
+        cached = _news_cache[cache_key]
+        if (now - cached["time"]).total_seconds() < _NEWS_CACHE_TTL:
+            return cached["headlines"]
+
+    headlines = []
+    try:
+        url = f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-US&gl=US&ceid=US:en"
+        resp = requests.get(url, timeout=5, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        root = ET.fromstring(resp.content)
+        for item in root.findall(".//item")[:max_results]:
+            title = item.findtext("title", "")
+            source = item.findtext("source", "")
+            pub_date = item.findtext("pubDate", "")
+            link = item.findtext("link", "")
+            # Clean up title (often has " - Source" at end)
+            clean_title = html_unescape(title)
+            if " - " in clean_title:
+                parts = clean_title.rsplit(" - ", 1)
+                clean_title = parts[0]
+                if not source:
+                    source = parts[1]
+            # Parse date
+            age = ""
+            if pub_date:
+                try:
+                    from email.utils import parsedate_to_datetime
+                    pd = parsedate_to_datetime(pub_date)
+                    diff = now - pd.replace(tzinfo=None)
+                    hours = int(diff.total_seconds() / 3600)
+                    if hours < 1:
+                        age = f"{int(diff.total_seconds()/60)}m ago"
+                    elif hours < 24:
+                        age = f"{hours}h ago"
+                    else:
+                        age = f"{hours//24}d ago"
+                except Exception:
+                    pass
+            headlines.append({
+                "title": clean_title,
+                "source": source or "News",
+                "age": age,
+                "url": link,
+            })
+    except Exception as e:
+        print(f"[NEWS] Error fetching for '{query}': {e}")
+
+    _news_cache[cache_key] = {"headlines": headlines, "time": now}
+    # Trim cache to prevent memory bloat
+    if len(_news_cache) > 200:
+        oldest = sorted(_news_cache.keys(), key=lambda k: _news_cache[k]["time"])
+        for k in oldest[:100]:
+            del _news_cache[k]
+
+    return headlines
+
+
+def research_market(question):
+    """Research a market question and return news + sentiment signal."""
+    terms = _extract_search_terms(question)
+    if not terms or len(terms) < 3:
+        return {"headlines": [], "search_terms": terms, "sentiment": "neutral", "news_count": 0}
+    headlines = fetch_news_headlines(terms, max_results=5)
+    # Simple sentiment: count bullish/bearish keywords in headlines
+    bullish_words = {"surge", "soar", "jump", "rise", "gain", "rally", "record", "high",
+                     "boost", "strong", "beat", "exceed", "above", "growth", "up", "wins",
+                     "launch", "approve", "success", "increase", "expand"}
+    bearish_words = {"fall", "drop", "crash", "decline", "loss", "cut", "layoff", "fire",
+                     "slash", "below", "miss", "fail", "delay", "cancel", "down", "lose",
+                     "recession", "default", "bankruptcy", "collapse", "shrink", "reduce"}
+    bull_count = 0
+    bear_count = 0
+    for h in headlines:
+        words = set(h["title"].lower().split())
+        bull_count += len(words & bullish_words)
+        bear_count += len(words & bearish_words)
+    if bull_count > bear_count + 1:
+        sentiment = "bullish"
+    elif bear_count > bull_count + 1:
+        sentiment = "bearish"
+    else:
+        sentiment = "neutral"
+    return {
+        "headlines": headlines,
+        "search_terms": terms,
+        "sentiment": sentiment,
+        "news_count": len(headlines),
+        "bull_signals": bull_count,
+        "bear_signals": bear_count,
+    }
 
 _market_cache = {"data": [], "time": None}
 
@@ -919,6 +1044,16 @@ def opportunities():
     })
 
 
+@app.route("/research")
+def research():
+    """Research a market question — returns news headlines and sentiment."""
+    q = request.args.get("q", "")
+    if not q:
+        return jsonify({"error": "Missing ?q= parameter"}), 400
+    data = research_market(q)
+    return jsonify(data)
+
+
 @app.route("/balance")
 def balance():
     path = "/portfolio/balance"
@@ -1353,6 +1488,30 @@ def top_picks():
         p["rank"] = i + 1
 
     all_ranked = sports_picks + nonsports_picks
+
+    # ── Enrich top picks with news research (parallel, fast) ──
+    def _add_news(pick):
+        try:
+            research = research_market(pick["kalshi_question"])
+            pick["news"] = research["headlines"][:3]  # top 3 headlines
+            pick["news_sentiment"] = research["sentiment"]
+            pick["news_count"] = research["news_count"]
+            # Boost/penalize score based on news sentiment alignment
+            if research["sentiment"] == "bullish" and pick["signal"] == "buy_yes":
+                pick["news_confirms"] = True
+            elif research["sentiment"] == "bearish" and pick["signal"] == "buy_no":
+                pick["news_confirms"] = True
+            else:
+                pick["news_confirms"] = False
+        except Exception:
+            pick["news"] = []
+            pick["news_sentiment"] = "neutral"
+            pick["news_count"] = 0
+            pick["news_confirms"] = False
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        pool.map(_add_news, all_ranked)
+
     result = {"picks": all_ranked, "sports_count": len(sports_picks), "nonsports_count": len(nonsports_picks), "total_scanned": len(all_markets)}
     _picks_cache["data"] = result
     _picks_cache["time"] = datetime.datetime.utcnow()
@@ -1987,6 +2146,20 @@ function renderPickCard(p, idx, prefix) {
   h += '</div>';
   h += '<div class="pick-question"><a href="' + p.kalshi_url + '" target="_blank">' + p.kalshi_question + '</a></div>';
   h += '<div class="pick-edge">' + p.edge_summary + '</div>';
+  // News headlines
+  if (p.news && p.news.length > 0) {
+    var sentColor = p.news_sentiment === 'bullish' ? '#00ff88' : p.news_sentiment === 'bearish' ? '#ff4444' : '#888';
+    var confirmIcon = p.news_confirms ? '✓' : '';
+    h += '<div class="pick-news" style="margin:4px 0;padding:4px 6px;background:#111;border-left:2px solid ' + sentColor + ';font-size:8px;max-height:48px;overflow:hidden">';
+    h += '<div style="color:' + sentColor + ';font-weight:700;margin-bottom:2px;text-transform:uppercase;letter-spacing:0.5px">📰 ' + p.news_sentiment + ' ' + confirmIcon + '</div>';
+    p.news.forEach(function(n) {
+      h += '<div style="color:#999;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">';
+      h += '<span style="color:#666">' + n.source + '</span> ' + n.title;
+      if (n.age) h += ' <span style="color:#555">' + n.age + '</span>';
+      h += '</div>';
+    });
+    h += '</div>';
+  }
   h += '<div class="pick-chart"><canvas id="' + prefix + '-chart-' + idx + '"></canvas></div>';
   h += '<div class="pick-thesis">' + p.thesis + '</div>';
   h += '<div class="pick-footer">';
@@ -2002,8 +2175,8 @@ function renderPickCard(p, idx, prefix) {
 
 async function loadTopPicks() {
   if (_picksFirstLoad) {
-    document.getElementById('top-picks-list-sports').innerHTML = '<div class="loading" style="grid-column:1/-1">Scanning 4 platforms...</div>';
-    document.getElementById('top-picks-list-nonsports').innerHTML = '<div class="loading" style="grid-column:1/-1">Scanning 4 platforms...</div>';
+    document.getElementById('top-picks-list-sports').innerHTML = '<div class="loading" style="grid-column:1/-1">Scanning 5 platforms + news...</div>';
+    document.getElementById('top-picks-list-nonsports').innerHTML = '<div class="loading" style="grid-column:1/-1">Scanning 5 platforms + news...</div>';
   }
   try {
     const data = await fetch(API + '/top-picks').then(r => r.json());
