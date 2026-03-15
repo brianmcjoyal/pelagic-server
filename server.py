@@ -298,37 +298,28 @@ def fetch_kalshi():
 
     print(f"[FETCH] kalshi: {len(event_tickers)} non-parlay event tickers found")
 
-    # Step 2: Fetch markets for each event in parallel
+    # Step 2: Fetch markets for each event sequentially (no threading — auth is simpler)
     raw = []
-    def _fetch_markets_for_event(et):
+    for i, et in enumerate(event_tickers):
+        elapsed = (datetime.datetime.utcnow() - start_time).total_seconds()
+        if elapsed > 25:
+            print(f"[FETCH] kalshi: time limit after {i}/{len(event_tickers)} events, {len(raw)} markets")
+            break
         try:
             h = signed_headers("GET", "/markets")
             if not h:
-                return []
+                continue
             r = requests.get(
                 KALSHI_BASE_URL + KALSHI_API_PREFIX + "/markets",
-                headers=h, params={"limit": 200, "event_ticker": et, "status": "open"},
+                headers=h,
+                params={"limit": 200, "event_ticker": et, "status": "open"},
                 timeout=8,
             )
-            return r.json().get("markets", []) if r.ok else []
+            if r.ok:
+                mkts = r.json().get("markets", [])
+                raw.extend(mkts)
         except Exception:
-            return []
-
-    # Process in batches of 5 to avoid rate limiting
-    batch_size = 5
-    for i in range(0, len(event_tickers), batch_size):
-        elapsed = (datetime.datetime.utcnow() - start_time).total_seconds()
-        if elapsed > 20:
-            print(f"[FETCH] kalshi: time limit, got {len(raw)} markets from {i}/{len(event_tickers)} events")
-            break
-        batch = event_tickers[i:i+batch_size]
-        with ThreadPoolExecutor(max_workers=5) as pool:
-            futures = [pool.submit(_fetch_markets_for_event, et) for et in batch]
-            for f in futures:
-                try:
-                    raw.extend(f.result(timeout=10))
-                except Exception:
-                    continue
+            continue
 
     print(f"[FETCH] kalshi: {len(raw)} total markets from {len(event_tickers)} events")
     print(f"[FETCH] kalshi: {non_parlay_count} real markets after filtering parlays")
