@@ -196,25 +196,25 @@ _SPORTS_TITLE_KEYWORDS = [
     # NBA teams
     "lakers", "celtics", "warriors", "bulls", "heat", "nuggets", "mavericks",
     "clippers", "knicks", "nets", "hawks", "hornets", "wizards", "pacers",
-    "pistons", "rockets", "spurs", "jazz", "blazers", "kings", "suns", "bucks",
-    "raptors", "magic", "grizzlies", "pelicans", "timberwolves", "thunder",
+    "pistons", "spurs", "blazers", "suns", "bucks",
+    "raptors", "grizzlies", "pelicans", "timberwolves",
     "cavaliers", "76ers", "sixers",
     # NFL teams
     "chiefs", "eagles", "cowboys", "49ers", "ravens", "bills", "dolphins",
     "lions", "bengals", "steelers", "chargers", "packers", "vikings",
-    "commanders", "giants", "bears", "saints", "falcons", "buccaneers",
-    "seahawks", "cardinals", "rams", "jaguars", "titans", "colts", "texans",
+    "commanders", "saints", "falcons", "buccaneers",
+    "seahawks", "rams", "jaguars", "colts", "texans",
     # MLB teams
     "yankees", "dodgers", "mets", "braves", "astros", "padres", "phillies",
     "cubs", "red sox", "white sox", "orioles", "guardians", "twins", "royals",
-    "mariners", "diamondbacks", "rockies", "marlins", "nationals", "reds",
-    "pirates", "brewers", "rays",
+    "mariners", "diamondbacks", "marlins",
+    "pirates", "brewers",
     # NHL teams
-    "oilers", "panthers", "rangers", "bruins", "avalanche", "maple leafs",
-    "golden knights", "hurricanes", "sharks", "penguins", "flyers",
-    "blackhawks", "blue jackets", "red wings", "predators", "wild",
-    "canucks", "flames", "senators", "canadiens", "sabres", "islanders",
-    "kraken", "devils", "capitals",
+    "oilers", "bruins", "avalanche", "maple leafs",
+    "golden knights", "penguins", "flyers",
+    "blackhawks", "blue jackets", "red wings", "minnesota wild",
+    "canucks", "canadiens", "sabres", "islanders",
+    "kraken",
     # Soccer
     "liverpool", "arsenal", "manchester", "chelsea", "bayern", "barcelona",
     "real madrid", "tottenham", "sporting cp",
@@ -1708,13 +1708,15 @@ def top_picks():
             continue
 
         # Determine signal based on market price
+        # Use actual market price as probability — no artificial cap
+        # Single-platform picks are less reliable than consensus, reflected in score not probability
         if km["yes"] >= 0.55:
             signal = "buy_yes"
-            win_prob = min(0.92, km["yes"])
+            win_prob = km["yes"]
             price_cents = km.get("yes_ask_cents") or int(km["yes"] * 100)
         else:
             signal = "buy_no"
-            win_prob = min(0.92, 1 - km["yes"])
+            win_prob = 1 - km["yes"]
             price_cents = km.get("no_ask_cents") or int(km["no"] * 100)
 
         side_label = "YES" if signal == "buy_yes" else "NO"
@@ -1776,8 +1778,11 @@ def top_picks():
     sports_picks = sorted([p for p in picks if p.get("is_sports")], key=lambda x: x["score"], reverse=True)[:10]
     nonsports_picks = sorted([p for p in picks if not p.get("is_sports")], key=lambda x: x["score"], reverse=True)[:10]
 
-    # ── Top 5 hero picks: highest win probability across ALL categories ──
-    all_sorted = sorted(picks, key=lambda x: (x.get("win_probability", 0), x.get("score", 0)), reverse=True)
+    # ── Top 5 hero picks: best overall bets ──
+    # Prioritize: consensus > arbitrage > single-platform, then by score
+    # This prevents 5 identical "92%" single-platform picks dominating the hero
+    type_bonus = {"consensus": 2.0, "arbitrage": 1.5, "news_researched": 1.0, "high_probability": 0.8}
+    all_sorted = sorted(picks, key=lambda x: x.get("score", 0) * type_bonus.get(x.get("type", ""), 1.0), reverse=True)
     hero_picks = all_sorted[:5]
     for i, p in enumerate(hero_picks):
         p["hero_rank"] = i + 1
