@@ -633,6 +633,8 @@ def find_consensus_mispricings(all_markets):
             nq_o, om = others[idx_o]
             sim = similarity(nq_k, nq_o, km["question"], om["question"])
             if sim >= 0.40:
+                if om["yes"] < 0.03 or om["yes"] > 0.97:
+                    continue
                 matches.append({"platform": om["platform"], "yes": om["yes"], "similarity": round(sim, 3)})
 
         if len(matches) < min_plats:
@@ -642,6 +644,8 @@ def find_consensus_mispricings(all_markets):
         deviation = abs(km["yes"] - consensus_yes)
 
         if deviation < min_dev:
+            continue
+        if deviation > 0.40:
             continue
 
         if km["yes"] < consensus_yes:
@@ -1082,6 +1086,9 @@ def top_picks():
             nq_o, om = other_markets[idx_o]
             sim = similarity(nq_k, nq_o, km["question"], om["question"])
             if sim >= 0.40:
+                # Skip matches where other platform has 0 or near-0 price (not a real market)
+                if om["yes"] < 0.03 or om["yes"] > 0.97:
+                    continue
                 matches.append({
                     "platform": om["platform"], "yes": om["yes"], "no": om["no"],
                     "similarity": round(sim, 3), "volume": om.get("volume", 0),
@@ -1094,6 +1101,9 @@ def top_picks():
         consensus_yes = sum(m["yes"] * PLAT_WEIGHT.get(m["platform"], 1.0) for m in matches) / total_weight
         deviation = abs(km["yes"] - consensus_yes)
         if deviation < 0.02:
+            continue
+        # Skip suspiciously large deviations — likely a false match
+        if deviation > 0.40:
             continue
 
         # Volume filter — skip if Kalshi market has zero volume (illiquid)
@@ -1119,7 +1129,7 @@ def top_picks():
             potential = round((k_price - c_price) / 100, 2)
 
         # Win probability = consensus estimate for the side we're buying
-        win_prob = consensus_yes if signal == "buy_yes" else 1 - consensus_yes
+        win_prob = min(0.95, consensus_yes if signal == "buy_yes" else 1 - consensus_yes)
 
         # Confidence based on multiple factors
         if deviation >= 0.20 and len(matches) >= 2 and kalshi_vol > 0:
