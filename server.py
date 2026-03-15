@@ -294,19 +294,31 @@ def fetch_kalshi():
 
 
 def fetch_polymarket():
-    try:
-        resp = requests.get(
-            "https://gamma-api.polymarket.com/markets",
-            params={"active": "true", "closed": "false", "limit": 200},
-            timeout=TIMEOUT,
-        )
-        resp.raise_for_status()
-        raw = resp.json()
-    except Exception:
-        return []
-    out = []
-    for m in raw:
+    all_raw = []
+    # Fetch multiple pages sorted by volume to get high-quality markets
+    for offset in (0, 200, 400):
         try:
+            resp = requests.get(
+                "https://gamma-api.polymarket.com/markets",
+                params={"active": "true", "closed": "false", "limit": 200,
+                        "offset": offset, "order": "volume", "ascending": "false"},
+                timeout=TIMEOUT,
+            )
+            resp.raise_for_status()
+            page = resp.json()
+            if not page:
+                break
+            all_raw.extend(page)
+        except Exception:
+            break
+    out = []
+    seen = set()
+    for m in all_raw:
+        try:
+            mid = str(m.get("id", ""))
+            if mid in seen:
+                continue
+            seen.add(mid)
             prices = m.get("outcomePrices", "[]")
             if isinstance(prices, str):
                 prices = eval(prices)
@@ -319,7 +331,7 @@ def fetch_polymarket():
             slug = m.get("slug", m.get("id", ""))
             out.append({
                 "platform": "polymarket",
-                "id":       str(m.get("id", "")),
+                "id":       mid,
                 "question": m.get("question", ""),
                 "yes":      round(yes, 4),
                 "no":       round(no, 4),
@@ -368,7 +380,7 @@ def fetch_manifold():
     try:
         resp = requests.get(
             "https://api.manifold.markets/v0/markets",
-            params={"limit": 200},
+            params={"limit": 500, "sort": "liquidity"},
             timeout=TIMEOUT,
         )
         resp.raise_for_status()
@@ -418,9 +430,13 @@ def fetch_all_markets():
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = {pool.submit(fn): name for name, fn in ALL_FETCHERS.items()}
         for future in as_completed(futures):
+            name = futures[future]
             try:
-                all_markets.extend(future.result())
-            except Exception:
+                result = future.result()
+                print(f"[FETCH] {name}: {len(result)} markets")
+                all_markets.extend(result)
+            except Exception as e:
+                print(f"[FETCH] {name}: ERROR {e}")
                 continue
     if all_markets:
         _market_cache["data"] = all_markets
