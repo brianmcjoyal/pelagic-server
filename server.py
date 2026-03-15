@@ -1211,40 +1211,46 @@ def _warm_picks_cache():
             top_picks()
         print(f"[CACHE] Picks cache warmed: {_picks_cache['data']['total_scanned'] if _picks_cache.get('data') else 0} markets")
     except Exception as e:
+        import traceback
         print(f"[CACHE] Warm error: {e}")
+        traceback.print_exc()
 
-scheduler = BackgroundScheduler()
-scheduler.add_job(
-    run_bot_scan,
-    "interval",
-    seconds=BOT_CONFIG["scan_interval_seconds"],
-    id="consensus_scan",
-    replace_existing=True,
-    next_run_time=datetime.datetime.utcnow() + datetime.timedelta(seconds=5),  # first scan 5s after startup
-)
-# Warm the picks cache every 60 seconds so dashboard loads instantly
-scheduler.add_job(
-    _warm_picks_cache,
-    "interval",
-    seconds=60,
-    id="cache_warm",
-    replace_existing=True,
-    next_run_time=datetime.datetime.utcnow() + datetime.timedelta(seconds=10),  # first cache warm 10s after startup
-)
-_scheduler_started = False
+# Use a simple background thread instead of APScheduler
+# APScheduler's threadpool doesn't reliably work with gunicorn
+import threading
+import time as _time
 
-def start_scheduler():
-    global _scheduler_started
-    if _scheduler_started:
-        return
-    _scheduler_started = True
-    scheduler.start()
-    atexit.register(scheduler.shutdown)
-    print(f"[STARTUP] Scheduler started with {len(scheduler.get_jobs())} jobs: {[j.id for j in scheduler.get_jobs()]}")
+def _background_loop():
+    """Simple background loop that runs scans and warms cache."""
+    _time.sleep(8)  # wait for server to fully start
+    print("[BG] Background loop started")
+    scan_counter = 0
+    while True:
+        try:
+            # Run bot scan every iteration (~15s effective)
+            run_bot_scan()
+            scan_counter += 1
+            # Warm picks cache every 4th scan (~60s)
+            if scan_counter % 4 == 1:
+                _warm_picks_cache()
+        except Exception as e:
+            import traceback
+            print(f"[BG] Error in background loop: {e}")
+            traceback.print_exc()
+        _time.sleep(15)
 
-# Start immediately for non-gunicorn (dev) mode
-# For gunicorn, we also start here since with 1 worker it's the same process
-start_scheduler()
+_bg_thread = threading.Thread(target=_background_loop, daemon=True)
+_bg_thread.start()
+print("[STARTUP] Background thread started")
+
+# Keep scheduler object for status endpoint compatibility
+class _FakeScheduler:
+    running = True
+    def get_jobs(self):
+        return []
+    def shutdown(self):
+        pass
+scheduler = _FakeScheduler()
 
 # ---------------------------------------------------------------------------
 # Routes
