@@ -258,70 +258,56 @@ def _is_sports_market(ticker, event_ticker, title):
 # ---------------------------------------------------------------------------
 
 def fetch_kalshi():
-    """Fetch Kalshi markets using events API to skip parlays entirely."""
-    # Step 1: Get all events (these are the real market categories, no parlays)
-    events_path = "/events"
-    event_tickers = []
-    cursor = None
+    """Fetch Kalshi markets: get events first, then fetch their markets."""
+    path = "/markets"
+    h = signed_headers("GET", "/events")
+    if not h:
+        return []
+
     start_time = datetime.datetime.utcnow()
-    for page_num in range(5):
-        elapsed = (datetime.datetime.utcnow() - start_time).total_seconds()
-        if elapsed > 10:
-            break
-        try:
-            h = signed_headers("GET", events_path)
-            if not h:
-                break
-            params = {"limit": 200, "status": "open"}
-            if cursor:
-                params["cursor"] = cursor
-            resp = requests.get(
-                KALSHI_BASE_URL + KALSHI_API_PREFIX + events_path,
-                headers=h, params=params, timeout=8,
-            )
-            if not resp.ok:
-                print(f"[FETCH] kalshi events page {page_num+1}: HTTP {resp.status_code}")
-                break
-            data = resp.json()
-            events = data.get("events", [])
-            for ev in events:
+
+    # Step 1: Get non-parlay event tickers (1 page = 200 events for speed)
+    event_tickers = []
+    try:
+        resp = requests.get(
+            KALSHI_BASE_URL + KALSHI_API_PREFIX + "/events",
+            headers=h, params={"limit": 200, "status": "open"}, timeout=10,
+        )
+        if resp.ok:
+            for ev in resp.json().get("events", []):
                 et = ev.get("event_ticker", "")
                 if not et.upper().startswith("KXMVE"):
                     event_tickers.append(et)
-            cursor = data.get("cursor")
-            print(f"[FETCH] kalshi events page {page_num+1}: {len(events)} events, {len(event_tickers)} non-parlay")
-            if not cursor or len(events) < 200:
-                break
-        except Exception as e:
-            print(f"[FETCH] kalshi events error: {e}")
-            break
+            print(f"[FETCH] kalshi: {len(event_tickers)} non-parlay events")
+        else:
+            print(f"[FETCH] kalshi events: HTTP {resp.status_code}")
+    except Exception as e:
+        print(f"[FETCH] kalshi events error: {e}")
 
-    print(f"[FETCH] kalshi: {len(event_tickers)} non-parlay event tickers found")
-
-    # Step 2: Fetch markets for each event sequentially (no threading — auth is simpler)
+    # Step 2: Fetch markets for each event
     raw = []
-    for i, et in enumerate(event_tickers):
+    fetched_events = 0
+    for et in event_tickers:
         elapsed = (datetime.datetime.utcnow() - start_time).total_seconds()
-        if elapsed > 25:
-            print(f"[FETCH] kalshi: time limit after {i}/{len(event_tickers)} events, {len(raw)} markets")
+        if elapsed > 20:
+            print(f"[FETCH] kalshi: time limit, fetched {fetched_events}/{len(event_tickers)} events = {len(raw)} markets")
             break
         try:
-            h = signed_headers("GET", "/markets")
-            if not h:
-                continue
+            mh = signed_headers("GET", path)
             r = requests.get(
-                KALSHI_BASE_URL + KALSHI_API_PREFIX + "/markets",
-                headers=h,
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
+                headers=mh,
                 params={"limit": 200, "event_ticker": et, "status": "open"},
-                timeout=8,
+                timeout=5,
             )
             if r.ok:
-                mkts = r.json().get("markets", [])
-                raw.extend(mkts)
-        except Exception:
+                raw.extend(r.json().get("markets", []))
+            fetched_events += 1
+        except Exception as e:
+            fetched_events += 1
             continue
 
-    print(f"[FETCH] kalshi: {len(raw)} total markets from {len(event_tickers)} events")
+    print(f"[FETCH] kalshi: {len(raw)} markets from {fetched_events} events")
     print(f"[FETCH] kalshi: {non_parlay_count} real markets after filtering parlays")
     out = []
     skipped_parlays = 0
