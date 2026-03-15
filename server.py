@@ -336,7 +336,7 @@ def fetch_kalshi():
             except Exception as e:
                 print(f"[FETCH] kalshi fallback error: {e}")
                 break
-    print(f"[FETCH] kalshi: {non_parlay_count} real markets after filtering parlays")
+    print(f"[FETCH] kalshi: processing {len(raw)} raw markets")
     out = []
     skipped_parlays = 0
     for m in raw:
