@@ -158,26 +158,63 @@ def signed_headers(method, path):
 # ---------------------------------------------------------------------------
 
 _SPORTS_TICKER_PREFIXES = (
-    "KXMVESPORTS", "KXNBA", "KXNFL", "KXMLB", "KXNHL", "KXNCAA", "KXUFC",
+    "KXMVESPORTS", "KXMVECROSS",  # multivariate sports/cross-category parlays
+    "KXNBA", "KXNFL", "KXMLB", "KXNHL", "KXNCAA", "KXUFC",
     "KXSOCCER", "KXPGA", "KXNASCAR", "KXTENNIS", "KXMMA", "KXBOXING",
     "KXEPL", "KXCHAMPIONS", "KXFIFA", "KXWNBA", "KXMLS",
 )
 
 _SPORTS_TITLE_KEYWORDS = [
+    # Leagues
     "nba", "nfl", "mlb", "nhl", "ufc", "ncaa", "nascar", "pga", "wnba", "mls",
+    "premier league", "champions league", "la liga", "serie a", "bundesliga",
+    # Stats
     "points", "rebounds", "assists", "goals scored", "touchdowns", "strikeouts",
     "home runs", "passing yards", "rushing yards", "receiving yards",
     "wins by", "over under", "spread", "moneyline", "parlay",
-    "premier league", "champions league", "la liga", "serie a", "bundesliga",
+    # NBA teams
     "lakers", "celtics", "warriors", "bulls", "heat", "nuggets", "mavericks",
-    "clippers", "knicks", "nets", "chiefs", "eagles", "cowboys", "49ers",
-    "ravens", "bills", "dolphins", "lions", "bengals", "yankees", "dodgers",
-    "mets", "braves", "astros", "padres", "phillies", "cubs", "red sox",
-    "oilers", "panthers", "rangers", "bruins", "avalanche", "maple leafs",
-    "golden knights", "hawks", "hornets", "wizards", "pacers", "pistons",
-    "rockets", "spurs", "jazz", "blazers", "kings", "suns", "bucks",
+    "clippers", "knicks", "nets", "hawks", "hornets", "wizards", "pacers",
+    "pistons", "rockets", "spurs", "jazz", "blazers", "kings", "suns", "bucks",
     "raptors", "magic", "grizzlies", "pelicans", "timberwolves", "thunder",
-    "vs.", "game 1", "game 2", "game 3", "game 4", "game 5", "game 6", "game 7",
+    "cavaliers", "76ers", "sixers",
+    # NFL teams
+    "chiefs", "eagles", "cowboys", "49ers", "ravens", "bills", "dolphins",
+    "lions", "bengals", "steelers", "chargers", "packers", "vikings",
+    "commanders", "giants", "bears", "saints", "falcons", "buccaneers",
+    "seahawks", "cardinals", "rams", "jaguars", "titans", "colts", "texans",
+    # MLB teams
+    "yankees", "dodgers", "mets", "braves", "astros", "padres", "phillies",
+    "cubs", "red sox", "white sox", "orioles", "guardians", "twins", "royals",
+    "mariners", "diamondbacks", "rockies", "marlins", "nationals", "reds",
+    "pirates", "brewers", "rays",
+    # NHL teams
+    "oilers", "panthers", "rangers", "bruins", "avalanche", "maple leafs",
+    "golden knights", "hurricanes", "sharks", "penguins", "flyers",
+    "blackhawks", "blue jackets", "red wings", "predators", "wild",
+    "canucks", "flames", "senators", "canadiens", "sabres", "islanders",
+    "kraken", "devils", "capitals",
+    # Soccer
+    "liverpool", "arsenal", "manchester", "chelsea", "bayern", "barcelona",
+    "real madrid", "tottenham", "sporting cp",
+    # NBA players
+    "lebron", "curry", "jokic", "jokić", "doncic", "dončić", "giannis",
+    "tatum", "durant", "embiid", "booker", "reaves", "westbrook", "murray",
+    "herro", "leonard", "banchero", "adebayo", "suggs", "ware", "morant",
+    "edwards", "fox", "haliburton", "brunson", "shai", "gilgeous",
+    "deandre ayton", "demar derozan", "derrick jones", "paolo banchero",
+    "bam adebayo", "jalen suggs", "austin reaves", "nikola jokic",
+    "luka doncic", "anthony davis", "kawhi",
+    # NFL players
+    "mahomes", "allen", "hurts", "lamar", "burrow", "kelce",
+    # Tennis
+    "alcaraz", "djokovic", "sinner", "medvedev", "swiatek", "sabalenka",
+    # College
+    "duke", "gonzaga", "alabama", "auburn", "kentucky", "kansas", "purdue",
+    "uconn", "prairie view", "kennesaw", "uc irvine", "akron", "st. john",
+    # General sports
+    "game 1", "game 2", "game 3", "game 4", "game 5", "game 6", "game 7",
+    "vs.", "playoff", "championship", "tournament",
 ]
 
 
@@ -189,6 +226,9 @@ def _is_sports_market(ticker, event_ticker, title):
         if t.startswith(pfx) or et.startswith(pfx):
             return True
     lower_title = (title or "").lower()
+    # Also catch parlay-style titles with multiple "yes" entries (these are sports parlays)
+    if lower_title.count("yes ") >= 2:
+        return True
     return any(kw in lower_title for kw in _SPORTS_TITLE_KEYWORDS)
 
 
@@ -448,9 +488,9 @@ def similarity(a, b, raw_a="", raw_b=""):
             penalty *= 0.7
     seq = SequenceMatcher(None, a, b).ratio()
     kw = keyword_overlap(a, b)
-    if kw < 0.4:
+    if kw < 0.3:
         return 0
-    if seq < 0.35:
+    if seq < 0.25:
         return 0
     return (seq * 0.4 + kw * 0.6) * penalty
 
@@ -930,6 +970,9 @@ def top_picks():
         if len(nq.split()) < 3:
             continue
         if m["platform"] == "kalshi":
+            # Skip parlay markets — they can't match single-outcome questions
+            if m["question"].count(",") >= 2:
+                continue
             kalshi_markets.append((nq, m))
         else:
             other_markets.append((nq, m))
@@ -953,7 +996,7 @@ def top_picks():
         for idx_o in candidates:
             nq_o, om = other_markets[idx_o]
             sim = similarity(nq_k, nq_o, km["question"], om["question"])
-            if sim >= 0.50:
+            if sim >= 0.40:
                 matches.append({"platform": om["platform"], "yes": om["yes"], "no": om["no"], "similarity": round(sim, 3)})
         if not matches:
             continue
@@ -1082,39 +1125,52 @@ def top_picks():
             },
         })
 
-    # Strategy 3: Best Kalshi value plays (high implied probability divergence from 50/50)
-    # Fill remaining slots with the most volatile/interesting Kalshi markets
+    # Strategy 3: High-conviction Kalshi picks (strong implied probability)
+    # Show markets where the price heavily favors one side = higher win probability
+    # Skip parlay markets (titles with comma-separated outcomes)
     if len(picks) < 30:
-        sorted_kalshi = sorted(kalshi_markets, key=lambda x: abs(x[1]["yes"] - 0.5))
+        # Sort by how far from 50/50 — furthest = strongest signal
+        sorted_kalshi = sorted(kalshi_markets, key=lambda x: abs(x[1]["yes"] - 0.5), reverse=True)
         for nq_k, km in sorted_kalshi:
             if any(p["kalshi_ticker"] == km["id"] for p in picks):
                 continue
-            if km["yes"] < 0.15 or km["yes"] > 0.85:
+            # Skip parlay/multivariate markets (comma-separated outcomes)
+            if km["question"].count(",") >= 2:
                 continue
-            price_cents = min(int(km["yes"] * 100), int(km["no"] * 100))
-            cheaper_side = "buy_yes" if km["yes"] <= km["no"] else "buy_no"
-            edge = f"Kalshi near 50/50 — {cheaper_side.replace('buy_','').upper()} at {price_cents}¢"
-            thesis = f"This market is priced near even odds (YES {km['yes']*100:.0f}¢ / NO {km['no']*100:.0f}¢). "
-            thesis += f"Near-even markets offer the best risk/reward — a small edge compounds quickly at these odds. "
-            thesis += f"Max loss {price_cents}¢, max gain {100-price_cents}¢ per contract."
+            # Only show markets with strong directional signal (>65% or <35%)
+            if 0.35 <= km["yes"] <= 0.65:
+                continue
+            # Determine which side the market favors
+            if km["yes"] >= 0.65:
+                signal = "buy_yes"
+                win_prob = km["yes"]
+                price_cents = int(km["yes"] * 100)
+            else:
+                signal = "buy_no"
+                win_prob = 1 - km["yes"]
+                price_cents = int(km["no"] * 100)
+            edge = f"Market strongly favors {signal.replace('buy_','').upper()} at {win_prob*100:.0f}% implied probability"
+            thesis = f"Kalshi prices this at {km['yes']*100:.0f}¢ YES / {km['no']*100:.0f}¢ NO. "
+            thesis += f"The {win_prob*100:.0f}% implied probability suggests strong market conviction. "
+            thesis += f"Buy {signal.replace('buy_','').upper()} at {price_cents}¢ — pay {price_cents}¢ to win 100¢ if correct."
             picks.append({
-                "type": "value",
+                "type": "high_conviction",
                 "kalshi_ticker": km["id"],
                 "kalshi_question": km["question"],
                 "kalshi_yes_price": km["yes"],
                 "kalshi_url": km["url"],
-                "consensus_yes_price": 0.5,
+                "consensus_yes_price": win_prob,
                 "deviation": round(abs(km["yes"] - 0.5), 4),
-                "signal": cheaper_side,
+                "signal": signal,
                 "price_cents": price_cents,
                 "matching_platforms": [],
                 "edge_summary": edge,
                 "thesis": thesis,
                 "potential_profit_usd": round((100 - price_cents) / 100, 2),
-                "confidence": "LOW",
+                "confidence": "MEDIUM" if win_prob >= 0.75 else "LOW",
                 "platform_count": 0,
-                "win_probability": round(max(km["yes"], km["no"]), 4),
-                "score": round(max(km["yes"], km["no"]) * 0.3, 4),
+                "win_probability": round(win_prob, 4),
+                "score": round(win_prob * 0.5, 4),
                 "is_sports": km.get("is_sports", False),
                 "prices": {"kalshi_yes": round(km["yes"] * 100, 1), "kalshi_no": round(km["no"] * 100, 1)},
             })
@@ -1697,7 +1753,7 @@ function renderPickCard(p, idx, prefix) {
   const sigClass = p.signal === 'buy_yes' ? 'yes' : 'no';
   const sigLabel = p.signal === 'buy_yes' ? 'BUY YES' : 'BUY NO';
   const confClass = p.confidence.toLowerCase();
-  const typeLabel = p.type === 'consensus' ? 'CONSENSUS' : p.type === 'arbitrage' ? 'ARBITRAGE' : 'VALUE';
+  const typeLabel = p.type === 'consensus' ? 'CONSENSUS' : p.type === 'arbitrage' ? 'ARBITRAGE' : p.type === 'high_conviction' ? 'HIGH CONV.' : 'VALUE';
   let h = '<div class="pick-card">';
   h += '<div class="pick-rank">#' + (idx + 1) + '</div>';
   h += '<div class="pick-header">';
