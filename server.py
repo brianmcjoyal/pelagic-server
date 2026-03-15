@@ -13,7 +13,7 @@ import xml.etree.ElementTree as ET
 from html import unescape as html_unescape
 from urllib.parse import quote_plus
 from difflib import SequenceMatcher
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from cryptography.hazmat.primitives import serialization, hashes
@@ -161,12 +161,18 @@ def signed_headers(method, path):
 # ---------------------------------------------------------------------------
 
 def _is_parlay_title(title):
-    """Return True if a market title looks like a multi-leg parlay."""
-    lower = (title or "").lower()
-    # Count "yes " and "no " prefixes — parlays list multiple legs
-    yes_count = lower.count("yes ")
-    no_count = lower.count("no ")
-    return (yes_count + no_count) >= 2
+    """Return True if a market title looks like a multi-leg parlay.
+    Kalshi parlays have comma-separated legs like:
+      'yes Team A,yes Team B,no Player: 25+'
+    Normal titles might contain 'no' or 'yes' naturally, so we look for
+    the specific parlay pattern: comma-separated segments starting with yes/no.
+    """
+    if not title:
+        return False
+    # Split by comma and check if multiple segments start with yes/no
+    segments = [s.strip().lower() for s in title.split(",")]
+    leg_count = sum(1 for s in segments if s.startswith("yes ") or s.startswith("no "))
+    return leg_count >= 2
 
 # ---------------------------------------------------------------------------
 # Sports classification — server-side using ticker prefixes + targeted keywords
@@ -657,15 +663,20 @@ def fetch_all_markets():
     all_markets = []
     with ThreadPoolExecutor(max_workers=6) as pool:
         futures = {pool.submit(fn): name for name, fn in ALL_FETCHERS.items()}
-        for future in as_completed(futures, timeout=30):  # 30s max for all fetchers
-            name = futures[future]
-            try:
-                result = future.result(timeout=15)  # 15s max per platform
-                print(f"[FETCH] {name}: {len(result)} markets")
-                all_markets.extend(result)
-            except Exception as e:
-                print(f"[FETCH] {name}: ERROR/TIMEOUT {e}")
-                continue
+        try:
+            for future in as_completed(futures, timeout=30):
+                name = futures[future]
+                try:
+                    result = future.result(timeout=15)
+                    print(f"[FETCH] {name}: {len(result)} markets")
+                    all_markets.extend(result)
+                except Exception as e:
+                    print(f"[FETCH] {name}: ERROR/TIMEOUT {e}")
+                    continue
+        except TimeoutError:
+            print("[FETCH] Global timeout — using markets fetched so far")
+        except Exception as e:
+            print(f"[FETCH] Unexpected error: {e}")
     if all_markets:
         _market_cache["data"] = all_markets
         _market_cache["time"] = now
