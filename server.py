@@ -325,13 +325,25 @@ def fetch_kalshi():
 
     print(f"[FETCH] kalshi: {len(raw)} markets from {fetched_events} events")
 
-    # Step 3: Also fetch markets sorted by close time to get short-term opportunities
+    # Step 3: Fetch markets closing in 2026 using min/max_close_ts
+    # This is the KEY fetch — events approach gets long-term markets,
+    # but we need short-term ones that settle this year for compounding
     existing_tickers = {m.get("ticker") for m in raw}
+    import calendar
+    now_ts = int(datetime.datetime.utcnow().timestamp())
+    end_2026_ts = int(datetime.datetime(2026, 12, 31, 23, 59, 59).timestamp())
+    close_cursor = None
+    short_term_added = 0
     try:
-        for close_page in range(2):
+        for close_page in range(5):  # up to 1000 short-term markets
             mh = signed_headers("GET", path)
-            close_params = {"limit": 200, "status": "open"}
-            if close_page > 0:
+            close_params = {
+                "limit": 200,
+                "status": "open",
+                "min_close_ts": now_ts,
+                "max_close_ts": end_2026_ts,
+            }
+            if close_cursor:
                 close_params["cursor"] = close_cursor
             cr = requests.get(
                 KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
@@ -342,17 +354,21 @@ def fetch_kalshi():
                 close_cursor = cr.json().get("cursor")
                 added = 0
                 for cm in close_mkts:
-                    if cm.get("ticker") not in existing_tickers:
+                    tk = cm.get("ticker", "")
+                    if tk not in existing_tickers:
                         raw.append(cm)
-                        existing_tickers.add(cm.get("ticker"))
+                        existing_tickers.add(tk)
                         added += 1
-                print(f"[FETCH] kalshi close-time page {close_page+1}: +{added} new markets")
-                if not close_cursor:
+                short_term_added += added
+                print(f"[FETCH] kalshi 2026-markets page {close_page+1}: +{added} new ({len(close_mkts)} total on page)")
+                if not close_cursor or len(close_mkts) < 200:
                     break
             else:
+                print(f"[FETCH] kalshi 2026-markets: HTTP {cr.status_code} - {cr.text[:200]}")
                 break
     except Exception as e:
-        print(f"[FETCH] kalshi close-time fetch error: {e}")
+        print(f"[FETCH] kalshi 2026-markets error: {e}")
+    print(f"[FETCH] kalshi: +{short_term_added} short-term 2026 markets added")
 
     # Fallback: if events approach yielded nothing, do a simple paginated fetch
     if not raw:
