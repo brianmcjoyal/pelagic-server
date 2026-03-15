@@ -1406,6 +1406,7 @@ function drawPickChart(canvasId, prices, signal) {
 }
 
 let _picksFirstLoad = true;
+let _picksData = [];
 async function loadTopPicks() {
   if (_picksFirstLoad) {
     document.getElementById('top-picks-list').innerHTML = '<div class="loading" style="grid-column:1/-1">Scanning 4 platforms...</div>';
@@ -1414,6 +1415,7 @@ async function loadTopPicks() {
     const data = await fetch(API + '/top-picks').then(r => r.json());
     _picksFirstLoad = false;
     const picks = data.picks || [];
+    _picksData = picks;
     document.getElementById('picks-badge').textContent = picks.length;
     if (picks.length === 0) {
       document.getElementById('top-picks-list').innerHTML = '<div class="empty" style="grid-column:1/-1">No picks right now. Markets are efficiently priced.</div>';
@@ -1443,7 +1445,7 @@ async function loadTopPicks() {
       html += '<span class="pick-profit">+$' + p.potential_profit_usd.toFixed(2) + ' potential</span>';
       var ct = Math.max(1, Math.floor(500 / p.price_cents));
       var cost = (p.price_cents * ct / 100).toFixed(2);
-      html += '<button class="pick-execute" onclick="executePickTrade(this, ' + JSON.stringify(JSON.stringify(p)) + ')">Trade ' + ct + 'x @ $' + cost + '</button>';
+      html += '<button class="pick-execute" onclick="executePickTrade(this, ' + idx + ')">Trade ' + ct + 'x @ $' + cost + '</button>';
       html += '</div>';
       html += '</div>';
     });
@@ -1457,8 +1459,8 @@ async function loadTopPicks() {
   }
 }
 
-async function executePickTrade(btn, mJson) {
-  const m = JSON.parse(mJson);
+async function executePickTrade(btn, idx) {
+  const m = _picksData[idx];
   btn.disabled = true;
   btn.textContent = 'PLACING...';
   btn.style.borderColor = '#ff8c00';
