@@ -154,6 +154,45 @@ def signed_headers(method, path):
     }
 
 # ---------------------------------------------------------------------------
+# Sports classification — server-side using ticker prefixes + targeted keywords
+# ---------------------------------------------------------------------------
+
+_SPORTS_TICKER_PREFIXES = (
+    "KXMVESPORTS", "KXNBA", "KXNFL", "KXMLB", "KXNHL", "KXNCAA", "KXUFC",
+    "KXSOCCER", "KXPGA", "KXNASCAR", "KXTENNIS", "KXMMA", "KXBOXING",
+    "KXEPL", "KXCHAMPIONS", "KXFIFA", "KXWNBA", "KXMLS",
+)
+
+_SPORTS_TITLE_KEYWORDS = [
+    "nba", "nfl", "mlb", "nhl", "ufc", "ncaa", "nascar", "pga", "wnba", "mls",
+    "points", "rebounds", "assists", "goals scored", "touchdowns", "strikeouts",
+    "home runs", "passing yards", "rushing yards", "receiving yards",
+    "wins by", "over under", "spread", "moneyline", "parlay",
+    "premier league", "champions league", "la liga", "serie a", "bundesliga",
+    "lakers", "celtics", "warriors", "bulls", "heat", "nuggets", "mavericks",
+    "clippers", "knicks", "nets", "chiefs", "eagles", "cowboys", "49ers",
+    "ravens", "bills", "dolphins", "lions", "bengals", "yankees", "dodgers",
+    "mets", "braves", "astros", "padres", "phillies", "cubs", "red sox",
+    "oilers", "panthers", "rangers", "bruins", "avalanche", "maple leafs",
+    "golden knights", "hawks", "hornets", "wizards", "pacers", "pistons",
+    "rockets", "spurs", "jazz", "blazers", "kings", "suns", "bucks",
+    "raptors", "magic", "grizzlies", "pelicans", "timberwolves", "thunder",
+    "vs.", "game 1", "game 2", "game 3", "game 4", "game 5", "game 6", "game 7",
+]
+
+
+def _is_sports_market(ticker, event_ticker, title):
+    """Classify a Kalshi market as sports or not using ticker prefix + targeted title keywords."""
+    t = (ticker or "").upper()
+    et = (event_ticker or "").upper()
+    for pfx in _SPORTS_TICKER_PREFIXES:
+        if t.startswith(pfx) or et.startswith(pfx):
+            return True
+    lower_title = (title or "").lower()
+    return any(kw in lower_title for kw in _SPORTS_TITLE_KEYWORDS)
+
+
+# ---------------------------------------------------------------------------
 # Platform fetchers
 # ---------------------------------------------------------------------------
 
@@ -191,6 +230,7 @@ def fetch_kalshi():
             yes = (m.get("yes_ask") or m.get("last_price") or 50) / 100
             no  = (m.get("no_ask") or (100 - (m.get("last_price") or 50))) / 100
             ticker = m["ticker"]
+            event_ticker = m.get("event_ticker", "")
             out.append({
                 "platform": "kalshi",
                 "id":       ticker,
@@ -200,6 +240,8 @@ def fetch_kalshi():
                 "volume":   m.get("volume", 0),
                 "close_time": m.get("expected_expiration_time") or m.get("close_time"),
                 "url":      "https://kalshi.com/markets/" + ticker,
+                "event_ticker": event_ticker,
+                "is_sports": _is_sports_market(ticker, event_ticker, m.get("title", "")),
             })
         except Exception:
             continue
@@ -712,7 +754,7 @@ def debug_markets():
     resp = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + path, headers=headers, params={"limit": 3, "status": "open"}, timeout=TIMEOUT)
     raw = resp.json().get("markets", [])
     # Return raw fields for first 3 markets
-    return jsonify({"sample": [{k: v for k, v in m.items() if k in ("ticker", "title", "close_time", "expected_expiration_time", "expiration_time", "end_date", "settle_date", "expiration_value", "status")} for m in raw]})
+    return jsonify({"sample": [dict(m) for m in raw[:3]]})
 
 
 @app.route("/markets")
@@ -938,6 +980,15 @@ def top_picks():
             thesis += f"Buy NO at {price_cents}¢ — if consensus is correct, the YES price should drop toward {c_price:.0f}¢."
             potential = round((k_price - c_price) / 100, 2)
         confidence = "HIGH" if deviation >= 0.20 else "MEDIUM" if deviation >= 0.10 else "LOW"
+        # Win probability = consensus estimate for the side we're buying
+        if signal == "buy_yes":
+            win_prob = consensus_yes
+        else:
+            win_prob = 1 - consensus_yes
+        # Score combines win probability, edge size, and platform agreement
+        # Higher win prob + bigger edge + more platforms = better score
+        plat_bonus = 1 + 0.2 * (len(matches) - 1)  # 1.0, 1.2, 1.4, ...
+        score = win_prob * (1 + deviation) * plat_bonus
         picks.append({
             "type": "consensus",
             "kalshi_ticker": km["id"],
@@ -954,7 +1005,9 @@ def top_picks():
             "potential_profit_usd": potential,
             "confidence": confidence,
             "platform_count": len(matches),
-            "score": deviation * len(matches),
+            "win_probability": round(win_prob, 4),
+            "score": round(score, 4),
+            "is_sports": km.get("is_sports", False),
             "prices": {
                 "kalshi": round(k_price, 1),
                 **{p["platform"]: round(p["yes"] * 100, 1) for p in matches}
@@ -968,6 +1021,7 @@ def top_picks():
         buy_no = opp["buy_no"]
         # Only include if Kalshi is involved
         kalshi_side = None
+        matched_km = None
         if buy_yes["platform"] == "kalshi":
             kalshi_side = buy_yes
             other_side = buy_no
@@ -975,10 +1029,10 @@ def top_picks():
             ticker = ""
             for nq_k, km in kalshi_markets:
                 if similarity(nq_k, normalize_question(opp["question_a"]), km["question"], opp["question_a"]) > 0.5:
-                    ticker = km["id"]
+                    ticker = km["id"]; matched_km = km
                     break
                 if similarity(nq_k, normalize_question(opp["question_b"]), km["question"], opp["question_b"]) > 0.5:
-                    ticker = km["id"]
+                    ticker = km["id"]; matched_km = km
                     break
         elif buy_no["platform"] == "kalshi":
             kalshi_side = buy_no
@@ -987,10 +1041,10 @@ def top_picks():
             ticker = ""
             for nq_k, km in kalshi_markets:
                 if similarity(nq_k, normalize_question(opp["question_a"]), km["question"], opp["question_a"]) > 0.5:
-                    ticker = km["id"]
+                    ticker = km["id"]; matched_km = km
                     break
                 if similarity(nq_k, normalize_question(opp["question_b"]), km["question"], opp["question_b"]) > 0.5:
-                    ticker = km["id"]
+                    ticker = km["id"]; matched_km = km
                     break
         if not kalshi_side or not ticker:
             continue
@@ -1019,7 +1073,9 @@ def top_picks():
             "potential_profit_usd": round(opp["estimated_profit"], 2),
             "confidence": "HIGH" if opp["estimated_profit"] > 0.05 else "MEDIUM" if opp["estimated_profit"] > 0.02 else "LOW",
             "platform_count": 1,
-            "score": opp["estimated_profit"] * 10,
+            "win_probability": round(1 - kalshi_side["price"], 4) if kalshi_side["price"] < 0.5 else round(kalshi_side["price"], 4),
+            "score": round(opp["estimated_profit"] * 10 + 0.5, 4),
+            "is_sports": matched_km.get("is_sports", False) if matched_km else False,
             "prices": {
                 "kalshi": round(kalshi_side["price"] * 100, 1),
                 other_side["platform"]: round(other_side["price"] * 100, 1),
@@ -1057,7 +1113,9 @@ def top_picks():
                 "potential_profit_usd": round((100 - price_cents) / 100, 2),
                 "confidence": "LOW",
                 "platform_count": 0,
-                "score": 0.01,
+                "win_probability": round(max(km["yes"], km["no"]), 4),
+                "score": round(max(km["yes"], km["no"]) * 0.3, 4),
+                "is_sports": km.get("is_sports", False),
                 "prices": {"kalshi_yes": round(km["yes"] * 100, 1), "kalshi_no": round(km["no"] * 100, 1)},
             })
             if len(picks) >= 30:
@@ -1125,6 +1183,7 @@ def today_picks():
             "potential_profit_usd": potential,
             "yes_price": round(m["yes"] * 100),
             "no_price": round(m["no"] * 100),
+            "is_sports": m.get("is_sports", False),
         })
 
     # Sort by soonest to settle
@@ -1422,32 +1481,9 @@ a:hover { text-decoration: underline; }
 <script>
 const API = window.location.origin;
 
-const SPORTS_KEYWORDS = ['nba','nfl','mlb','nhl','ufc','nascar','f1','pga','ncaa','atp','wta','fifa',
-  'points','rebounds','assists','goals','touchdowns','yards','strikeouts','hits','runs',
-  'wins by','over under','spread','moneyline','parlay',
-  'lakers','celtics','warriors','bulls','heat','nuggets','mavericks','clippers','knicks','nets',
-  'chiefs','eagles','cowboys','49ers','ravens','bills','dolphins','lions','bengals',
-  'yankees','dodgers','mets','braves','astros','padres','phillies','cubs','red sox',
-  'oilers','panthers','rangers','bruins','avalanche','maple leafs','golden knights',
-  'lebron','curry','jokic','doncic','giannis','tatum','durant','embiid','booker',
-  'mahomes','allen','hurts','lamar','burrow','kelce',
-  'duke','gonzaga','houston','alabama','auburn','kentucky','kansas','purdue','uconn',
-  'premier league','champions league','la liga','serie a','bundesliga',
-  'liverpool','arsenal','manchester','chelsea','bayern','barcelona','real madrid',
-  'tennis','alcaraz','djokovic','sinner','medvedev','swiatek','sabalenka',
-  'boxing','mma','fight','round','knockout',
-  'game','match','team','player','season','playoff','championship','tournament','league','sport',
-  'reaves','westbrook','murray','herro','leonard','banchero','adebayo','suggs','ware',
-  'deandre','demar','derozan','precious','achiuwa','derrick','jones',
-  'denver','miami','boston','dallas','los angeles','orlando','cleveland','minnesota','memphis','sacramento',
-  'hawks','hornets','wizards','pacers','pistons','rockets','spurs','jazz','blazers','kings','suns','bucks','raptors','magic','grizzlies','pelicans','timberwolves','thunder',
-  'car hurricanes','nyi islanders','ott senators','det red wings','min wild','col avalanche','dal stars','nyr rangers','nj devils','mtl canadiens','tor maple leafs',
-  'vgk golden knights','sporting cp','bayern munich','manchester city',
-  'prairie view','kennesaw','utah','uc irvine','akron','st. john'];
-
-function isSports(q) {
-  const lower = q.toLowerCase();
-  return SPORTS_KEYWORDS.some(kw => lower.includes(kw));
+// Sports classification is now done server-side via is_sports field
+function isSports(pick) {
+  return !!pick.is_sports;
 }
 
 function switchTab(tab) {
@@ -1668,14 +1704,9 @@ function renderPickCard(p, idx, prefix) {
   h += '<span class="pick-signal ' + sigClass + '">' + sigLabel + '</span>';
   h += '<span class="pick-conf ' + confClass + '">' + p.confidence + '</span>';
   h += '<span class="pick-meta">' + typeLabel + '</span>';
-  var winPct;
-  if (p.consensus_yes_price && p.type === 'consensus') {
-    winPct = p.signal === 'buy_yes' ? (p.consensus_yes_price * 100) : ((1 - p.consensus_yes_price) * 100);
-  } else {
-    winPct = p.signal === 'buy_yes' ? (p.kalshi_yes_price * 100) : ((1 - p.kalshi_yes_price) * 100);
-  }
+  var winPct = (p.win_probability || 0.5) * 100;
   var winColor = winPct >= 60 ? '#00ff88' : winPct >= 45 ? '#ff8c00' : '#ff4444';
-  h += '<span class="pick-meta" style="color:' + winColor + ';font-weight:700">' + winPct.toFixed(0) + '% WIN</span>';
+  h += '<span class="pick-meta" style="color:' + winColor + ';font-weight:700;font-size:1.1em">' + winPct.toFixed(0) + '% WIN</span>';
   h += '<span class="pick-meta">DEV <b>' + (p.deviation * 100).toFixed(1) + '%</b></span>';
   if (p.platform_count > 0) h += '<span class="pick-meta">' + p.platform_count + ' PLATFORMS</span>';
   h += '</div>';
@@ -1708,8 +1739,8 @@ async function loadTopPicks() {
     picks.forEach((p, i) => { p._globalIdx = i; });
     _picksData = picks;
 
-    const sports = picks.filter(p => isSports(p.kalshi_question));
-    const nonSports = picks.filter(p => !isSports(p.kalshi_question));
+    const sports = picks.filter(p => isSports(p));
+    const nonSports = picks.filter(p => !isSports(p));
 
     // Render sports
     document.getElementById('picks-badge-sports').textContent = sports.length;
@@ -1938,8 +1969,8 @@ async function loadTodayPicks() {
     const picks = data.picks || [];
     picks.forEach((p, i) => { p._globalIdx = i; });
     _todayData = picks;
-    const sports = picks.filter(p => isSports(p.kalshi_question));
-    const nonSports = picks.filter(p => !isSports(p.kalshi_question));
+    const sports = picks.filter(p => isSports(p));
+    const nonSports = picks.filter(p => !isSports(p));
     renderTodayTable(sports, 'today-table-sports', 'today-badge-sports');
     renderTodayTable(nonSports, 'today-table-nonsports', 'today-badge-nonsports');
   } catch(e) {
