@@ -1572,6 +1572,7 @@ def top_picks():
             edge = f"Kalshi YES at {k_price:.0f}¢ vs consensus {c_price:.0f}¢"
             thesis = f"Cross-platform consensus ({', '.join(plat_prices)}) prices this {dev_pct:.0f}% higher than Kalshi. "
             thesis += f"Buy YES at {k_price:.0f}¢ — consensus expects ~{c_price:.0f}¢."
+            edge_reason = f"{len(matches)} other platform{'s' if len(matches)>1 else ''} price this at {c_price:.0f}¢ but Kalshi is selling at {k_price:.0f}¢ — that {dev_pct:.0f}% gap is our edge."
             potential = round((c_price - k_price) / 100, 2)
         else:
             signal = "buy_no"
@@ -1579,6 +1580,7 @@ def top_picks():
             edge = f"Kalshi YES at {k_price:.0f}¢ but consensus only {c_price:.0f}¢"
             thesis = f"Cross-platform consensus ({', '.join(plat_prices)}) prices this {dev_pct:.0f}% lower than Kalshi. "
             thesis += f"Buy NO at {price_cents}¢ — consensus expects YES to drop toward {c_price:.0f}¢."
+            edge_reason = f"{len(matches)} other platform{'s' if len(matches)>1 else ''} say YES is only worth {c_price:.0f}¢ but Kalshi has it at {k_price:.0f}¢ — we profit on NO when it corrects."
             potential = round((k_price - c_price) / 100, 2)
 
         win_prob = min(0.95, consensus_yes if signal == "buy_yes" else 1 - consensus_yes)
@@ -1617,6 +1619,7 @@ def top_picks():
             "price_cents": price_cents,
             "matching_platforms": matches,
             "edge_summary": edge,
+            "edge_reason": edge_reason,
             "thesis": thesis,
             "potential_profit_usd": potential,
             "confidence": confidence,
@@ -1667,6 +1670,7 @@ def top_picks():
         edge = f"Arbitrage: buy {signal.replace('buy_','')} on Kalshi at {price_cents}¢, hedge on {other_side['platform'].title()}"
         thesis = f"Price spread of {opp['profit_pct']:.1f}% between Kalshi and {other_side['platform'].title()}. "
         thesis += f"Estimated profit: ${opp['estimated_profit']:.4f} per contract after fees."
+        edge_reason = f"Price gap of {opp['profit_pct']:.1f}% between Kalshi and {other_side['platform'].title()} — buy here at {price_cents}¢ and profit when the gap closes."
         # Better win probability for arbitrage — use the consensus side price
         if signal == "buy_yes":
             win_prob = min(0.95, max(other_price, kalshi_side["price"]))
@@ -1689,6 +1693,7 @@ def top_picks():
             "price_cents": price_cents,
             "matching_platforms": [{"platform": other_side["platform"], "yes": round(1 - other_price, 4) if signal == "buy_no" else round(other_price, 4), "similarity": opp["similarity"]}],
             "edge_summary": edge,
+            "edge_reason": edge_reason,
             "thesis": thesis,
             "potential_profit_usd": round(opp["estimated_profit"], 2),
             "confidence": "HIGH" if opp["estimated_profit"] > 0.05 else "MEDIUM" if opp["estimated_profit"] > 0.02 else "LOW",
@@ -1771,6 +1776,13 @@ def top_picks():
         thesis = f"Kalshi market at {km['yes']*100:.0f}¢ YES / {km['no']*100:.0f}¢ NO"
         thesis += f" with {kalshi_vol:,} contracts traded."
         thesis += f" Buy {side_label} at {price_cents}¢ for {(100-price_cents)}¢ profit if correct."
+        # Honest edge_reason for single-platform picks
+        if kalshi_vol >= 5000:
+            edge_reason = f"High-volume market ({kalshi_vol:,} trades) at {price_cents}¢ — heavy trading suggests strong price discovery, but this is Kalshi-only data."
+        elif kalshi_vol >= 500:
+            edge_reason = f"Moderate volume ({kalshi_vol:,} trades) with market priced at {win_prob*100:.0f}% — single platform only, no independent confirmation."
+        else:
+            edge_reason = f"Low volume ({kalshi_vol:,} trades) — price of {price_cents}¢ is weakly supported, treat with caution."
 
         # Single-platform: heavily discount — no independent validation
         # High volume helps (more bettors = better price discovery)
@@ -1792,6 +1804,7 @@ def top_picks():
             "price_cents": price_cents,
             "matching_platforms": [],
             "edge_summary": edge,
+            "edge_reason": edge_reason,
             "thesis": thesis,
             "potential_profit_usd": round((100 - price_cents) / 100, 2),
             "confidence": confidence,
@@ -2142,22 +2155,23 @@ a:hover { text-decoration: underline; }
 @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
 /* Hero section */
 .hero-section { margin-bottom: 16px; }
-.hero-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+.hero-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
 @media (max-width: 1100px) { .hero-grid { grid-template-columns: repeat(3, 1fr); } }
 @media (max-width: 600px) { .hero-grid { grid-template-columns: repeat(2, 1fr); } }
-.hero-card { background: linear-gradient(135deg, #0d1a0d 0%, #0a0a0a 50%, #1a0d00 100%); border: 2px solid #00ff88; padding: 12px; position: relative; display: flex; flex-direction: column; }
-.hero-card:hover { border-color: #ff8c00; box-shadow: 0 0 20px rgba(255,140,0,0.15); }
-.hero-rank { position: absolute; top: 4px; right: 8px; font-size: 28px; font-weight: 900; color: rgba(0,255,136,0.15); font-family: 'Courier New', monospace; }
-.hero-prob { font-size: 28px; font-weight: 900; color: #00ff88; font-family: 'Courier New', monospace; line-height: 1; }
-.hero-label { font-size: 8px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-top: 2px; }
-.hero-question { font-size: 11px; color: #ddd; margin: 6px 0; font-weight: 600; line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.hero-card { background: linear-gradient(135deg, #0d1a0d 0%, #0a0a0a 50%, #1a0d00 100%); border: 1px solid #00ff88; padding: 8px; position: relative; display: flex; flex-direction: column; min-width: 0; }
+.hero-card:hover { border-color: #ff8c00; box-shadow: 0 0 15px rgba(255,140,0,0.15); }
+.hero-rank { position: absolute; top: 2px; right: 6px; font-size: 20px; font-weight: 900; color: rgba(0,255,136,0.15); font-family: 'Courier New', monospace; }
+.hero-prob { font-size: 20px; font-weight: 900; color: #00ff88; font-family: 'Courier New', monospace; line-height: 1; }
+.hero-label { font-size: 7px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-top: 1px; }
+.hero-question { font-size: 10px; color: #ddd; margin: 4px 0; font-weight: 600; line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .hero-question a { color: #ddd; }
 .hero-question a:hover { color: #ff8c00; }
-.hero-signal { font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 2px; display: inline-block; }
+.hero-edge-reason { font-size: 8px; color: #aaa; line-height: 1.3; margin: 2px 0 4px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; font-style: italic; }
+.hero-signal { font-size: 8px; font-weight: 700; padding: 1px 5px; border-radius: 2px; display: inline-block; }
 .hero-signal.yes { background: rgba(0,255,136,0.12); color: #00ff88; border: 1px solid #00ff88; }
 .hero-signal.no { background: rgba(255,68,68,0.12); color: #ff4444; border: 1px solid #ff4444; }
-.hero-footer { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: auto; padding-top: 6px; }
-.hero-execute { background: rgba(0,255,136,0.1); color: #00ff88; border: 1px solid #00ff88; padding: 5px 10px; border-radius: 2px; cursor: pointer; font-size: 10px; font-weight: 700; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 0.5px; }
+.hero-footer { display: flex; align-items: center; justify-content: space-between; gap: 4px; margin-top: auto; padding-top: 4px; }
+.hero-execute { background: rgba(0,255,136,0.1); color: #00ff88; border: 1px solid #00ff88; padding: 3px 8px; border-radius: 2px; cursor: pointer; font-size: 9px; font-weight: 700; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; }
 .hero-execute:hover { background: #00ff88; color: #000; }
 .hero-execute:disabled { border-color: #333; color: #555; cursor: not-allowed; background: transparent; }
 /* Toast notifications */
@@ -2323,59 +2337,55 @@ function formatSettleTime(closeTime) {
 
 function renderHeroCard(p, idx) {
   var sigClass = p.signal === 'buy_yes' ? 'yes' : 'no';
-  var sigLabel = p.signal === 'buy_yes' ? 'BET YES' : 'BET NO';
-  var marketPrice = (p.win_probability || 0.5) * 100;
+  var sigLabel = p.signal === 'buy_yes' ? 'YES' : 'NO';
+  var winPct = (p.win_probability || 0.5) * 100;
   var ct = Math.max(1, Math.floor(500 / p.price_cents));
   var cost = (p.price_cents * ct / 100).toFixed(2);
   var sideWord = p.signal === 'buy_yes' ? 'YES' : 'NO';
   var isConsensus = p.type === 'consensus' || p.type === 'arbitrage';
   var settleTime = formatSettleTime(p.close_time);
-
-  // Number of platforms that agree on this price
-  var platCount = p.platform_count || 0;
-  var totalPlats = platCount + 1; // +1 for Kalshi
-  // Consensus spread: how much platforms disagree
-  var deviation = (p.deviation || 0) * 100;
+  var platCount = (p.platform_count || 0) + 1;
 
   var h = '<div class="hero-card">';
   h += '<div class="hero-rank">#' + (idx + 1) + '</div>';
 
-  // Main stat: market price (labeled honestly)
-  var priceColor = marketPrice >= 75 ? '#00ff88' : marketPrice >= 55 ? '#ff8c00' : '#ffcc00';
-  h += '<div class="hero-prob" style="color:' + priceColor + '">' + marketPrice.toFixed(0) + '¢</div>';
-  h += '<div class="hero-label">Market Price</div>';
+  // Main stat: win probability (market-derived)
+  var pctColor = winPct >= 75 ? '#00ff88' : winPct >= 55 ? '#ff8c00' : '#ffcc00';
+  h += '<div class="hero-prob" style="color:' + pctColor + '">' + winPct.toFixed(0) + '%</div>';
+  h += '<div class="hero-label">Market Probability</div>';
 
-  // Trust indicators — all factual
-  h += '<div style="margin:4px 0;font-size:9px">';
+  // Compact info line
+  h += '<div style="display:flex;gap:5px;font-size:7px;color:#888;margin:2px 0;flex-wrap:wrap;align-items:center">';
   if (isConsensus) {
-    h += '<div style="color:#00ff88;font-weight:700">' + totalPlats + ' platforms agree · ' + deviation.toFixed(0) + '% edge</div>';
+    h += '<span style="color:#00ff88;font-weight:700">' + platCount + ' PLATFORMS</span>';
   } else {
-    h += '<div style="color:#666">Kalshi only · no cross-platform data</div>';
+    h += '<span style="color:#555">KALSHI ONLY</span>';
   }
+  h += '<span>⏱' + settleTime + '</span>';
+  h += '<span>' + (p.volume || 0).toLocaleString() + ' vol</span>';
+  h += '<span>' + p.price_cents + '¢→$1</span>';
   h += '</div>';
 
-  // Facts row
-  h += '<div style="display:flex;gap:6px;font-size:8px;color:#888;margin:2px 0;flex-wrap:wrap">';
-  h += '<span>⏱ <b style="color:#ff8c00">' + settleTime + '</b></span>';
-  h += '<span>Vol: <b style="color:#fff">' + (p.volume || 0).toLocaleString() + '</b></span>';
-  h += '<span>Cost: <b style="color:#fff">' + p.price_cents + '¢</b></span>';
-  h += '<span>Win: <b style="color:#00ff88">+' + (100 - p.price_cents) + '¢</b></span>';
-  h += '</div>';
-
+  // Question
   h += '<div class="hero-question"><a href="' + p.kalshi_url + '" target="_blank">' + p.kalshi_question + '</a></div>';
+
+  // Edge reason — single sentence explaining WHY
+  var edgeReason = p.edge_reason || p.edge_summary || '';
+  if (edgeReason) {
+    h += '<div class="hero-edge-reason">' + edgeReason + '</div>';
+  }
+
+  // Signal + bet meaning
   var yesL = p.yes_label || 'Yes';
   var noL = p.no_label || 'No';
   var betMeaning = p.signal === 'buy_yes' ? yesL : noL;
-  h += '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:4px">';
+  h += '<div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin-bottom:2px">';
   h += '<span class="hero-signal ' + sigClass + '">' + sigLabel + '</span>';
-  h += '</div>';
   if (betMeaning !== 'Yes' && betMeaning !== 'No') {
-    h += '<div style="font-size:9px;color:#ffcc00;margin-bottom:4px;font-weight:600">→ Betting: ' + betMeaning + '</div>';
+    h += '<span style="font-size:8px;color:#ffcc00;font-weight:600">→ ' + betMeaning + '</span>';
   }
-  if (p.news && p.news.length > 0) {
-    var sentColor = p.news_sentiment === 'bullish' ? '#00ff88' : p.news_sentiment === 'bearish' ? '#ff4444' : '#888';
-    h += '<div style="font-size:8px;color:' + sentColor + ';text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">📰 ' + p.news_sentiment + '</div>';
-  }
+  h += '</div>';
+
   h += '<div class="hero-footer">';
   h += '<button class="hero-execute" onclick="executePickTrade(this, ' + p._globalIdx + ')">Buy ' + sideWord + ' · $' + cost + '</button>';
   h += '</div>';
@@ -2608,9 +2618,9 @@ function renderPickCard(p, idx, prefix) {
   h += '<span class="pick-signal ' + sigClass + '">' + sigLabel + '</span>';
   h += '<span class="pick-conf ' + confClass + '">' + p.confidence + '</span>';
   h += '<span class="pick-meta" style="color:' + typeColor + '">' + typeLabel + '</span>';
-  var mktPrice = (p.win_probability || 0.5) * 100;
-  var mpColor = mktPrice >= 75 ? '#00ff88' : mktPrice >= 55 ? '#ff8c00' : '#ffcc00';
-  h += '<span class="pick-meta" style="color:' + mpColor + ';font-weight:700;font-size:1.2em">' + mktPrice.toFixed(0) + '¢</span>';
+  var winPct = (p.win_probability || 0.5) * 100;
+  var wpColor = winPct >= 75 ? '#00ff88' : winPct >= 55 ? '#ff8c00' : '#ffcc00';
+  h += '<span class="pick-meta" style="color:' + wpColor + ';font-weight:700;font-size:1.2em">' + winPct.toFixed(0) + '%</span>';
   var pickSettle = formatSettleTime(p.close_time);
   h += '<span class="pick-meta" style="color:#ff8c00;font-weight:600">⏱ ' + pickSettle + '</span>';
   if (p.platform_count > 0) h += '<span class="pick-meta">' + (p.platform_count + 1) + ' platforms</span>';
@@ -2622,6 +2632,11 @@ function renderPickCard(p, idx, prefix) {
   var pickBetMeaning = p.signal === 'buy_yes' ? pickYL : pickNL;
   if (pickBetMeaning !== 'Yes' && pickBetMeaning !== 'No') {
     h += '<div style="font-size:9px;color:#ffcc00;font-weight:600;margin-bottom:2px">→ Betting: ' + pickBetMeaning + '</div>';
+  }
+  // Edge reason — single sentence explaining why
+  var pickEdgeReason = p.edge_reason || '';
+  if (pickEdgeReason) {
+    h += '<div style="font-size:8px;color:#aaa;font-style:italic;line-height:1.3;margin:2px 0 4px">' + pickEdgeReason + '</div>';
   }
   h += '<div class="pick-edge">' + p.edge_summary + '</div>';
   // News headlines
