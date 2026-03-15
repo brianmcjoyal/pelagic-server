@@ -55,7 +55,7 @@ BOT_CONFIG = {
     "max_daily_usd": 50.0,
     "min_deviation": 0.15,
     "min_platforms": 2,
-    "scan_interval_seconds": 30,
+    "scan_interval_seconds": 15,
 }
 
 BOT_STATE = {
@@ -243,8 +243,8 @@ def fetch_kalshi():
         return []
     raw = []
     cursor = None
-    # Fetch up to 2 pages (1000 markets each) to get both sports and non-sports
-    for _ in range(2):
+    # Fetch up to 4 pages (1000 markets each) for maximum coverage
+    for _ in range(4):
         try:
             params = {"limit": 1000, "status": "open"}
             if cursor:
@@ -295,8 +295,8 @@ def fetch_kalshi():
 
 def fetch_polymarket():
     all_raw = []
-    # Fetch multiple pages sorted by volume to get high-quality markets
-    for offset in (0, 200, 400):
+    # Fetch multiple pages sorted by volume for maximum coverage
+    for offset in (0, 200, 400, 600, 800):
         try:
             resp = requests.get(
                 "https://gamma-api.polymarket.com/markets",
@@ -411,23 +411,65 @@ def fetch_manifold():
     return out
 
 
+def fetch_metaculus():
+    """Fetch binary questions from Metaculus — great for science, tech, economics."""
+    try:
+        resp = requests.get(
+            "https://www.metaculus.com/api2/questions/",
+            params={"status": "open", "type": "binary", "limit": 200,
+                    "order_by": "-activity"},
+            timeout=TIMEOUT,
+            headers={"Accept": "application/json"},
+        )
+        resp.raise_for_status()
+        raw = resp.json().get("results", [])
+    except Exception:
+        return []
+    out = []
+    for m in raw:
+        try:
+            prob = m.get("community_prediction", {})
+            if isinstance(prob, dict):
+                yes = prob.get("full", {}).get("q2", 0)  # median prediction
+            else:
+                yes = float(prob) if prob else 0
+            if yes <= 0 or yes >= 1:
+                continue
+            qid = m.get("id", "")
+            out.append({
+                "platform": "metaculus",
+                "id": str(qid),
+                "question": m.get("title", ""),
+                "yes": round(yes, 4),
+                "no": round(1 - yes, 4),
+                "volume": m.get("number_of_predictions", 0),
+                "url": f"https://www.metaculus.com/questions/{qid}/",
+            })
+        except Exception:
+            continue
+    return out
+
+
 ALL_FETCHERS = {
     "kalshi":     fetch_kalshi,
     "polymarket": fetch_polymarket,
     "predictit":  fetch_predictit,
     "manifold":   fetch_manifold,
+    "metaculus":  fetch_metaculus,
 }
 
+# Platform weights for consensus — higher liquidity = more trusted
+PLAT_WEIGHT_GLOBAL = {"polymarket": 3.0, "predictit": 2.0, "manifold": 1.0, "metaculus": 1.5}
 
 _market_cache = {"data": [], "time": None}
 
 def fetch_all_markets():
-    # Cache for 20 seconds to avoid hammering APIs on concurrent requests
+    # Cache for 12 seconds (scanning every 15s, leave buffer)
     now = datetime.datetime.utcnow()
-    if _market_cache["time"] and (now - _market_cache["time"]).total_seconds() < 20 and _market_cache["data"]:
+    if _market_cache["time"] and (now - _market_cache["time"]).total_seconds() < 12 and _market_cache["data"]:
         return _market_cache["data"]
     all_markets = []
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=5) as pool:
         futures = {pool.submit(fn): name for name, fn in ALL_FETCHERS.items()}
         for future in as_completed(futures):
             name = futures[future]
@@ -656,7 +698,8 @@ def find_consensus_mispricings(all_markets):
         if len(matches) < min_plats:
             continue
 
-        consensus_yes = sum(m["yes"] for m in matches) / len(matches)
+        total_w = sum(PLAT_WEIGHT_GLOBAL.get(m["platform"], 1.0) for m in matches)
+        consensus_yes = sum(m["yes"] * PLAT_WEIGHT_GLOBAL.get(m["platform"], 1.0) for m in matches) / total_w
         deviation = abs(km["yes"] - consensus_yes)
 
         if deviation < min_dev:
@@ -1069,7 +1112,7 @@ def top_picks():
             other_kw_index[word].add(idx_o)
 
     # Platform liquidity weights
-    PLAT_WEIGHT = {"polymarket": 3.0, "predictit": 2.0, "manifold": 1.0}
+    PLAT_WEIGHT = PLAT_WEIGHT_GLOBAL
 
     def _time_bonus(market):
         ct = market.get("close_time")
@@ -1612,7 +1655,7 @@ a:hover { text-decoration: underline; }
   </svg>
   <div>
     <h1><span>Trade</span>Shark</h1>
-    <p class="subtitle">Cross-platform prediction market trading &bull; Scanning 4 platforms every 30 seconds</p>
+    <p class="subtitle">Cross-platform prediction market trading &bull; Scanning 5 platforms every 15 seconds</p>
   </div>
 </div>
 
