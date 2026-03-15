@@ -1204,6 +1204,15 @@ def run_bot_scan():
 # Scheduler
 # ---------------------------------------------------------------------------
 
+def _warm_picks_cache():
+    """Pre-populate picks cache so the dashboard loads instantly."""
+    try:
+        with app.test_request_context():
+            top_picks()
+        print(f"[CACHE] Picks cache warmed: {_picks_cache['data']['total_scanned'] if _picks_cache.get('data') else 0} markets")
+    except Exception as e:
+        print(f"[CACHE] Warm error: {e}")
+
 scheduler = BackgroundScheduler()
 scheduler.add_job(
     run_bot_scan,
@@ -1212,6 +1221,15 @@ scheduler.add_job(
     id="consensus_scan",
     replace_existing=True,
     next_run_time=datetime.datetime.utcnow() + datetime.timedelta(seconds=5),  # first scan 5s after startup
+)
+# Warm the picks cache every 60 seconds so dashboard loads instantly
+scheduler.add_job(
+    _warm_picks_cache,
+    "interval",
+    seconds=60,
+    id="cache_warm",
+    replace_existing=True,
+    next_run_time=datetime.datetime.utcnow() + datetime.timedelta(seconds=10),  # first cache warm 10s after startup
 )
 scheduler.start()
 atexit.register(scheduler.shutdown)
@@ -1593,12 +1611,18 @@ def mispriced():
 
 
 _picks_cache = {"data": None, "time": None}
+_EMPTY_PICKS = {"picks": [], "hero": [], "misc": [], "sports_count": 0, "nonsports_count": 0, "hero_count": 0, "misc_count": 0, "total_scanned": 0, "status": "scanning"}
 
 @app.route("/top-picks")
 def top_picks():
     now = datetime.datetime.utcnow()
-    if _picks_cache["time"] and (now - _picks_cache["time"]).total_seconds() < 25 and _picks_cache["data"] is not None:
+    # Serve cached data if fresh (60s TTL)
+    if _picks_cache["time"] and (now - _picks_cache["time"]).total_seconds() < 60 and _picks_cache["data"] is not None:
         return jsonify(_picks_cache["data"])
+    # If no cache yet, return empty immediately — don't block the page
+    # The scheduler or auto-refresh will fill the cache
+    if _picks_cache["data"] is None:
+        return jsonify(_EMPTY_PICKS)
     all_markets = fetch_all_markets()
     picks = []
 
