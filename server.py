@@ -1239,9 +1239,18 @@ def _background_loop():
             traceback.print_exc()
         _time.sleep(15)
 
-_bg_thread = threading.Thread(target=_background_loop, daemon=True)
-_bg_thread.start()
-print("[STARTUP] Background thread started")
+_bg_thread = None
+
+def _ensure_bg_thread():
+    global _bg_thread
+    if _bg_thread is not None and _bg_thread.is_alive():
+        return
+    _bg_thread = threading.Thread(target=_background_loop, daemon=True)
+    _bg_thread.start()
+    print("[STARTUP] Background thread started")
+
+# Try to start now, but also start on first request
+_ensure_bg_thread()
 
 # Keep scheduler object for status endpoint compatibility
 class _FakeScheduler:
@@ -1252,24 +1261,26 @@ class _FakeScheduler:
         pass
 scheduler = _FakeScheduler()
 
+@app.before_request
+def _ensure_bg_on_request():
+    """Ensure background thread is running on first HTTP request."""
+    _ensure_bg_thread()
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
 @app.route("/debug-scheduler")
 def debug_scheduler():
-    jobs = []
-    for j in scheduler.get_jobs():
-        jobs.append({
-            "id": j.id,
-            "next_run": str(j.next_run_time),
-            "trigger": str(j.trigger),
-        })
     return jsonify({
-        "running": scheduler.running,
-        "jobs": jobs,
+        "bg_thread_alive": _bg_thread.is_alive() if _bg_thread else False,
+        "bg_thread_exists": _bg_thread is not None,
         "picks_cache_has_data": _picks_cache["data"] is not None,
         "picks_cache_time": str(_picks_cache["time"]),
+        "last_scan": BOT_STATE.get("last_scan"),
+        "last_scan_markets": BOT_STATE.get("last_scan_markets", 0),
+        "active_threads": threading.active_count(),
+        "thread_names": [t.name for t in threading.enumerate()],
     })
 
 @app.route("/health")
