@@ -267,17 +267,22 @@ def fetch_kalshi():
     out = []
     for m in raw:
         try:
-            yes = (m.get("yes_ask") or m.get("last_price") or 50) / 100
-            no  = (m.get("no_ask") or (100 - (m.get("last_price") or 50))) / 100
+            yes_ask = m.get("yes_ask") or m.get("last_price") or 50
+            no_ask = m.get("no_ask") or (100 - (m.get("last_price") or 50))
+            yes = yes_ask / 100
+            no  = no_ask / 100
             ticker = m["ticker"]
             event_ticker = m.get("event_ticker", "")
+            vol = m.get("volume", 0) or 0
             out.append({
                 "platform": "kalshi",
                 "id":       ticker,
                 "question": m.get("title") or ticker,
                 "yes":      round(yes, 4),
                 "no":       round(no, 4),
-                "volume":   m.get("volume", 0),
+                "yes_ask_cents": int(yes_ask),
+                "no_ask_cents":  int(no_ask),
+                "volume":   vol,
                 "close_time": m.get("expected_expiration_time") or m.get("close_time"),
                 "url":      "https://kalshi.com/markets/" + ticker,
                 "event_ticker": event_ticker,
@@ -924,6 +929,52 @@ def positions():
         return jsonify({"positions": [], "error": str(e)})
 
 
+@app.route("/settled")
+def settled_positions():
+    """Get settled positions to track win/loss record."""
+    path = "/portfolio/positions"
+    headers = signed_headers("GET", path)
+    if not headers:
+        return jsonify({"settled": [], "error": "No API key"})
+    try:
+        resp = requests.get(
+            KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
+            headers=headers,
+            params={"limit": 100, "settlement_status": "settled"},
+            timeout=TIMEOUT,
+        )
+        resp.raise_for_status()
+        positions_list = resp.json().get("market_positions", [])
+        wins = 0
+        losses = 0
+        total_pnl = 0
+        settled = []
+        for pos in positions_list:
+            pnl = pos.get("realized_pnl", 0) / 100  # cents to dollars
+            total_pnl += pnl
+            won = pnl > 0
+            if won:
+                wins += 1
+            else:
+                losses += 1
+            settled.append({
+                "ticker": pos.get("ticker", ""),
+                "pnl_usd": round(pnl, 2),
+                "won": won,
+                "total_traded": pos.get("total_traded", 0),
+                "fees_paid": pos.get("fees_paid", 0) / 100,
+            })
+        return jsonify({
+            "settled": settled,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round(wins / max(1, wins + losses) * 100, 1),
+            "total_pnl_usd": round(total_pnl, 2),
+        })
+    except Exception as e:
+        return jsonify({"settled": [], "error": str(e)})
+
+
 # ---------------------------------------------------------------------------
 # Bot endpoints (NEW)
 # ---------------------------------------------------------------------------
@@ -997,6 +1048,28 @@ def top_picks():
                 other_kw_index[word] = set()
             other_kw_index[word].add(idx_o)
 
+    # Platform liquidity weights — higher volume platforms get more influence
+    PLAT_WEIGHT = {"polymarket": 3.0, "predictit": 2.0, "manifold": 1.0}
+
+    # Helper: compute time-to-expiry bonus (sooner = better)
+    def _time_bonus(market):
+        ct = market.get("close_time")
+        if not ct:
+            return 0.5  # unknown expiry = neutral
+        try:
+            exp = datetime.datetime.fromisoformat(ct.replace("Z", "+00:00").replace("+00:00", ""))
+        except Exception:
+            return 0.5
+        hours_left = max(0, (exp - now).total_seconds() / 3600)
+        if hours_left <= 12:
+            return 1.5   # settling today — most predictable
+        elif hours_left <= 48:
+            return 1.2   # settling soon
+        elif hours_left <= 168:
+            return 1.0   # this week
+        else:
+            return 0.6   # far out — less predictable
+
     for nq_k, km in kalshi_markets:
         matches = []
         # Find candidate other markets sharing 2+ keywords
@@ -1009,41 +1082,59 @@ def top_picks():
             nq_o, om = other_markets[idx_o]
             sim = similarity(nq_k, nq_o, km["question"], om["question"])
             if sim >= 0.40:
-                matches.append({"platform": om["platform"], "yes": om["yes"], "no": om["no"], "similarity": round(sim, 3)})
+                matches.append({
+                    "platform": om["platform"], "yes": om["yes"], "no": om["no"],
+                    "similarity": round(sim, 3), "volume": om.get("volume", 0),
+                })
         if not matches:
             continue
-        consensus_yes = sum(m["yes"] for m in matches) / len(matches)
+
+        # Liquidity-weighted consensus — Polymarket counts 3x more than Manifold
+        total_weight = sum(PLAT_WEIGHT.get(m["platform"], 1.0) for m in matches)
+        consensus_yes = sum(m["yes"] * PLAT_WEIGHT.get(m["platform"], 1.0) for m in matches) / total_weight
         deviation = abs(km["yes"] - consensus_yes)
         if deviation < 0.02:
             continue
+
+        # Volume filter — skip if Kalshi market has zero volume (illiquid)
+        kalshi_vol = km.get("volume", 0)
+
         plat_prices = [f"{p['platform'].title()} {p['yes']*100:.0f}¢" for p in matches]
         k_price = km["yes"] * 100
         c_price = consensus_yes * 100
         dev_pct = deviation * 100
         if km["yes"] < consensus_yes:
             signal = "buy_yes"
-            price_cents = int(km["yes"] * 100)
-            edge = f"Kalshi YES at {k_price:.0f}¢ vs {len(matches)} platform avg of {c_price:.0f}¢"
+            price_cents = km.get("yes_ask_cents") or int(km["yes"] * 100)
+            edge = f"Kalshi YES at {k_price:.0f}¢ vs consensus {c_price:.0f}¢"
             thesis = f"Cross-platform consensus ({', '.join(plat_prices)}) prices this {dev_pct:.0f}% higher than Kalshi. "
-            thesis += f"Buy YES at {k_price:.0f}¢ — if consensus is correct, expect convergence toward {c_price:.0f}¢."
+            thesis += f"Buy YES at {k_price:.0f}¢ — consensus expects ~{c_price:.0f}¢."
             potential = round((c_price - k_price) / 100, 2)
         else:
             signal = "buy_no"
-            price_cents = int(km["no"] * 100)
+            price_cents = km.get("no_ask_cents") or int(km["no"] * 100)
             edge = f"Kalshi YES at {k_price:.0f}¢ but consensus only {c_price:.0f}¢"
             thesis = f"Cross-platform consensus ({', '.join(plat_prices)}) prices this {dev_pct:.0f}% lower than Kalshi. "
-            thesis += f"Buy NO at {price_cents}¢ — if consensus is correct, the YES price should drop toward {c_price:.0f}¢."
+            thesis += f"Buy NO at {price_cents}¢ — consensus expects YES to drop toward {c_price:.0f}¢."
             potential = round((k_price - c_price) / 100, 2)
-        confidence = "HIGH" if deviation >= 0.20 else "MEDIUM" if deviation >= 0.10 else "LOW"
+
         # Win probability = consensus estimate for the side we're buying
-        if signal == "buy_yes":
-            win_prob = consensus_yes
+        win_prob = consensus_yes if signal == "buy_yes" else 1 - consensus_yes
+
+        # Confidence based on multiple factors
+        if deviation >= 0.20 and len(matches) >= 2 and kalshi_vol > 0:
+            confidence = "HIGH"
+        elif deviation >= 0.10 or len(matches) >= 2:
+            confidence = "MEDIUM"
         else:
-            win_prob = 1 - consensus_yes
-        # Score combines win probability, edge size, and platform agreement
-        # Higher win prob + bigger edge + more platforms = better score
-        plat_bonus = 1 + 0.2 * (len(matches) - 1)  # 1.0, 1.2, 1.4, ...
-        score = win_prob * (1 + deviation) * plat_bonus
+            confidence = "LOW"
+
+        # Smart scoring: win_prob × edge × platform_bonus × time_bonus × volume_bonus
+        plat_bonus = 1 + 0.25 * (len(matches) - 1)
+        time_b = _time_bonus(km)
+        vol_bonus = 1.3 if kalshi_vol > 100 else 1.0 if kalshi_vol > 0 else 0.5
+        score = win_prob * (1 + deviation) * plat_bonus * time_b * vol_bonus
+
         picks.append({
             "type": "consensus",
             "kalshi_ticker": km["id"],
@@ -1062,6 +1153,7 @@ def top_picks():
             "platform_count": len(matches),
             "win_probability": round(win_prob, 4),
             "score": round(score, 4),
+            "volume": kalshi_vol,
             "is_sports": km.get("is_sports", False),
             "prices": {
                 "kalshi": round(k_price, 1),
@@ -1137,9 +1229,8 @@ def top_picks():
             },
         })
 
-    # Strategy 3: High-conviction Kalshi picks (strong implied probability)
-    # Show markets where the price heavily favors one side = higher win probability
-    # Skip parlay markets (titles with comma-separated outcomes)
+    # Strategy 3: High-conviction Kalshi picks (strong implied probability + volume)
+    # Markets where price heavily favors one side AND has real trading volume
     if len(picks) < 30:
         # Sort by how far from 50/50 — furthest = strongest signal
         sorted_kalshi = sorted(kalshi_markets, key=lambda x: abs(x[1]["yes"] - 0.5), reverse=True)
@@ -1149,19 +1240,31 @@ def top_picks():
             # Only show markets with strong directional signal (>65% or <35%)
             if 0.35 <= km["yes"] <= 0.65:
                 continue
-            # Determine which side the market favors
+            kalshi_vol = km.get("volume", 0)
             if km["yes"] >= 0.65:
                 signal = "buy_yes"
                 win_prob = km["yes"]
-                price_cents = int(km["yes"] * 100)
+                price_cents = km.get("yes_ask_cents") or int(km["yes"] * 100)
             else:
                 signal = "buy_no"
                 win_prob = 1 - km["yes"]
-                price_cents = int(km["no"] * 100)
-            edge = f"Market strongly favors {signal.replace('buy_','').upper()} at {win_prob*100:.0f}% implied probability"
-            thesis = f"Kalshi prices this at {km['yes']*100:.0f}¢ YES / {km['no']*100:.0f}¢ NO. "
-            thesis += f"The {win_prob*100:.0f}% implied probability suggests strong market conviction. "
-            thesis += f"Buy {signal.replace('buy_','').upper()} at {price_cents}¢ — pay {price_cents}¢ to win 100¢ if correct."
+                price_cents = km.get("no_ask_cents") or int(km["no"] * 100)
+            side_label = "YES" if signal == "buy_yes" else "NO"
+            edge = f"{win_prob*100:.0f}% implied probability — buy {side_label} at {price_cents}¢"
+            thesis = f"Kalshi prices this at {km['yes']*100:.0f}¢ YES / {km['no']*100:.0f}¢ NO"
+            if kalshi_vol > 0:
+                thesis += f" with {kalshi_vol:,} contracts traded"
+            thesis += f". The {win_prob*100:.0f}% implied probability suggests strong market conviction. "
+            thesis += f"Pay {price_cents}¢ to win $1 if correct ({(100-price_cents)}¢ profit)."
+            time_b = _time_bonus(km)
+            vol_bonus = 1.3 if kalshi_vol > 100 else 1.0 if kalshi_vol > 0 else 0.4
+            score = win_prob * time_b * vol_bonus * 0.5
+            if win_prob >= 0.75 and kalshi_vol > 50:
+                confidence = "MEDIUM"
+            elif win_prob >= 0.80:
+                confidence = "MEDIUM"
+            else:
+                confidence = "LOW"
             picks.append({
                 "type": "high_conviction",
                 "kalshi_ticker": km["id"],
@@ -1176,10 +1279,11 @@ def top_picks():
                 "edge_summary": edge,
                 "thesis": thesis,
                 "potential_profit_usd": round((100 - price_cents) / 100, 2),
-                "confidence": "MEDIUM" if win_prob >= 0.75 else "LOW",
+                "confidence": confidence,
                 "platform_count": 0,
                 "win_probability": round(win_prob, 4),
-                "score": round(win_prob * 0.5, 4),
+                "score": round(score, 4),
+                "volume": kalshi_vol,
                 "is_sports": km.get("is_sports", False),
                 "prices": {"kalshi_yes": round(km["yes"] * 100, 1), "kalshi_no": round(km["no"] * 100, 1)},
             })
@@ -1544,6 +1648,13 @@ a:hover { text-decoration: underline; }
 </div>
 
 <div class="section">
+  <div class="section-title">Win/Loss Record <button class="refresh-btn" onclick="loadSettled()">Refresh</button></div>
+  <div id="settled-stats" style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:8px">
+    <span style="color:#888">Loading...</span>
+  </div>
+</div>
+
+<div class="section">
   <div class="section-title">Trade History <span class="badge" id="trade-badge">0</span><button class="refresh-btn" onclick="loadTrades()">Refresh</button></div>
   <div id="trade-table"><div class="loading">Loading trades...</div></div>
 </div>
@@ -1781,20 +1892,24 @@ let _picksData = [];
 
 function renderPickCard(p, idx, prefix) {
   const sigClass = p.signal === 'buy_yes' ? 'yes' : 'no';
-  const sigLabel = p.signal === 'buy_yes' ? 'BUY YES' : 'BUY NO';
+  const sigLabel = p.signal === 'buy_yes' ? 'BET YES' : 'BET NO';
   const confClass = p.confidence.toLowerCase();
-  const typeLabel = p.type === 'consensus' ? 'CONSENSUS' : p.type === 'arbitrage' ? 'ARBITRAGE' : p.type === 'high_conviction' ? 'HIGH CONV.' : 'VALUE';
+  const typeLabels = {consensus: 'CROSS-PLATFORM', arbitrage: 'ARBITRAGE', high_conviction: 'STRONG SIGNAL'};
+  const typeLabel = typeLabels[p.type] || 'PICK';
+  const typeColors = {consensus: '#00ff88', arbitrage: '#ff8c00', high_conviction: '#4a9eff'};
+  const typeColor = typeColors[p.type] || '#888';
   let h = '<div class="pick-card">';
   h += '<div class="pick-rank">#' + (idx + 1) + '</div>';
   h += '<div class="pick-header">';
   h += '<span class="pick-signal ' + sigClass + '">' + sigLabel + '</span>';
   h += '<span class="pick-conf ' + confClass + '">' + p.confidence + '</span>';
-  h += '<span class="pick-meta">' + typeLabel + '</span>';
+  h += '<span class="pick-meta" style="color:' + typeColor + '">' + typeLabel + '</span>';
   var winPct = (p.win_probability || 0.5) * 100;
-  var winColor = winPct >= 60 ? '#00ff88' : winPct >= 45 ? '#ff8c00' : '#ff4444';
-  h += '<span class="pick-meta" style="color:' + winColor + ';font-weight:700;font-size:1.1em">' + winPct.toFixed(0) + '% WIN</span>';
-  h += '<span class="pick-meta">DEV <b>' + (p.deviation * 100).toFixed(1) + '%</b></span>';
-  if (p.platform_count > 0) h += '<span class="pick-meta">' + p.platform_count + ' PLATFORMS</span>';
+  var winColor = winPct >= 70 ? '#00ff88' : winPct >= 55 ? '#ff8c00' : '#ff4444';
+  h += '<span class="pick-meta" style="color:' + winColor + ';font-weight:700;font-size:1.2em">' + winPct.toFixed(0) + '%</span>';
+  if (p.deviation > 0.02) h += '<span class="pick-meta">EDGE <b>' + (p.deviation * 100).toFixed(0) + '%</b></span>';
+  if (p.platform_count > 0) h += '<span class="pick-meta">' + p.platform_count + ' PLATFORM' + (p.platform_count > 1 ? 'S' : '') + '</span>';
+  if (p.volume > 0) h += '<span class="pick-meta" style="color:#666">' + p.volume.toLocaleString() + ' vol</span>';
   h += '</div>';
   h += '<div class="pick-question"><a href="' + p.kalshi_url + '" target="_blank">' + p.kalshi_question + '</a></div>';
   h += '<div class="pick-edge">' + p.edge_summary + '</div>';
@@ -1805,7 +1920,6 @@ function renderPickCard(p, idx, prefix) {
   h += '<span class="pick-profit">+$' + p.potential_profit_usd.toFixed(2) + ' potential</span>';
   var ct = Math.max(1, Math.floor(500 / p.price_cents));
   var cost = (p.price_cents * ct / 100).toFixed(2);
-  // Store the global index for trade execution
   h += '<button class="pick-execute" onclick="executePickTrade(this, ' + p._globalIdx + ')">Trade ' + ct + 'x @ $' + cost + '</button>';
   h += '</div>';
   h += '</div>';
@@ -2149,15 +2263,33 @@ async function loadPositions() {
   }
 }
 
+async function loadSettled() {
+  try {
+    const data = await fetch(API + '/settled').then(r => r.json());
+    const el = document.getElementById('settled-stats');
+    const w = data.wins || 0, l = data.losses || 0, wr = data.win_rate || 0;
+    const pnl = data.total_pnl_usd || 0;
+    const pnlColor = pnl >= 0 ? '#00ff88' : '#ff4444';
+    const wrColor = wr >= 60 ? '#00ff88' : wr >= 40 ? '#ff8c00' : '#ff4444';
+    el.innerHTML = '<div style="background:#0a0a0a;border:1px solid #333;padding:10px 18px;min-width:100px;text-align:center"><div style="color:#888;font-size:0.7em;text-transform:uppercase">Wins</div><div style="color:#00ff88;font-size:1.3em;font-weight:700">' + w + '</div></div>'
+      + '<div style="background:#0a0a0a;border:1px solid #333;padding:10px 18px;min-width:100px;text-align:center"><div style="color:#888;font-size:0.7em;text-transform:uppercase">Losses</div><div style="color:#ff4444;font-size:1.3em;font-weight:700">' + l + '</div></div>'
+      + '<div style="background:#0a0a0a;border:1px solid #333;padding:10px 18px;min-width:100px;text-align:center"><div style="color:#888;font-size:0.7em;text-transform:uppercase">Win Rate</div><div style="color:' + wrColor + ';font-size:1.3em;font-weight:700">' + wr.toFixed(0) + '%</div></div>'
+      + '<div style="background:#0a0a0a;border:1px solid #333;padding:10px 18px;min-width:100px;text-align:center"><div style="color:#888;font-size:0.7em;text-transform:uppercase">P&L</div><div style="color:' + pnlColor + ';font-size:1.3em;font-weight:700">' + (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) + '</div></div>';
+  } catch(e) {
+    document.getElementById('settled-stats').innerHTML = '<span style="color:#ff4444">Error: ' + e.message + '</span>';
+  }
+}
+
 // Load everything on page load
 loadStatus();
 loadTopPicks();
 loadTodayPicks();
 loadPositions();
+loadSettled();
 loadMispriced();
 loadTrades();
 // Auto-refresh every 30 seconds
-setInterval(() => { loadStatus(); loadTopPicks(); loadTodayPicks(); loadPositions(); loadTrades(); }, 30000);
+setInterval(() => { loadStatus(); loadTopPicks(); loadTodayPicks(); loadPositions(); loadSettled(); loadTrades(); }, 30000);
 </script>
 </body>
 </html>
