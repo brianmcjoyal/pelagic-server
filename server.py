@@ -1776,13 +1776,34 @@ def top_picks():
     sports_picks = sorted([p for p in picks if p.get("is_sports")], key=lambda x: x["score"], reverse=True)[:10]
     nonsports_picks = sorted([p for p in picks if not p.get("is_sports")], key=lambda x: x["score"], reverse=True)[:10]
 
+    # ── Top 5 hero picks: highest win probability across ALL categories ──
+    all_sorted = sorted(picks, key=lambda x: (x.get("win_probability", 0), x.get("score", 0)), reverse=True)
+    hero_picks = all_sorted[:5]
+    for i, p in enumerate(hero_picks):
+        p["hero_rank"] = i + 1
+
+    # ── Miscellaneous: interesting picks not in sports/nonsports top 10 ──
+    top_tickers = {p["kalshi_ticker"] for p in sports_picks + nonsports_picks}
+    misc_candidates = [p for p in picks if p["kalshi_ticker"] not in top_tickers]
+    misc_picks = sorted(misc_candidates, key=lambda x: x["score"], reverse=True)[:10]
+
     # Re-rank within each category
     for i, p in enumerate(sports_picks):
         p["rank"] = i + 1
     for i, p in enumerate(nonsports_picks):
         p["rank"] = i + 1
+    for i, p in enumerate(misc_picks):
+        p["rank"] = i + 1
 
-    all_ranked = sports_picks + nonsports_picks
+    all_ranked = hero_picks + sports_picks + nonsports_picks + misc_picks
+    # Deduplicate for news enrichment
+    seen_tickers_ranked = set()
+    unique_ranked = []
+    for p in all_ranked:
+        if p["kalshi_ticker"] not in seen_tickers_ranked:
+            seen_tickers_ranked.add(p["kalshi_ticker"])
+            unique_ranked.append(p)
+    all_ranked = unique_ranked
 
     # ── Enrich top picks with news research (parallel, fast) ──
     def _add_news(pick):
@@ -1807,7 +1828,7 @@ def top_picks():
     with ThreadPoolExecutor(max_workers=8) as pool:
         pool.map(_add_news, all_ranked)
 
-    result = {"picks": all_ranked, "sports_count": len(sports_picks), "nonsports_count": len(nonsports_picks), "total_scanned": len(all_markets)}
+    result = {"picks": all_ranked, "hero": [p["kalshi_ticker"] for p in hero_picks], "misc": [p["kalshi_ticker"] for p in misc_picks], "sports_count": len(sports_picks), "nonsports_count": len(nonsports_picks), "hero_count": len(hero_picks), "misc_count": len(misc_picks), "total_scanned": len(all_markets)}
     _picks_cache["data"] = result
     _picks_cache["time"] = datetime.datetime.utcnow()
     return jsonify(result)
@@ -2052,13 +2073,29 @@ a:hover { text-decoration: underline; }
 .pick-execute { background: transparent; color: #00ff88; border: 1px solid #00ff88; padding: 4px 8px; border-radius: 2px; cursor: pointer; font-size: 9px; font-weight: 700; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 0.5px; width: 100%; margin-top: 6px; }
 .pick-execute:hover { background: #00ff88; color: #000; }
 .pick-execute:disabled { border-color: #333; color: #555; cursor: not-allowed; background: transparent; }
-/* Tabs */
-.tab-bar { display: flex; gap: 0; margin-bottom: 12px; border-bottom: 2px solid #222; }
-.tab-btn { background: transparent; border: none; color: #666; font-family: 'Courier New', monospace; font-size: 13px; font-weight: 700; padding: 8px 20px; cursor: pointer; text-transform: uppercase; letter-spacing: 1.5px; border-bottom: 2px solid transparent; margin-bottom: -2px; }
-.tab-btn.active { color: #ff8c00; border-bottom-color: #ff8c00; }
-.tab-btn:hover { color: #ff8c00; }
-.tab-content { display: none; }
-.tab-content.active { display: block; }
+/* Two-column layout */
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+@media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+/* Hero section */
+.hero-section { margin-bottom: 16px; }
+.hero-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+@media (max-width: 1100px) { .hero-grid { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 600px) { .hero-grid { grid-template-columns: repeat(2, 1fr); } }
+.hero-card { background: linear-gradient(135deg, #0d1a0d 0%, #0a0a0a 50%, #1a0d00 100%); border: 2px solid #00ff88; padding: 12px; position: relative; display: flex; flex-direction: column; }
+.hero-card:hover { border-color: #ff8c00; box-shadow: 0 0 20px rgba(255,140,0,0.15); }
+.hero-rank { position: absolute; top: 4px; right: 8px; font-size: 28px; font-weight: 900; color: rgba(0,255,136,0.15); font-family: 'Courier New', monospace; }
+.hero-prob { font-size: 28px; font-weight: 900; color: #00ff88; font-family: 'Courier New', monospace; line-height: 1; }
+.hero-label { font-size: 8px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-top: 2px; }
+.hero-question { font-size: 11px; color: #ddd; margin: 6px 0; font-weight: 600; line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.hero-question a { color: #ddd; }
+.hero-question a:hover { color: #ff8c00; }
+.hero-signal { font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 2px; display: inline-block; }
+.hero-signal.yes { background: rgba(0,255,136,0.12); color: #00ff88; border: 1px solid #00ff88; }
+.hero-signal.no { background: rgba(255,68,68,0.12); color: #ff4444; border: 1px solid #ff4444; }
+.hero-footer { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: auto; padding-top: 6px; }
+.hero-execute { background: rgba(0,255,136,0.1); color: #00ff88; border: 1px solid #00ff88; padding: 5px 10px; border-radius: 2px; cursor: pointer; font-size: 10px; font-weight: 700; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 0.5px; }
+.hero-execute:hover { background: #00ff88; color: #000; }
+.hero-execute:disabled { border-color: #333; color: #555; cursor: not-allowed; background: transparent; }
 /* Toast notifications */
 .toast-container { position: fixed; top: 16px; right: 16px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
 .toast { pointer-events: auto; padding: 12px 18px; border-radius: 3px; font-size: 11px; font-family: 'Courier New', monospace; color: #fff; max-width: 380px; animation: toastIn 0.3s ease, toastOut 0.4s ease 4.6s; opacity: 0; word-break: break-word; }
@@ -2128,31 +2165,37 @@ a:hover { text-decoration: underline; }
   <div class="stat-card"><div class="stat-label">Daily Spent</div><div class="stat-value red" id="daily-spent">--</div></div>
 </div>
 
-<div class="tab-bar">
-  <button class="tab-btn active" onclick="switchTab('sports')">Sports</button>
-  <button class="tab-btn" onclick="switchTab('non-sports')">Non-Sports</button>
+<div class="hero-section">
+  <div class="section-title" style="font-size:15px;border-bottom:2px solid #00ff88;color:#00ff88">Best Bets — Top 5 Highest Probability <span class="badge" id="hero-badge" style="color:#00ff88;border-color:#00ff88">0</span><button class="refresh-btn" onclick="loadTopPicks()">Refresh</button></div>
+  <div id="hero-picks" class="hero-grid"><div class="loading" style="grid-column:1/-1">Scanning 6 platforms + news...</div></div>
 </div>
 
-<div class="tab-content active" id="tab-sports">
-  <div class="top-picks">
-    <div class="section-title">Top 10 Sports Picks <span class="badge" id="picks-badge-sports">0</span><button class="refresh-btn" onclick="loadTopPicks()">Refresh</button></div>
-    <div id="top-picks-list-sports" class="picks-grid"><div class="loading" style="grid-column:1/-1">Analyzing markets...</div></div>
+<div class="two-col">
+  <div>
+    <div class="top-picks">
+      <div class="section-title">Sports <span class="badge" id="picks-badge-sports">0</span></div>
+      <div id="top-picks-list-sports" class="picks-grid" style="grid-template-columns: repeat(2, 1fr)"><div class="loading" style="grid-column:1/-1">Analyzing markets...</div></div>
+    </div>
+    <div class="section">
+      <div class="section-title">Sports Settling Today <span class="badge" id="today-badge-sports">0</span></div>
+      <div id="today-table-sports"><div class="loading">Loading...</div></div>
+    </div>
   </div>
-  <div class="section">
-    <div class="section-title">Sports Settling Today <span class="badge" id="today-badge-sports">0</span><button class="refresh-btn" onclick="loadTodayPicks()">Refresh</button></div>
-    <div id="today-table-sports"><div class="loading">Loading...</div></div>
+  <div>
+    <div class="top-picks">
+      <div class="section-title">Non-Sports <span class="badge" id="picks-badge-nonsports">0</span></div>
+      <div id="top-picks-list-nonsports" class="picks-grid" style="grid-template-columns: repeat(2, 1fr)"><div class="loading" style="grid-column:1/-1">Analyzing markets...</div></div>
+    </div>
+    <div class="section">
+      <div class="section-title">Non-Sports Settling Today <span class="badge" id="today-badge-nonsports">0</span></div>
+      <div id="today-table-nonsports"><div class="loading">Loading...</div></div>
+    </div>
   </div>
 </div>
 
-<div class="tab-content" id="tab-non-sports">
-  <div class="top-picks">
-    <div class="section-title">Top 10 Non-Sports Picks <span class="badge" id="picks-badge-nonsports">0</span><button class="refresh-btn" onclick="loadTopPicks()">Refresh</button></div>
-    <div id="top-picks-list-nonsports" class="picks-grid"><div class="loading" style="grid-column:1/-1">Analyzing markets...</div></div>
-  </div>
-  <div class="section">
-    <div class="section-title">Non-Sports Settling Today <span class="badge" id="today-badge-nonsports">0</span><button class="refresh-btn" onclick="loadTodayPicks()">Refresh</button></div>
-    <div id="today-table-nonsports"><div class="loading">Loading...</div></div>
-  </div>
+<div class="section">
+  <div class="section-title">Miscellaneous Opportunities <span class="badge" id="misc-badge">0</span></div>
+  <div id="misc-picks" class="picks-grid"><div class="loading" style="grid-column:1/-1">Scanning...</div></div>
 </div>
 
 <div class="section">
@@ -2196,16 +2239,32 @@ function isSports(pick) {
   return !!pick.is_sports;
 }
 
-function switchTab(tab) {
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-  if (tab === 'sports') {
-    document.querySelectorAll('.tab-btn')[0].classList.add('active');
-    document.getElementById('tab-sports').classList.add('active');
-  } else {
-    document.querySelectorAll('.tab-btn')[1].classList.add('active');
-    document.getElementById('tab-non-sports').classList.add('active');
+function renderHeroCard(p, idx) {
+  var sigClass = p.signal === 'buy_yes' ? 'yes' : 'no';
+  var sigLabel = p.signal === 'buy_yes' ? 'BET YES' : 'BET NO';
+  var winPct = (p.win_probability || 0.5) * 100;
+  var ct = Math.max(1, Math.floor(500 / p.price_cents));
+  var cost = (p.price_cents * ct / 100).toFixed(2);
+  var sideWord = p.signal === 'buy_yes' ? 'YES' : 'NO';
+  var h = '<div class="hero-card">';
+  h += '<div class="hero-rank">#' + (idx + 1) + '</div>';
+  h += '<div class="hero-prob">' + winPct.toFixed(0) + '%</div>';
+  h += '<div class="hero-label">Win Probability</div>';
+  h += '<div class="hero-question"><a href="' + p.kalshi_url + '" target="_blank">' + p.kalshi_question + '</a></div>';
+  h += '<div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">';
+  h += '<span class="hero-signal ' + sigClass + '">' + sigLabel + '</span>';
+  h += '<span style="font-size:9px;color:#888">' + p.price_cents + '¢ per contract</span>';
+  h += '</div>';
+  if (p.news && p.news.length > 0) {
+    var sentColor = p.news_sentiment === 'bullish' ? '#00ff88' : p.news_sentiment === 'bearish' ? '#ff4444' : '#888';
+    h += '<div style="font-size:8px;color:' + sentColor + ';text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">📰 ' + p.news_sentiment + '</div>';
   }
+  h += '<div class="hero-footer">';
+  h += '<span style="font-size:10px;color:#00ff88;font-weight:700">+$' + p.potential_profit_usd.toFixed(2) + '</span>';
+  h += '<button class="hero-execute" onclick="executePickTrade(this, ' + p._globalIdx + ')">Buy ' + sideWord + ' · $' + cost + '</button>';
+  h += '</div>';
+  h += '</div>';
+  return h;
 }
 
 function showToast(msg, type) {
@@ -2293,7 +2352,10 @@ async function loadMispriced() {
       html += '<td>' + dev + '%</td>';
       html += '<td><span class="confidence conf-' + conf + '">' + confLabel + '</span></td>';
       html += '<td>' + plats + '</td>';
-      html += '<td><button class="trade-btn" onclick="executeTrade(this, ' + JSON.stringify(JSON.stringify(m)) + ')">Trade $' + (m.price_cents/100).toFixed(2) + '</button></td>';
+      var mSide = m.signal === 'buy_yes' ? 'YES' : 'NO';
+      var mCt = Math.max(1, Math.floor(500 / m.price_cents));
+      var mCost = (m.price_cents * mCt / 100).toFixed(2);
+      html += '<td><button class="trade-btn" onclick="executeTrade(this, ' + JSON.stringify(JSON.stringify(m)) + ')">Buy ' + mSide + ' · $' + mCost + '</button></td>';
       html += '</tr>';
     });
     html += '</table>';
@@ -2461,7 +2523,8 @@ function renderPickCard(p, idx, prefix) {
   h += '<span class="pick-profit">+$' + p.potential_profit_usd.toFixed(2) + ' potential</span>';
   var ct = Math.max(1, Math.floor(500 / p.price_cents));
   var cost = (p.price_cents * ct / 100).toFixed(2);
-  h += '<button class="pick-execute" onclick="executePickTrade(this, ' + p._globalIdx + ')">Trade ' + ct + 'x @ $' + cost + '</button>';
+  var sideWord = p.signal === 'buy_yes' ? 'YES' : 'NO';
+  h += '<button class="pick-execute" onclick="executePickTrade(this, ' + p._globalIdx + ')">Buy ' + sideWord + ' · $' + cost + '</button>';
   h += '</div>';
   h += '</div>';
   return h;
@@ -2469,21 +2532,33 @@ function renderPickCard(p, idx, prefix) {
 
 async function loadTopPicks() {
   if (_picksFirstLoad) {
-    document.getElementById('top-picks-list-sports').innerHTML = '<div class="loading" style="grid-column:1/-1">Scanning 6 platforms + news...</div>';
-    document.getElementById('top-picks-list-nonsports').innerHTML = '<div class="loading" style="grid-column:1/-1">Scanning 6 platforms + news...</div>';
+    document.getElementById('hero-picks').innerHTML = '<div class="loading" style="grid-column:1/-1">Scanning 6 platforms + news...</div>';
+    document.getElementById('top-picks-list-sports').innerHTML = '<div class="loading" style="grid-column:1/-1">Loading...</div>';
+    document.getElementById('top-picks-list-nonsports').innerHTML = '<div class="loading" style="grid-column:1/-1">Loading...</div>';
   }
   try {
     const data = await fetch(API + '/top-picks').then(r => r.json());
     _picksFirstLoad = false;
     const picks = data.picks || [];
+    const heroTickers = new Set(data.hero || []);
+    const miscTickers = new Set(data.misc || []);
     // Tag each pick with global index for trade execution
     picks.forEach((p, i) => { p._globalIdx = i; });
     _picksData = picks;
 
-    const sports = picks.filter(p => isSports(p)).slice(0, 10);
-    const nonSports = picks.filter(p => !isSports(p)).slice(0, 10);
+    // Hero: Top 5 best bets
+    const heroPicks = picks.filter(p => heroTickers.has(p.kalshi_ticker)).slice(0, 5);
+    document.getElementById('hero-badge').textContent = heroPicks.length;
+    if (heroPicks.length === 0) {
+      document.getElementById('hero-picks').innerHTML = '<div class="empty" style="grid-column:1/-1">Scanning for best bets...</div>';
+    } else {
+      let html = '';
+      heroPicks.forEach((p, idx) => { html += renderHeroCard(p, idx); });
+      document.getElementById('hero-picks').innerHTML = html;
+    }
 
-    // Render sports (exactly 10 or however many available)
+    // Sports
+    const sports = picks.filter(p => isSports(p) && !miscTickers.has(p.kalshi_ticker)).slice(0, 10);
     document.getElementById('picks-badge-sports').textContent = sports.length;
     if (sports.length === 0) {
       document.getElementById('top-picks-list-sports').innerHTML = '<div class="empty" style="grid-column:1/-1">No sports picks right now.</div>';
@@ -2494,7 +2569,8 @@ async function loadTopPicks() {
       sports.forEach((p, idx) => { drawPickChart('sports-chart-' + idx, p.prices || {}, p.signal); });
     }
 
-    // Render non-sports (exactly 10 or however many available)
+    // Non-sports
+    const nonSports = picks.filter(p => !isSports(p) && !miscTickers.has(p.kalshi_ticker)).slice(0, 10);
     document.getElementById('picks-badge-nonsports').textContent = nonSports.length;
     if (nonSports.length === 0) {
       document.getElementById('top-picks-list-nonsports').innerHTML = '<div class="empty" style="grid-column:1/-1">No non-sports picks right now.</div>';
@@ -2504,7 +2580,20 @@ async function loadTopPicks() {
       document.getElementById('top-picks-list-nonsports').innerHTML = html;
       nonSports.forEach((p, idx) => { drawPickChart('nonsports-chart-' + idx, p.prices || {}, p.signal); });
     }
+
+    // Miscellaneous
+    const misc = picks.filter(p => miscTickers.has(p.kalshi_ticker)).slice(0, 10);
+    document.getElementById('misc-badge').textContent = misc.length;
+    if (misc.length === 0) {
+      document.getElementById('misc-picks').innerHTML = '<div class="empty" style="grid-column:1/-1">No miscellaneous picks.</div>';
+    } else {
+      let html = '';
+      misc.forEach((p, idx) => { html += renderPickCard(p, idx, 'misc'); });
+      document.getElementById('misc-picks').innerHTML = html;
+      misc.forEach((p, idx) => { drawPickChart('misc-chart-' + idx, p.prices || {}, p.signal); });
+    }
   } catch(e) {
+    document.getElementById('hero-picks').innerHTML = '<div class="empty" style="grid-column:1/-1">Error: ' + e.message + '</div>';
     document.getElementById('top-picks-list-sports').innerHTML = '<div class="empty" style="grid-column:1/-1">Error: ' + e.message + '</div>';
     document.getElementById('top-picks-list-nonsports').innerHTML = '<div class="empty" style="grid-column:1/-1">Error: ' + e.message + '</div>';
   }
@@ -2544,7 +2633,8 @@ async function executePickTrade(btn, idx) {
       btn.style.color = '#ff4444';
       const errMsg = data.result && data.result.response_body ? data.result.response_body : (data.result && data.result.error ? data.result.error : 'Unknown error');
       showToast('Trade failed: ' + errMsg, 'error');
-      setTimeout(() => { btn.disabled = false; btn.textContent = 'Retry $' + (m.price_cents/100).toFixed(2); btn.style.borderColor = '#ff8c00'; btn.style.color = '#ff8c00'; }, 3000);
+      var retrySide = m.signal === 'buy_yes' ? 'YES' : 'NO';
+      setTimeout(() => { btn.disabled = false; btn.textContent = 'Retry ' + retrySide; btn.style.borderColor = '#ff8c00'; btn.style.color = '#ff8c00'; }, 3000);
     }
     loadStatus();
     loadTrades();
@@ -2702,7 +2792,8 @@ function renderTodayTable(picks, containerId, badgeId) {
     html += '<td class="' + sigClass + '">' + sigLabel + '</td>';
     html += '<td style="color:#ff8c00;font-weight:700">' + p.time_left + '</td>';
     html += '<td class="result-win">+$' + p.potential_profit_usd.toFixed(2) + '</td>';
-    html += '<td><button class="trade-btn" onclick="executeTodayTrade(this,' + p._globalIdx + ')">Trade ' + ct + 'x $' + cost + '</button></td>';
+    var todaySide = p.signal === 'buy_yes' ? 'YES' : 'NO';
+    html += '<td><button class="trade-btn" onclick="executeTodayTrade(this,' + p._globalIdx + ')">Buy ' + todaySide + ' · $' + cost + '</button></td>';
     html += '</tr>';
   });
   html += '</table>';
