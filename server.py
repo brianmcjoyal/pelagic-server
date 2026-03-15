@@ -284,10 +284,10 @@ def fetch_kalshi():
     except Exception as e:
         print(f"[FETCH] kalshi events error: {e}")
 
-    # Step 2: Fetch markets for each event
+    # Step 2: Fetch markets for each event (cap at 50 events to stay within time limit)
     raw = []
     fetched_events = 0
-    for et in event_tickers:
+    for et in event_tickers[:50]:
         elapsed = (datetime.datetime.utcnow() - start_time).total_seconds()
         if elapsed > 20:
             print(f"[FETCH] kalshi: time limit, fetched {fetched_events}/{len(event_tickers)} events = {len(raw)} markets")
