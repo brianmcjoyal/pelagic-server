@@ -691,6 +691,18 @@ def health():
     return jsonify({"status": "ok", "private_key_loaded": k is not None, "bot_enabled": BOT_CONFIG["enabled"]})
 
 
+@app.route("/debug-markets")
+def debug_markets():
+    path = "/markets"
+    headers = signed_headers("GET", path)
+    if not headers:
+        return jsonify({"error": "no key"})
+    resp = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + path, headers=headers, params={"limit": 3, "status": "open"}, timeout=TIMEOUT)
+    raw = resp.json().get("markets", [])
+    # Return raw fields for first 3 markets
+    return jsonify({"sample": [{k: v for k, v in m.items() if k in ("ticker", "title", "close_time", "expected_expiration_time", "expiration_time", "end_date", "settle_date", "expiration_value", "status")} for m in raw]})
+
+
 @app.route("/markets")
 def markets_kalshi():
     return jsonify({"markets": fetch_kalshi()})
