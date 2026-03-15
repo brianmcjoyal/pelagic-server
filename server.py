@@ -1143,8 +1143,9 @@ def health():
 
 @app.route("/test-events")
 def test_events():
-    """Debug: test the events API directly."""
+    """Debug: test the events + markets API."""
     try:
+        # 1) Get events
         h = signed_headers("GET", "/events")
         if not h:
             return jsonify({"error": "no auth headers"})
@@ -1152,15 +1153,35 @@ def test_events():
             KALSHI_BASE_URL + KALSHI_API_PREFIX + "/events",
             headers=h, params={"limit": 5, "status": "open"}, timeout=10,
         )
+        if not resp.ok:
+            return jsonify({"error": f"events API: {resp.status_code}", "body": resp.text[:200]})
+        events = resp.json().get("events", [])
+        # 2) Try to fetch markets for first event
+        et = events[0].get("event_ticker", "") if events else ""
+        mkt_result = {"error": "no event ticker"}
+        if et:
+            h2 = signed_headers("GET", "/markets")
+            mkt_resp = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + "/markets",
+                headers=h2, params={"limit": 10, "event_ticker": et, "status": "open"},
+                timeout=10,
+            )
+            mkt_data = mkt_resp.json() if mkt_resp.ok else {}
+            mkts = mkt_data.get("markets", [])
+            mkt_result = {
+                "status": mkt_resp.status_code,
+                "count": len(mkts),
+                "sample": [{"ticker": m.get("ticker", "")[:40], "title": m.get("title", "")[:60], "yes_ask": m.get("yes_ask"), "yes_ask_dollars": m.get("yes_ask_dollars")} for m in mkts[:3]],
+            }
         return jsonify({
-            "status_code": resp.status_code,
-            "url": resp.url,
-            "body_keys": list(resp.json().keys()) if resp.ok else resp.text[:200],
-            "events_count": len(resp.json().get("events", [])) if resp.ok else 0,
-            "sample": [{"ticker": e.get("event_ticker"), "title": e.get("title", "")[:60]} for e in resp.json().get("events", [])[:3]] if resp.ok else [],
+            "events_count": len(events),
+            "first_event": et,
+            "markets_for_first_event": mkt_result,
+            "all_events": [{"ticker": e.get("event_ticker"), "title": e.get("title", "")[:60]} for e in events],
         })
     except Exception as e:
-        return jsonify({"error": str(e)})
+        import traceback
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()})
 
 @app.route("/debug-markets")
 def debug_markets():
