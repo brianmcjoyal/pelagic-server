@@ -266,28 +266,40 @@ def fetch_kalshi():
 
     start_time = datetime.datetime.utcnow()
 
-    # Step 1: Get non-parlay event tickers (1 page = 200 events for speed)
+    # Step 1: Get non-parlay event tickers (3 pages for broader coverage)
     event_tickers = []
-    try:
-        resp = requests.get(
-            KALSHI_BASE_URL + KALSHI_API_PREFIX + "/events",
-            headers=h, params={"limit": 200, "status": "open"}, timeout=10,
-        )
-        if resp.ok:
-            for ev in resp.json().get("events", []):
-                et = ev.get("event_ticker", "")
-                if not et.upper().startswith("KXMVE"):
-                    event_tickers.append(et)
-            print(f"[FETCH] kalshi: {len(event_tickers)} non-parlay events")
-        else:
-            print(f"[FETCH] kalshi events: HTTP {resp.status_code}")
-    except Exception as e:
-        print(f"[FETCH] kalshi events error: {e}")
+    cursor = None
+    for _ep in range(3):
+        try:
+            eh = signed_headers("GET", "/events")
+            ep = {"limit": 200, "status": "open"}
+            if cursor:
+                ep["cursor"] = cursor
+            resp = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + "/events",
+                headers=eh, params=ep, timeout=8,
+            )
+            if resp.ok:
+                evts = resp.json().get("events", [])
+                for ev in evts:
+                    et = ev.get("event_ticker", "")
+                    if not et.upper().startswith("KXMVE"):
+                        event_tickers.append(et)
+                cursor = resp.json().get("cursor")
+                print(f"[FETCH] kalshi events page {_ep+1}: {len(evts)} events, {len(event_tickers)} non-parlay total")
+                if not cursor or len(evts) < 200:
+                    break
+            else:
+                print(f"[FETCH] kalshi events: HTTP {resp.status_code}")
+                break
+        except Exception as e:
+            print(f"[FETCH] kalshi events error: {e}")
+            break
 
-    # Step 2: Fetch markets for each event (cap at 50 events to stay within time limit)
+    # Step 2: Fetch markets for each event (cap at 80 events to stay within time limit)
     raw = []
     fetched_events = 0
-    for et in event_tickers[:50]:
+    for et in event_tickers[:80]:
         elapsed = (datetime.datetime.utcnow() - start_time).total_seconds()
         if elapsed > 20:
             print(f"[FETCH] kalshi: time limit, fetched {fetched_events}/{len(event_tickers)} events = {len(raw)} markets")
