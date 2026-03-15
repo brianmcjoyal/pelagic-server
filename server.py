@@ -1231,9 +1231,20 @@ scheduler.add_job(
     replace_existing=True,
     next_run_time=datetime.datetime.utcnow() + datetime.timedelta(seconds=10),  # first cache warm 10s after startup
 )
-scheduler.start()
-atexit.register(scheduler.shutdown)
-print(f"[STARTUP] Scheduler started with {len(scheduler.get_jobs())} jobs: {[j.id for j in scheduler.get_jobs()]}")
+_scheduler_started = False
+
+def start_scheduler():
+    global _scheduler_started
+    if _scheduler_started:
+        return
+    _scheduler_started = True
+    scheduler.start()
+    atexit.register(scheduler.shutdown)
+    print(f"[STARTUP] Scheduler started with {len(scheduler.get_jobs())} jobs: {[j.id for j in scheduler.get_jobs()]}")
+
+# Start immediately for non-gunicorn (dev) mode
+# For gunicorn, we also start here since with 1 worker it's the same process
+start_scheduler()
 
 # ---------------------------------------------------------------------------
 # Routes
