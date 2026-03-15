@@ -1184,17 +1184,17 @@ a:hover { text-decoration: underline; }
   <button class="toggle-btn enable" id="toggle-btn" onclick="toggleBot()">Enable Bot</button>
 </div>
 
+<div class="top-picks">
+  <div class="section-title">Top 10 Picks <span class="badge" id="picks-badge">0</span><button class="refresh-btn" onclick="loadTopPicks()">Refresh</button></div>
+  <div id="top-picks-list" class="picks-grid"><div class="loading" style="grid-column:1/-1">Analyzing markets...</div></div>
+</div>
+
 <div class="chart-section">
   <div class="chart-header">
     <span class="chart-title">P/L Performance</span>
     <span class="chart-pl zero" id="chart-pl">$0.00</span>
   </div>
   <div class="chart-canvas"><canvas id="pl-chart"></canvas></div>
-</div>
-
-<div class="top-picks">
-  <div class="section-title">Top 10 Picks <span class="badge" id="picks-badge">0</span><button class="refresh-btn" onclick="loadTopPicks()">Refresh</button></div>
-  <div id="top-picks-list" class="picks-grid"><div class="loading" style="grid-column:1/-1">Analyzing markets...</div></div>
 </div>
 
 <div class="section">
