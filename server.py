@@ -70,6 +70,7 @@ BOT_STATE = {
     "trade_date": None,
     "all_trades": [],
     "errors": [],
+    "pick_history": [],  # every pick we recommend, timestamped
 }
 
 import json as _json
@@ -84,6 +85,7 @@ def _save_state():
             "trades_today": BOT_STATE["trades_today"],
             "daily_spent_usd": BOT_STATE["daily_spent_usd"],
             "trade_date": BOT_STATE["trade_date"],
+            "pick_history": BOT_STATE.get("pick_history", [])[-500:],  # keep last 500
         }
         with open(_STATE_FILE, "w") as f:
             _json.dump(data, f)
@@ -99,6 +101,7 @@ def _load_state():
         BOT_STATE["trades_today"] = data.get("trades_today", [])
         BOT_STATE["daily_spent_usd"] = data.get("daily_spent_usd", 0.0)
         BOT_STATE["trade_date"] = data.get("trade_date", None)
+        BOT_STATE["pick_history"] = data.get("pick_history", [])
         print(f"[STATE] Restored {len(BOT_STATE['all_trades'])} trades from disk")
     except FileNotFoundError:
         pass
@@ -1390,7 +1393,7 @@ def positions():
 
 @app.route("/settled")
 def settled_positions():
-    """Get settled positions to track win/loss record."""
+    """Get settled positions with full scorecard data."""
     path = "/portfolio/positions"
     headers = signed_headers("GET", path)
     if not headers:
@@ -1399,36 +1402,103 @@ def settled_positions():
         resp = requests.get(
             KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
             headers=headers,
-            params={"limit": 100, "settlement_status": "settled"},
+            params={"limit": 200, "settlement_status": "settled"},
             timeout=TIMEOUT,
         )
         resp.raise_for_status()
         positions_list = resp.json().get("market_positions", [])
         wins = 0
         losses = 0
+        breakeven = 0
         total_pnl = 0
+        total_wagered = 0
+        biggest_win = 0
+        biggest_loss = 0
+        streak = 0
+        current_streak_type = None
         settled = []
+
         for pos in positions_list:
-            pnl = pos.get("realized_pnl", 0) / 100  # cents to dollars
+            pnl_cents = pos.get("realized_pnl", 0)
+            pnl = pnl_cents / 100
             total_pnl += pnl
-            won = pnl > 0
-            if won:
+            fees = pos.get("fees_paid", 0) / 100
+            traded = pos.get("total_traded", 0)
+            total_wagered += traded * 0.01  # rough estimate
+
+            ticker = pos.get("ticker", "")
+
+            # Enrich with market title
+            title = ticker
+            try:
+                mkt_path = f"/markets/{ticker}"
+                mkt_h = signed_headers("GET", mkt_path)
+                mkt_r = requests.get(
+                    KALSHI_BASE_URL + KALSHI_API_PREFIX + mkt_path,
+                    headers=mkt_h, timeout=5,
+                )
+                if mkt_r.ok:
+                    mkt = mkt_r.json().get("market", {})
+                    title = mkt.get("title", ticker)
+            except Exception:
+                pass
+
+            if pnl > 0:
                 wins += 1
-            else:
+                won = True
+                biggest_win = max(biggest_win, pnl)
+                if current_streak_type == "win":
+                    streak += 1
+                else:
+                    streak = 1
+                    current_streak_type = "win"
+            elif pnl < 0:
                 losses += 1
+                won = False
+                biggest_loss = min(biggest_loss, pnl)
+                if current_streak_type == "loss":
+                    streak += 1
+                else:
+                    streak = 1
+                    current_streak_type = "loss"
+            else:
+                breakeven += 1
+                won = None
+
+            # Check if this was a pick we recommended
+            pick_type = "unknown"
+            for ph in BOT_STATE.get("pick_history", []):
+                if ph.get("ticker") == ticker:
+                    pick_type = ph.get("type", "unknown")
+                    break
+
             settled.append({
-                "ticker": pos.get("ticker", ""),
+                "ticker": ticker,
+                "title": title,
                 "pnl_usd": round(pnl, 2),
                 "won": won,
-                "total_traded": pos.get("total_traded", 0),
-                "fees_paid": pos.get("fees_paid", 0) / 100,
+                "total_traded": traded,
+                "fees_paid": round(fees, 2),
+                "pick_type": pick_type,
             })
+
+        total_bets = wins + losses + breakeven
+        roi = round(total_pnl / max(0.01, total_wagered) * 100, 1) if total_wagered > 0 else 0
+
         return jsonify({
             "settled": settled,
             "wins": wins,
             "losses": losses,
+            "breakeven": breakeven,
             "win_rate": round(wins / max(1, wins + losses) * 100, 1),
             "total_pnl_usd": round(total_pnl, 2),
+            "total_wagered_usd": round(total_wagered, 2),
+            "roi_pct": roi,
+            "biggest_win_usd": round(biggest_win, 2),
+            "biggest_loss_usd": round(biggest_loss, 2),
+            "streak": streak,
+            "streak_type": current_streak_type or "none",
+            "total_bets": total_bets,
         })
     except Exception as e:
         return jsonify({"settled": [], "error": str(e)})
@@ -1952,6 +2022,26 @@ def top_picks():
     with ThreadPoolExecutor(max_workers=8) as pool:
         pool.map(_add_news, all_ranked)
 
+    # ── Save pick history for win/loss tracking ──
+    existing_hist_tickers = {ph["ticker"] for ph in BOT_STATE.get("pick_history", [])}
+    for p in all_ranked:
+        tk = p.get("kalshi_ticker", "")
+        if tk and tk not in existing_hist_tickers:
+            BOT_STATE.setdefault("pick_history", []).append({
+                "ticker": tk,
+                "type": p.get("type", "unknown"),
+                "signal": p.get("signal", ""),
+                "price_cents": p.get("price_cents", 0),
+                "win_probability": p.get("win_probability", 0),
+                "platform_count": p.get("platform_count", 0),
+                "confidence": p.get("confidence", ""),
+                "timestamp": datetime.datetime.utcnow().isoformat(),
+            })
+            existing_hist_tickers.add(tk)
+    # Trim to last 500
+    BOT_STATE["pick_history"] = BOT_STATE.get("pick_history", [])[-500:]
+    _save_state()
+
     result = {"picks": all_ranked, "hero": [p["kalshi_ticker"] for p in hero_picks], "misc": [p["kalshi_ticker"] for p in misc_picks], "sports_count": len(sports_picks), "nonsports_count": len(nonsports_picks), "hero_count": len(hero_picks), "misc_count": len(misc_picks), "total_scanned": len(all_markets)}
     _picks_cache["data"] = result
     _picks_cache["time"] = datetime.datetime.utcnow()
@@ -2342,10 +2432,11 @@ a:hover { text-decoration: underline; }
 </div>
 
 <div class="section">
-  <div class="section-title">Win/Loss Record <button class="refresh-btn" onclick="loadSettled()">Refresh</button></div>
-  <div id="settled-stats" style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:8px">
+  <div class="section-title" style="color:#00ff88;border-bottom:1px solid #00ff88">📊 Scorecard — Path to $1M <button class="refresh-btn" onclick="loadSettled()">Refresh</button></div>
+  <div id="settled-stats" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px">
     <span style="color:#888">Loading...</span>
   </div>
+  <div id="settled-table" style="margin-top:8px"></div>
 </div>
 
 <div class="section">
@@ -2456,6 +2547,7 @@ async function loadStatus() {
       fetch(API + '/status').then(r => r.json()),
       fetch(API + '/balance').then(r => r.json()),
     ]);
+    window._currentBalance = bal.balance_usd || 0;
     document.getElementById('balance').textContent = '$' + (bal.balance_usd || 0).toFixed(2);
     document.getElementById('markets-scanned').textContent = status.last_scan_markets || 0;
     document.getElementById('mispriced-count').textContent = status.last_scan_mispriced || 0;
@@ -3091,12 +3183,78 @@ async function loadSettled() {
     const el = document.getElementById('settled-stats');
     const w = data.wins || 0, l = data.losses || 0, wr = data.win_rate || 0;
     const pnl = data.total_pnl_usd || 0;
+    const roi = data.roi_pct || 0;
+    const bigW = data.biggest_win_usd || 0;
+    const bigL = data.biggest_loss_usd || 0;
+    const streak = data.streak || 0;
+    const streakType = data.streak_type || 'none';
+    const totalBets = data.total_bets || 0;
+    const balance = window._currentBalance || 73.61;
     const pnlColor = pnl >= 0 ? '#00ff88' : '#ff4444';
     const wrColor = wr >= 60 ? '#00ff88' : wr >= 40 ? '#ff8c00' : '#ff4444';
-    el.innerHTML = '<div style="background:#0a0a0a;border:1px solid #333;padding:10px 18px;min-width:100px;text-align:center"><div style="color:#888;font-size:0.7em;text-transform:uppercase">Wins</div><div style="color:#00ff88;font-size:1.3em;font-weight:700">' + w + '</div></div>'
-      + '<div style="background:#0a0a0a;border:1px solid #333;padding:10px 18px;min-width:100px;text-align:center"><div style="color:#888;font-size:0.7em;text-transform:uppercase">Losses</div><div style="color:#ff4444;font-size:1.3em;font-weight:700">' + l + '</div></div>'
-      + '<div style="background:#0a0a0a;border:1px solid #333;padding:10px 18px;min-width:100px;text-align:center"><div style="color:#888;font-size:0.7em;text-transform:uppercase">Win Rate</div><div style="color:' + wrColor + ';font-size:1.3em;font-weight:700">' + wr.toFixed(0) + '%</div></div>'
-      + '<div style="background:#0a0a0a;border:1px solid #333;padding:10px 18px;min-width:100px;text-align:center"><div style="color:#888;font-size:0.7em;text-transform:uppercase">P&L</div><div style="color:' + pnlColor + ';font-size:1.3em;font-weight:700">' + (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) + '</div></div>';
+    const roiColor = roi >= 0 ? '#00ff88' : '#ff4444';
+    const streakColor = streakType === 'win' ? '#00ff88' : streakType === 'loss' ? '#ff4444' : '#888';
+    const streakLabel = streakType === 'win' ? streak + 'W' : streakType === 'loss' ? streak + 'L' : '-';
+
+    // Progress bar to $1M
+    const progress = Math.min(100, (balance / 1000000) * 100);
+    const progressLabel = progress < 0.01 ? '<0.01%' : progress.toFixed(3) + '%';
+
+    function statBox(label, value, color) {
+      return '<div style="background:#0a0a0a;border:1px solid #333;padding:8px 14px;min-width:80px;text-align:center;flex:1">' +
+        '<div style="color:#888;font-size:0.6em;text-transform:uppercase;letter-spacing:0.5px">' + label + '</div>' +
+        '<div style="color:' + color + ';font-size:1.2em;font-weight:700">' + value + '</div></div>';
+    }
+
+    var html = '';
+    html += statBox('Wins', w, '#00ff88');
+    html += statBox('Losses', l, '#ff4444');
+    html += statBox('Win Rate', wr.toFixed(0) + '%', wrColor);
+    html += statBox('P&L', (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2), pnlColor);
+    html += statBox('ROI', roi.toFixed(1) + '%', roiColor);
+    html += statBox('Streak', streakLabel, streakColor);
+    html += statBox('Best Win', '+$' + bigW.toFixed(2), '#00ff88');
+    html += statBox('Worst Loss', '-$' + Math.abs(bigL).toFixed(2), '#ff4444');
+    html += statBox('Total Bets', totalBets, '#ff8c00');
+    el.innerHTML = html;
+
+    // Progress bar
+    var prog = '<div style="margin-top:8px;background:#111;border:1px solid #333;padding:6px 10px">';
+    prog += '<div style="display:flex;justify-content:space-between;font-size:9px;color:#888;margin-bottom:4px">';
+    prog += '<span>$' + balance.toFixed(2) + ' balance</span>';
+    prog += '<span style="color:#00ff88">$1,000,000 goal</span>';
+    prog += '</div>';
+    prog += '<div style="background:#1a1a1a;height:12px;border:1px solid #333;position:relative">';
+    prog += '<div style="background:linear-gradient(90deg,#00ff88,#ff8c00);height:100%;width:' + Math.max(0.5, progress) + '%;transition:width 0.5s"></div>';
+    prog += '<div style="position:absolute;top:0;left:50%;transform:translateX(-50%);font-size:7px;color:#fff;line-height:12px;font-weight:700">' + progressLabel + '</div>';
+    prog += '</div></div>';
+    el.innerHTML += prog;
+
+    // Settled positions table
+    var tableEl = document.getElementById('settled-table');
+    var settled = data.settled || [];
+    if (settled.length === 0) {
+      tableEl.innerHTML = '<div style="color:#555;font-size:10px;padding:8px">No settled positions yet. Place some bets and we\'ll track every result here.</div>';
+    } else {
+      var tbl = '<table style="width:100%;border-collapse:collapse;font-size:9px">';
+      tbl += '<tr style="color:#888;border-bottom:1px solid #333;text-align:left">';
+      tbl += '<th style="padding:4px">Market</th><th style="padding:4px">Type</th><th style="padding:4px">P&L</th><th style="padding:4px">Result</th>';
+      tbl += '</tr>';
+      settled.forEach(function(s) {
+        var rc = s.won === true ? '#00ff88' : s.won === false ? '#ff4444' : '#888';
+        var rl = s.won === true ? '✅ WIN' : s.won === false ? '❌ LOSS' : '➖ EVEN';
+        var tc = {consensus:'#00ff88', arbitrage:'#ff8c00', cross_validated:'#00d4ff', kalshi_only:'#666'}[s.pick_type] || '#555';
+        var tl = {consensus:'CONSENSUS', arbitrage:'ARB', cross_validated:'VERIFIED', kalshi_only:'KALSHI'}[s.pick_type] || s.pick_type.toUpperCase();
+        tbl += '<tr style="border-bottom:1px solid #1a1a1a">';
+        tbl += '<td style="padding:4px;color:#ddd;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + s.title + '</td>';
+        tbl += '<td style="padding:4px;color:' + tc + '">' + tl + '</td>';
+        tbl += '<td style="padding:4px;color:' + rc + ';font-weight:700">' + (s.pnl_usd >= 0 ? '+' : '') + '$' + s.pnl_usd.toFixed(2) + '</td>';
+        tbl += '<td style="padding:4px;color:' + rc + '">' + rl + '</td>';
+        tbl += '</tr>';
+      });
+      tbl += '</table>';
+      tableEl.innerHTML = tbl;
+    }
   } catch(e) {
     document.getElementById('settled-stats').innerHTML = '<span style="color:#ff4444">Error: ' + e.message + '</span>';
   }
