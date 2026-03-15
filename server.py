@@ -1708,11 +1708,8 @@ def top_picks():
             },
         })
 
-    # ── Strategy 3: News-researched Kalshi picks ──
-    # High-volume markets where news can give us an edge
-    # Two tiers:
-    #   A) Strong directional (>70% or <30%) with any volume — market already has conviction
-    #   B) High-volume (>1000 vol) at ANY price — these are major markets worth analyzing
+    # ── Strategy 3: Kalshi picks with cross-platform validation ──
+    # Every pick gets checked against other platforms for independent confirmation
     existing_tickers = {p["kalshi_ticker"] for p in picks}
 
     # Sort by volume (highest volume = most important markets)
@@ -1720,23 +1717,40 @@ def top_picks():
     for nq_k, km in sorted_kalshi:
         if km["id"] in existing_tickers:
             continue
-        # Skip parlays
         if _is_parlay_title(km["question"]):
             continue
         kalshi_vol = km.get("volume", 0)
 
         # Tier A: Strong directional with volume >= 10
-        # Tier B: High-volume (>=500) at any price — major markets
+        # Tier B: High-volume (>=500) at any price
         if kalshi_vol >= 500:
-            pass  # always include high-volume markets
+            pass
         elif kalshi_vol >= 10 and (km["yes"] > 0.70 or km["yes"] < 0.30):
-            pass  # include strong directional with some volume
+            pass
         else:
             continue
 
-        # Determine signal based on market price
-        # Use actual market price as probability — no artificial cap
-        # Single-platform picks are less reliable than consensus, reflected in score not probability
+        # ── Cross-platform check for EVERY pick ──
+        xplat_matches = []
+        candidate_counts = {}
+        for w in set(nq_k.split()):
+            for idx_o in other_kw_index.get(w, ()):
+                candidate_counts[idx_o] = candidate_counts.get(idx_o, 0) + 1
+        candidates = [idx_o for idx_o, cnt in candidate_counts.items() if cnt >= 2]
+        for idx_o in candidates:
+            nq_o, om = other_markets[idx_o]
+            sim = similarity(nq_k, nq_o, km["question"], om["question"])
+            if sim >= 0.40:
+                if om["yes"] < 0.03 or om["yes"] > 0.97:
+                    continue
+                xplat_matches.append({
+                    "platform": om["platform"], "yes": om["yes"],
+                    "similarity": round(sim, 3),
+                })
+
+        has_xplat = len(xplat_matches) > 0
+
+        # Determine signal
         if km["yes"] >= 0.55:
             signal = "buy_yes"
             win_prob = km["yes"]
@@ -1747,11 +1761,43 @@ def top_picks():
             price_cents = km.get("no_ask_cents") or int(km["no"] * 100)
 
         side_label = "YES" if signal == "buy_yes" else "NO"
+        k_price = km["yes"] * 100
 
-        # Score: weight by volume (high-volume markets are better signals)
+        # If we have cross-platform data, use it for better probability estimate
+        if has_xplat:
+            total_w = sum(PLAT_WEIGHT.get(m["platform"], 1.0) for m in xplat_matches)
+            xplat_consensus = sum(m["yes"] * PLAT_WEIGHT.get(m["platform"], 1.0) for m in xplat_matches) / total_w
+            xplat_price = xplat_consensus * 100
+            plat_names = [f"{m['platform'].title()} {m['yes']*100:.0f}¢" for m in xplat_matches]
+            pick_type = "cross_validated"
+            platform_count = len(xplat_matches)
+
+            # Use cross-platform consensus for win probability
+            if signal == "buy_yes":
+                win_prob = max(km["yes"], xplat_consensus)
+            else:
+                win_prob = max(1 - km["yes"], 1 - xplat_consensus)
+
+            deviation = abs(km["yes"] - xplat_consensus)
+            edge = f"Kalshi {k_price:.0f}¢ vs {', '.join(plat_names)}"
+            if deviation >= 0.05:
+                edge_reason = f"Checked {platform_count} other platform{'s' if platform_count > 1 else ''}: they price this at {xplat_price:.0f}¢ vs Kalshi's {k_price:.0f}¢ — {deviation*100:.0f}% edge in our favor."
+            else:
+                edge_reason = f"Checked {platform_count} other platform{'s' if platform_count > 1 else ''}: they agree at ~{xplat_price:.0f}¢ (Kalshi {k_price:.0f}¢). Prices align — strong confidence in market price."
+        else:
+            pick_type = "kalshi_only"
+            platform_count = 0
+            xplat_matches = []
+            deviation = abs(km["yes"] - 0.5)
+            edge = f"{win_prob*100:.0f}% on Kalshi — buy {side_label} at {price_cents}¢"
+            if kalshi_vol >= 1000:
+                edge += f" ({kalshi_vol:,} vol)"
+            edge_reason = f"No match found on other platforms. Kalshi-only at {price_cents}¢ with {kalshi_vol:,} trades — use caution, no independent validation."
+
+        # Score: cross-platform validated picks score much higher
         time_b = _time_bonus(km)
         if kalshi_vol >= 10000:
-            vol_bonus = 2.0   # mega-volume = very high conviction
+            vol_bonus = 2.0
         elif kalshi_vol >= 1000:
             vol_bonus = 1.5
         elif kalshi_vol >= 100:
@@ -1759,38 +1805,39 @@ def top_picks():
         else:
             vol_bonus = 1.0
 
-        # Higher score for markets further from 50/50
-        directional_strength = abs(km["yes"] - 0.5) * 2  # 0-1 scale
-        score = win_prob * time_b * vol_bonus * (0.3 + directional_strength * 0.3)
+        xplat_bonus = 1.5 + 0.25 * platform_count if has_xplat else 0.5
+        directional_strength = abs(km["yes"] - 0.5) * 2
+        score = win_prob * time_b * vol_bonus * xplat_bonus * (0.3 + directional_strength * 0.3)
 
-        if win_prob >= 0.80 and kalshi_vol >= 100:
+        if has_xplat and win_prob >= 0.70:
             confidence = "HIGH"
+        elif has_xplat or (win_prob >= 0.80 and kalshi_vol >= 100):
+            confidence = "MEDIUM"
         elif win_prob >= 0.65 and kalshi_vol >= 50:
             confidence = "MEDIUM"
         else:
             confidence = "LOW"
 
-        edge = f"{win_prob*100:.0f}% market probability — buy {side_label} at {price_cents}¢"
-        if kalshi_vol >= 1000:
-            edge += f" ({kalshi_vol:,} vol)"
-        thesis = f"Kalshi market at {km['yes']*100:.0f}¢ YES / {km['no']*100:.0f}¢ NO"
-        thesis += f" with {kalshi_vol:,} contracts traded."
+        thesis = f"Kalshi at {km['yes']*100:.0f}¢ YES / {km['no']*100:.0f}¢ NO ({kalshi_vol:,} vol)."
+        if has_xplat:
+            thesis += f" Cross-checked with {platform_count} platform{'s' if platform_count > 1 else ''}."
         thesis += f" Buy {side_label} at {price_cents}¢ for {(100-price_cents)}¢ profit if correct."
-        # Honest edge_reason for single-platform picks
-        if kalshi_vol >= 5000:
-            edge_reason = f"High-volume market ({kalshi_vol:,} trades) at {price_cents}¢ — heavy trading suggests strong price discovery, but this is Kalshi-only data."
-        elif kalshi_vol >= 500:
-            edge_reason = f"Moderate volume ({kalshi_vol:,} trades) with market priced at {win_prob*100:.0f}% — single platform only, no independent confirmation."
-        else:
-            edge_reason = f"Low volume ({kalshi_vol:,} trades) — price of {price_cents}¢ is weakly supported, treat with caution."
 
-        # Single-platform: heavily discount — no independent validation
-        # High volume helps (more bettors = better price discovery)
-        vol_trust = 0.70 if kalshi_vol >= 5000 else 0.60 if kalshi_vol >= 1000 else 0.50 if kalshi_vol >= 100 else 0.40
-        real_win = min(0.90, win_prob * vol_trust)
+        # Trust level based on validation
+        if has_xplat and platform_count >= 2:
+            real_win = min(0.95, win_prob * 0.90)
+        elif has_xplat:
+            real_win = min(0.92, win_prob * 0.85)
+        else:
+            vol_trust = 0.70 if kalshi_vol >= 5000 else 0.60 if kalshi_vol >= 1000 else 0.50 if kalshi_vol >= 100 else 0.40
+            real_win = min(0.90, win_prob * vol_trust)
+
+        prices_dict = {"kalshi": round(k_price, 1)}
+        for xm in xplat_matches:
+            prices_dict[xm["platform"]] = round(xm["yes"] * 100, 1)
 
         picks.append({
-            "type": "news_researched",
+            "type": pick_type,
             "kalshi_ticker": km["id"],
             "kalshi_question": km["question"],
             "kalshi_yes_price": km["yes"],
@@ -1799,22 +1846,22 @@ def top_picks():
             "no_label": km.get("no_label", "No"),
             "close_time": km.get("close_time"),
             "consensus_yes_price": round(win_prob, 4),
-            "deviation": round(abs(km["yes"] - 0.5), 4),
+            "deviation": round(deviation, 4),
             "signal": signal,
             "price_cents": price_cents,
-            "matching_platforms": [],
+            "matching_platforms": xplat_matches,
             "edge_summary": edge,
             "edge_reason": edge_reason,
             "thesis": thesis,
             "potential_profit_usd": round((100 - price_cents) / 100, 2),
             "confidence": confidence,
-            "platform_count": 0,
+            "platform_count": platform_count,
             "win_probability": round(win_prob, 4),
             "real_win_likelihood": round(real_win, 4),
             "score": round(score, 4),
             "volume": kalshi_vol,
             "is_sports": km.get("is_sports", False),
-            "prices": {"kalshi_yes": round(km["yes"] * 100, 1), "kalshi_no": round(km["no"] * 100, 1)},
+            "prices": prices_dict,
         })
         existing_tickers.add(km["id"])
 
@@ -1849,7 +1896,7 @@ def top_picks():
     # Rank by: cross-platform first, then edge (deviation), then volume
     # This puts the picks with the most independent verification at the top
     def _hero_sort_key(p):
-        is_xplat = 1 if p.get("type") in ("consensus", "arbitrage") else 0
+        is_xplat = 1 if p.get("type") in ("consensus", "arbitrage", "cross_validated") else 0
         plat_count = p.get("platform_count", 0)
         deviation = p.get("deviation", 0)
         vol = p.get("volume", 0)
@@ -2048,8 +2095,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <title>TradeShark</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: 'Courier New', 'SF Mono', 'Consolas', monospace; background: #000000; color: #ff8c00; }
-.container { max-width: 1400px; margin: 0 auto; padding: 12px 16px; }
+body { font-family: 'Courier New', 'SF Mono', 'Consolas', monospace; background: #000000; color: #ff8c00; overflow-x: hidden; }
+.container { max-width: 1400px; margin: 0 auto; padding: 12px 16px; overflow-x: hidden; }
 .header { display: flex; align-items: center; gap: 14px; margin-bottom: 4px; border-bottom: 2px solid #ff8c00; padding-bottom: 8px; }
 .logo { width: 44px; height: 44px; }
 h1 { font-size: 22px; color: #ff8c00; letter-spacing: 2px; text-transform: uppercase; }
@@ -2155,10 +2202,10 @@ a:hover { text-decoration: underline; }
 @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
 /* Hero section */
 .hero-section { margin-bottom: 16px; }
-.hero-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
-@media (max-width: 1100px) { .hero-grid { grid-template-columns: repeat(3, 1fr); } }
-@media (max-width: 600px) { .hero-grid { grid-template-columns: repeat(2, 1fr); } }
-.hero-card { background: linear-gradient(135deg, #0d1a0d 0%, #0a0a0a 50%, #1a0d00 100%); border: 1px solid #00ff88; padding: 8px; position: relative; display: flex; flex-direction: column; min-width: 0; }
+.hero-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; width: 100%; }
+@media (max-width: 1100px) { .hero-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .hero-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.hero-card { background: linear-gradient(135deg, #0d1a0d 0%, #0a0a0a 50%, #1a0d00 100%); border: 1px solid #00ff88; padding: 8px; position: relative; display: flex; flex-direction: column; min-width: 0; overflow: hidden; word-break: break-word; }
 .hero-card:hover { border-color: #ff8c00; box-shadow: 0 0 15px rgba(255,140,0,0.15); }
 .hero-rank { position: absolute; top: 2px; right: 6px; font-size: 20px; font-weight: 900; color: rgba(0,255,136,0.15); font-family: 'Courier New', monospace; }
 .hero-prob { font-size: 20px; font-weight: 900; color: #00ff88; font-family: 'Courier New', monospace; line-height: 1; }
@@ -2342,7 +2389,7 @@ function renderHeroCard(p, idx) {
   var ct = Math.max(1, Math.floor(500 / p.price_cents));
   var cost = (p.price_cents * ct / 100).toFixed(2);
   var sideWord = p.signal === 'buy_yes' ? 'YES' : 'NO';
-  var isConsensus = p.type === 'consensus' || p.type === 'arbitrage';
+  var isConsensus = p.type === 'consensus' || p.type === 'arbitrage' || p.type === 'cross_validated';
   var settleTime = formatSettleTime(p.close_time);
   var platCount = (p.platform_count || 0) + 1;
 
@@ -2608,9 +2655,9 @@ function renderPickCard(p, idx, prefix) {
   const sigClass = p.signal === 'buy_yes' ? 'yes' : 'no';
   const sigLabel = p.signal === 'buy_yes' ? 'BET YES' : 'BET NO';
   const confClass = p.confidence.toLowerCase();
-  const typeLabels = {consensus: 'CROSS-PLATFORM', arbitrage: 'ARBITRAGE', news_researched: 'NEWS + DATA', high_probability: 'HIGH PROB'};
+  const typeLabels = {consensus: 'CROSS-PLATFORM', arbitrage: 'ARBITRAGE', cross_validated: 'VERIFIED', kalshi_only: 'KALSHI ONLY', news_researched: 'NEWS + DATA', high_probability: 'HIGH PROB'};
   const typeLabel = typeLabels[p.type] || 'PICK';
-  const typeColors = {consensus: '#00ff88', arbitrage: '#ff8c00', news_researched: '#c084fc', high_probability: '#4a9eff'};
+  const typeColors = {consensus: '#00ff88', arbitrage: '#ff8c00', cross_validated: '#00d4ff', kalshi_only: '#666', news_researched: '#c084fc', high_probability: '#4a9eff'};
   const typeColor = typeColors[p.type] || '#888';
   let h = '<div class="pick-card">';
   h += '<div class="pick-rank">#' + (idx + 1) + '</div>';
