@@ -391,6 +391,9 @@ def fetch_kalshi():
             # Volume: try multiple field names
             vol_raw = m.get("volume") or m.get("volume_fp") or m.get("volume_24h_fp") or "0"
             vol = int(float(vol_raw))
+            # Capture YES/NO subtitles so the UI can explain what each side means
+            yes_label = m.get("yes_sub_title") or m.get("yes_subtitle") or "Yes"
+            no_label = m.get("no_sub_title") or m.get("no_subtitle") or "No"
             out.append({
                 "platform": "kalshi",
                 "id":       ticker,
@@ -399,6 +402,8 @@ def fetch_kalshi():
                 "no":       round(no, 4),
                 "yes_ask_cents": int(yes_ask),
                 "no_ask_cents":  int(no_ask),
+                "yes_label": yes_label,
+                "no_label":  no_label,
                 "volume":   vol,
                 "close_time": m.get("expected_expiration_time") or m.get("close_time"),
                 "url":      "https://kalshi.com/markets/" + ticker,
@@ -1596,6 +1601,8 @@ def top_picks():
             "kalshi_question": km["question"],
             "kalshi_yes_price": km["yes"],
             "kalshi_url": km["url"],
+            "yes_label": km.get("yes_label", "Yes"),
+            "no_label": km.get("no_label", "No"),
             "consensus_yes_price": round(consensus_yes, 4),
             "deviation": round(deviation, 4),
             "signal": signal,
@@ -1662,6 +1669,8 @@ def top_picks():
             "kalshi_question": kalshi_title,
             "kalshi_yes_price": buy_yes["price"] if buy_yes["platform"] == "kalshi" else 1 - buy_no["price"],
             "kalshi_url": kalshi_side["url"],
+            "yes_label": matched_km.get("yes_label", "Yes") if matched_km else "Yes",
+            "no_label": matched_km.get("no_label", "No") if matched_km else "No",
             "consensus_yes_price": buy_yes["price"] if buy_yes["platform"] != "kalshi" else 1 - buy_no["price"],
             "deviation": round(spread, 4),
             "signal": signal,
@@ -1756,6 +1765,8 @@ def top_picks():
             "kalshi_question": km["question"],
             "kalshi_yes_price": km["yes"],
             "kalshi_url": km["url"],
+            "yes_label": km.get("yes_label", "Yes"),
+            "no_label": km.get("no_label", "No"),
             "consensus_yes_price": round(win_prob, 4),
             "deviation": round(abs(km["yes"] - 0.5), 4),
             "signal": signal,
@@ -2256,10 +2267,16 @@ function renderHeroCard(p, idx) {
   h += '<div class="hero-prob">' + winPct.toFixed(0) + '%</div>';
   h += '<div class="hero-label">Win Probability</div>';
   h += '<div class="hero-question"><a href="' + p.kalshi_url + '" target="_blank">' + p.kalshi_question + '</a></div>';
-  h += '<div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">';
+  var yesL = p.yes_label || 'Yes';
+  var noL = p.no_label || 'No';
+  var betMeaning = p.signal === 'buy_yes' ? yesL : noL;
+  h += '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:4px">';
   h += '<span class="hero-signal ' + sigClass + '">' + sigLabel + '</span>';
   h += '<span style="font-size:9px;color:#888">' + p.price_cents + '¢ per contract</span>';
   h += '</div>';
+  if (betMeaning !== 'Yes' && betMeaning !== 'No') {
+    h += '<div style="font-size:9px;color:#ffcc00;margin-bottom:4px;font-weight:600">→ Betting: ' + betMeaning + '</div>';
+  }
   if (p.news && p.news.length > 0) {
     var sentColor = p.news_sentiment === 'bullish' ? '#00ff88' : p.news_sentiment === 'bearish' ? '#ff4444' : '#888';
     h += '<div style="font-size:8px;color:' + sentColor + ';text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">📰 ' + p.news_sentiment + '</div>';
@@ -2506,6 +2523,12 @@ function renderPickCard(p, idx, prefix) {
   if (p.volume > 0) h += '<span class="pick-meta" style="color:#666">' + p.volume.toLocaleString() + ' vol</span>';
   h += '</div>';
   h += '<div class="pick-question"><a href="' + p.kalshi_url + '" target="_blank">' + p.kalshi_question + '</a></div>';
+  var pickYL = p.yes_label || 'Yes';
+  var pickNL = p.no_label || 'No';
+  var pickBetMeaning = p.signal === 'buy_yes' ? pickYL : pickNL;
+  if (pickBetMeaning !== 'Yes' && pickBetMeaning !== 'No') {
+    h += '<div style="font-size:9px;color:#ffcc00;font-weight:600;margin-bottom:2px">→ Betting: ' + pickBetMeaning + '</div>';
+  }
   h += '<div class="pick-edge">' + p.edge_summary + '</div>';
   // News headlines
   if (p.news && p.news.length > 0) {
