@@ -1945,21 +1945,10 @@ def top_picks():
         # Must have SOME volume (people actually trading)
         if (p.get("volume") or 0) < 10:
             return False
-        # Must settle within 180 days (no multi-year bets)
-        ct = p.get("close_time")
-        if ct:
-            try:
-                exp = datetime.datetime.fromisoformat(ct.replace("Z", "+00:00").replace("+00:00", ""))
-                days_left = (exp - now).total_seconds() / 86400
-                if days_left > 180:
-                    return False
-            except Exception:
-                pass
-        # Must have meaningful deviation (edge) if cross-platform
-        if p.get("type") in ("consensus", "arbitrage"):
-            return p.get("deviation", 0) >= 0.05  # at least 5% edge
-        # Single-platform: must have decent volume
-        return (p.get("volume") or 0) >= 100
+        # Must have some edge — at least 5% deviation
+        if p.get("deviation", 0) < 0.05:
+            return False
+        return True
 
     hero_candidates = [p for p in picks if _is_hero_worthy(p)]
     # Rank by: cross-platform first, then edge (deviation), then volume
