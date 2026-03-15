@@ -261,8 +261,8 @@ def fetch_kalshi():
         return []
     raw = []
     cursor = None
-    # Fetch up to 4 pages (1000 markets each) for maximum coverage
-    for _ in range(4):
+    # Fetch up to 6 pages (1000 markets each) — need to get past all the parlays
+    for _ in range(6):
         try:
             params = {"limit": 1000, "status": "open"}
             if cursor:
@@ -276,22 +276,52 @@ def fetch_kalshi():
             )
             resp.raise_for_status()
             data = resp.json()
-            raw.extend(data.get("markets", []))
+            page = data.get("markets", [])
+            raw.extend(page)
             cursor = data.get("cursor")
-            if not cursor:
+            if not cursor or len(page) < 1000:
                 break
-        except Exception:
+        except Exception as e:
+            print(f"[FETCH] kalshi page error: {e}")
             break
     out = []
+    skipped_parlays = 0
     for m in raw:
         try:
-            yes_ask = m.get("yes_ask") or m.get("last_price") or 50
-            no_ask = m.get("no_ask") or (100 - (m.get("last_price") or 50))
+            event_ticker = m.get("event_ticker", "")
+            # Skip multivariate (parlay) markets — they start with KXMVE
+            if event_ticker.upper().startswith("KXMVE"):
+                skipped_parlays += 1
+                continue
+            # Also skip if title looks like a parlay
+            title = m.get("title") or ""
+            if _is_parlay_title(title):
+                skipped_parlays += 1
+                continue
+            # Handle both old and new Kalshi API field names
+            # New API uses _dollars suffix with string values
+            yes_ask_raw = m.get("yes_ask") or m.get("yes_ask_dollars")
+            no_ask_raw = m.get("no_ask") or m.get("no_ask_dollars")
+            last_price_raw = m.get("last_price") or m.get("last_price_dollars")
+            # Convert to cents (int)
+            def _to_cents(v):
+                if v is None:
+                    return None
+                if isinstance(v, str):
+                    try:
+                        return int(float(v) * 100)
+                    except:
+                        return None
+                return int(v) if v <= 1 else int(v)  # already cents if > 1
+
+            yes_ask = _to_cents(yes_ask_raw) or _to_cents(last_price_raw) or 50
+            no_ask = _to_cents(no_ask_raw) or (100 - yes_ask)
             yes = yes_ask / 100
             no  = no_ask / 100
             ticker = m["ticker"]
-            event_ticker = m.get("event_ticker", "")
-            vol = m.get("volume", 0) or 0
+            # Volume: try both field names
+            vol_raw = m.get("volume") or m.get("volume_fp") or m.get("volume_24h_fp") or 0
+            vol = int(float(vol_raw))
             out.append({
                 "platform": "kalshi",
                 "id":       ticker,
@@ -306,8 +336,9 @@ def fetch_kalshi():
                 "event_ticker": event_ticker,
                 "is_sports": _is_sports_market(ticker, event_ticker, m.get("title", "")),
             })
-        except Exception:
+        except Exception as e:
             continue
+    print(f"[FETCH] kalshi: {len(out)} real markets, {skipped_parlays} parlays skipped from {len(raw)} total")
     return out
 
 
