@@ -227,12 +227,15 @@ _SPORTS_TITLE_KEYWORDS = [
     "mahomes", "kelce", "lamar jackson",
     # Tennis (distinctive names)
     "djokovic", "alcaraz", "sinner", "swiatek", "sabalenka",
-    # College (only when combined with sports context - use multi-word)
+    # College basketball / football
     "march madness", "ncaa tournament", "final four", "sweet sixteen",
+    "elite eight", "round of 32", "round of 64", "championship game",
+    "national championship", "college basketball",
     # General sports
     "game 1", "game 2", "game 3", "game 4", "game 5", "game 6", "game 7",
     "playoff", "stanley cup", "super bowl", "world series",
     "the players championship", "masters tournament",
+    "win the ", "qualify for the men",  # catches "Will X qualify for the men's..."
 ]
 
 
@@ -262,8 +265,13 @@ def fetch_kalshi():
     raw = []
     cursor = None
     non_parlay_count = 0
-    # Keep paginating until we have 500+ non-parlay markets or hit 20 pages
-    for page_num in range(20):
+    start_time = datetime.datetime.utcnow()
+    # Keep paginating until we have 200+ non-parlay markets, hit 10 pages, or 20s elapsed
+    for page_num in range(10):
+        elapsed = (datetime.datetime.utcnow() - start_time).total_seconds()
+        if elapsed > 20:
+            print(f"[FETCH] kalshi: time limit reached after {page_num} pages")
+            break
         try:
             params = {"limit": 1000, "status": "open"}
             if cursor:
@@ -271,7 +279,7 @@ def fetch_kalshi():
             headers = signed_headers("GET", path)
             resp = requests.get(
                 KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
-                headers=headers, params=params, timeout=TIMEOUT,
+                headers=headers, params=params, timeout=8,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -279,15 +287,14 @@ def fetch_kalshi():
             for m in page:
                 et = m.get("event_ticker", "")
                 if et.upper().startswith("KXMVE"):
-                    continue  # skip parlay in-memory, don't store
+                    continue
                 raw.append(m)
                 non_parlay_count += 1
             cursor = data.get("cursor")
-            print(f"[FETCH] kalshi page {page_num+1}: {len(page)} total, {non_parlay_count} non-parlay so far")
+            print(f"[FETCH] kalshi page {page_num+1}: {len(page)} raw, {non_parlay_count} real so far ({elapsed:.1f}s)")
             if not cursor or len(page) < 1000:
                 break
-            # Stop once we have enough real markets
-            if non_parlay_count >= 500:
+            if non_parlay_count >= 200:
                 break
         except Exception as e:
             print(f"[FETCH] kalshi page {page_num+1} error: {e}")
