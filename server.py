@@ -1039,7 +1039,7 @@ def place_kalshi_order(ticker, side, price_cents, count=1):
         "type": "limit",
         "count": count,
         "client_order_id": str(uuid.uuid4()),
-        "time_in_force": "ioc",
+        "time_in_force": "immediate_or_cancel",
     }
     if side == "yes":
         payload["yes_price_dollars"] = price_dollars
