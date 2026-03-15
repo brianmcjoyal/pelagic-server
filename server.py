@@ -1597,7 +1597,17 @@ def top_picks():
         # Skip parlays globally — titles with multiple "yes " are multi-leg combos
         if m["platform"] == "kalshi" and _is_parlay_title(m.get("question", "")):
             continue
+        # Hard filter: ONLY markets settling in 2026 or sooner
+        # Money locked in 2030+ bets can't compound toward our $1M goal
         if m["platform"] == "kalshi":
+            ct = m.get("close_time", "")
+            if ct:
+                try:
+                    exp_year = datetime.datetime.fromisoformat(ct.replace("Z", "")).year
+                    if exp_year > 2026:
+                        continue
+                except Exception:
+                    pass
             kalshi_markets.append((nq, m))
         else:
             other_markets.append((nq, m))
