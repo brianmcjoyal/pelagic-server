@@ -1030,6 +1030,8 @@ def place_kalshi_order(ticker, side, price_cents, count=1):
     if not headers:
         return {"error": "No API key"}
 
+    # Convert cents to dollar string (Kalshi API v2 migrated to _dollars fields March 12 2026)
+    price_dollars = f"{price_cents / 100:.4f}"
     payload = {
         "ticker": ticker,
         "action": "buy",
@@ -1040,9 +1042,9 @@ def place_kalshi_order(ticker, side, price_cents, count=1):
         "time_in_force": "ioc",
     }
     if side == "yes":
-        payload["yes_price"] = price_cents
+        payload["yes_price_dollars"] = price_dollars
     else:
-        payload["no_price"] = price_cents
+        payload["no_price_dollars"] = price_dollars
 
     try:
         resp = requests.post(
