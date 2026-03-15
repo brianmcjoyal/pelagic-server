@@ -1833,7 +1833,15 @@ def top_picks():
         return True
 
     hero_candidates = [p for p in picks if _is_hero_worthy(p)]
-    all_sorted = sorted(hero_candidates, key=lambda x: (x.get("real_win_likelihood", 0), x.get("score", 0)), reverse=True)
+    # Rank by: cross-platform first, then edge (deviation), then volume
+    # This puts the picks with the most independent verification at the top
+    def _hero_sort_key(p):
+        is_xplat = 1 if p.get("type") in ("consensus", "arbitrage") else 0
+        plat_count = p.get("platform_count", 0)
+        deviation = p.get("deviation", 0)
+        vol = p.get("volume", 0)
+        return (is_xplat, plat_count, deviation, vol)
+    all_sorted = sorted(hero_candidates, key=_hero_sort_key, reverse=True)
     hero_picks = all_sorted[:5]
     for i, p in enumerate(hero_picks):
         p["hero_rank"] = i + 1
@@ -2222,7 +2230,7 @@ a:hover { text-decoration: underline; }
 </div>
 
 <div class="hero-section">
-  <div class="section-title" style="font-size:15px;border-bottom:2px solid #00ff88;color:#00ff88">Best Bets — Top 5 Biggest Edge <span class="badge" id="hero-badge" style="color:#00ff88;border-color:#00ff88">0</span><button class="refresh-btn" onclick="loadTopPicks()">Refresh</button></div>
+  <div class="section-title" style="font-size:15px;border-bottom:2px solid #00ff88;color:#00ff88">Top 5 Picks — Ranked by Cross-Platform Confidence <span class="badge" id="hero-badge" style="color:#00ff88;border-color:#00ff88">0</span><button class="refresh-btn" onclick="loadTopPicks()">Refresh</button></div>
   <div id="hero-picks" class="hero-grid"><div class="loading" style="grid-column:1/-1">Scanning 6 platforms + news...</div></div>
 </div>
 
@@ -2316,30 +2324,42 @@ function formatSettleTime(closeTime) {
 function renderHeroCard(p, idx) {
   var sigClass = p.signal === 'buy_yes' ? 'yes' : 'no';
   var sigLabel = p.signal === 'buy_yes' ? 'BET YES' : 'BET NO';
-  var realWin = (p.real_win_likelihood || p.win_probability || 0.5) * 100;
+  var marketPrice = (p.win_probability || 0.5) * 100;
   var ct = Math.max(1, Math.floor(500 / p.price_cents));
   var cost = (p.price_cents * ct / 100).toFixed(2);
   var sideWord = p.signal === 'buy_yes' ? 'YES' : 'NO';
   var isConsensus = p.type === 'consensus' || p.type === 'arbitrage';
-  var sourceLabel = isConsensus ? 'CROSS-PLATFORM' : 'SINGLE PLATFORM';
-  var sourceColor = isConsensus ? '#00ff88' : '#666';
-  var winColor = realWin >= 70 ? '#00ff88' : realWin >= 50 ? '#ff8c00' : '#ff4444';
   var settleTime = formatSettleTime(p.close_time);
+
+  // Number of platforms that agree on this price
+  var platCount = p.platform_count || 0;
+  var totalPlats = platCount + 1; // +1 for Kalshi
+  // Consensus spread: how much platforms disagree
+  var deviation = (p.deviation || 0) * 100;
 
   var h = '<div class="hero-card">';
   h += '<div class="hero-rank">#' + (idx + 1) + '</div>';
-  h += '<div class="hero-prob" style="color:' + winColor + '">' + realWin.toFixed(0) + '%</div>';
-  h += '<div class="hero-label">Likelihood of Winning</div>';
-  // Source + settlement time
-  h += '<div style="display:flex;gap:8px;font-size:8px;margin:3px 0;align-items:center">';
-  h += '<span style="color:' + sourceColor + ';text-transform:uppercase;letter-spacing:0.5px">' + sourceLabel + '</span>';
-  h += '<span style="color:#ff8c00;font-weight:700">⏱ ' + settleTime + '</span>';
+
+  // Main stat: market price (labeled honestly)
+  var priceColor = marketPrice >= 75 ? '#00ff88' : marketPrice >= 55 ? '#ff8c00' : '#ffcc00';
+  h += '<div class="hero-prob" style="color:' + priceColor + '">' + marketPrice.toFixed(0) + '¢</div>';
+  h += '<div class="hero-label">Market Price</div>';
+
+  // Trust indicators — all factual
+  h += '<div style="margin:4px 0;font-size:9px">';
+  if (isConsensus) {
+    h += '<div style="color:#00ff88;font-weight:700">' + totalPlats + ' platforms agree · ' + deviation.toFixed(0) + '% edge</div>';
+  } else {
+    h += '<div style="color:#666">Kalshi only · no cross-platform data</div>';
+  }
   h += '</div>';
-  // Cost breakdown
-  h += '<div style="display:flex;gap:8px;font-size:9px;color:#888;margin:2px 0">';
+
+  // Facts row
+  h += '<div style="display:flex;gap:6px;font-size:8px;color:#888;margin:2px 0;flex-wrap:wrap">';
+  h += '<span>⏱ <b style="color:#ff8c00">' + settleTime + '</b></span>';
+  h += '<span>Vol: <b style="color:#fff">' + (p.volume || 0).toLocaleString() + '</b></span>';
   h += '<span>Cost: <b style="color:#fff">' + p.price_cents + '¢</b></span>';
   h += '<span>Win: <b style="color:#00ff88">+' + (100 - p.price_cents) + '¢</b></span>';
-  h += '<span>Lose: <b style="color:#ff4444">-' + p.price_cents + '¢</b></span>';
   h += '</div>';
 
   h += '<div class="hero-question"><a href="' + p.kalshi_url + '" target="_blank">' + p.kalshi_question + '</a></div>';
@@ -2357,7 +2377,6 @@ function renderHeroCard(p, idx) {
     h += '<div style="font-size:8px;color:' + sentColor + ';text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">📰 ' + p.news_sentiment + '</div>';
   }
   h += '<div class="hero-footer">';
-  h += '<span style="font-size:9px;color:#888">' + (p.volume || 0).toLocaleString() + ' vol</span>';
   h += '<button class="hero-execute" onclick="executePickTrade(this, ' + p._globalIdx + ')">Buy ' + sideWord + ' · $' + cost + '</button>';
   h += '</div>';
   h += '</div>';
@@ -2589,12 +2608,12 @@ function renderPickCard(p, idx, prefix) {
   h += '<span class="pick-signal ' + sigClass + '">' + sigLabel + '</span>';
   h += '<span class="pick-conf ' + confClass + '">' + p.confidence + '</span>';
   h += '<span class="pick-meta" style="color:' + typeColor + '">' + typeLabel + '</span>';
-  var realWinPct = (p.real_win_likelihood || p.win_probability || 0.5) * 100;
-  var rwColor = realWinPct >= 70 ? '#00ff88' : realWinPct >= 50 ? '#ff8c00' : '#ff4444';
-  h += '<span class="pick-meta" style="color:' + rwColor + ';font-weight:700;font-size:1.2em">' + realWinPct.toFixed(0) + '%</span>';
+  var mktPrice = (p.win_probability || 0.5) * 100;
+  var mpColor = mktPrice >= 75 ? '#00ff88' : mktPrice >= 55 ? '#ff8c00' : '#ffcc00';
+  h += '<span class="pick-meta" style="color:' + mpColor + ';font-weight:700;font-size:1.2em">' + mktPrice.toFixed(0) + '¢</span>';
   var pickSettle = formatSettleTime(p.close_time);
   h += '<span class="pick-meta" style="color:#ff8c00;font-weight:600">⏱ ' + pickSettle + '</span>';
-  if (p.platform_count > 0) h += '<span class="pick-meta">' + p.platform_count + ' PLATFORM' + (p.platform_count > 1 ? 'S' : '') + '</span>';
+  if (p.platform_count > 0) h += '<span class="pick-meta">' + (p.platform_count + 1) + ' platforms</span>';
   if (p.volume > 0) h += '<span class="pick-meta" style="color:#666">' + p.volume.toLocaleString() + ' vol</span>';
   h += '</div>';
   h += '<div class="pick-question"><a href="' + p.kalshi_url + '" target="_blank">' + p.kalshi_question + '</a></div>';
