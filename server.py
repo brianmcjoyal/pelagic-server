@@ -50,7 +50,7 @@ TIMEOUT = 8
 # Bot configuration and state
 # ---------------------------------------------------------------------------
 BOT_CONFIG = {
-    "enabled": False,
+    "enabled": True,
     "max_bet_usd": 10.0,
     "max_daily_usd": 50.0,
     "min_deviation": 0.15,
@@ -1364,11 +1364,6 @@ a:hover { text-decoration: underline; }
   <div class="stat-card"><div class="stat-label">Mispriced Found</div><div class="stat-value yellow" id="mispriced-count">--</div></div>
   <div class="stat-card"><div class="stat-label">Trades Today</div><div class="stat-value" id="trades-today">--</div></div>
   <div class="stat-card"><div class="stat-label">Daily Spent</div><div class="stat-value red" id="daily-spent">--</div></div>
-</div>
-
-<div class="bot-toggle">
-  <span class="bot-status"><span class="dot off" id="bot-dot"></span><span id="bot-label">Bot: Loading...</span></span>
-  <button class="toggle-btn enable" id="toggle-btn" onclick="toggleBot()">Enable Bot</button>
 </div>
 
 <div class="tab-bar">
