@@ -741,6 +741,67 @@ def balance():
         return jsonify({"error": str(e)})
 
 
+@app.route("/positions")
+def positions():
+    # Get portfolio positions
+    path = "/portfolio/positions"
+    headers = signed_headers("GET", path)
+    if not headers:
+        return jsonify({"positions": [], "error": "No API key"})
+    try:
+        resp = requests.get(
+            KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
+            headers=headers,
+            params={"limit": 100, "settlement_status": "unsettled"},
+            timeout=TIMEOUT,
+        )
+        resp.raise_for_status()
+        raw = resp.json()
+        positions_list = raw.get("market_positions", [])
+
+        # Enrich with market details (title, close time)
+        enriched = []
+        for pos in positions_list:
+            ticker = pos.get("ticker", "")
+            market_path = f"/markets/{ticker}"
+            mkt_headers = signed_headers("GET", market_path)
+            title = ticker
+            close_time = None
+            result = None
+            try:
+                mkt_resp = requests.get(
+                    KALSHI_BASE_URL + KALSHI_API_PREFIX + market_path,
+                    headers=mkt_headers,
+                    timeout=TIMEOUT,
+                )
+                mkt_resp.raise_for_status()
+                mkt = mkt_resp.json().get("market", {})
+                title = mkt.get("title", ticker)
+                close_time = mkt.get("close_time") or mkt.get("expected_expiration_time")
+                result = mkt.get("result")
+            except Exception:
+                pass
+
+            yes_count = pos.get("market_exposure", 0)
+            no_count = pos.get("total_traded", 0)
+            # Use the position fields from Kalshi
+            enriched.append({
+                "ticker": ticker,
+                "title": title,
+                "yes_contracts": pos.get("position", 0),
+                "market_exposure": pos.get("market_exposure", 0),
+                "resting_orders_count": pos.get("resting_orders_count", 0),
+                "total_traded": pos.get("total_traded", 0),
+                "realized_pnl": pos.get("realized_pnl", 0),
+                "close_time": close_time,
+                "result": result,
+                "fees_paid": pos.get("fees_paid", 0),
+            })
+        return jsonify({"positions": enriched})
+    except Exception as e:
+        return jsonify({"positions": [], "error": str(e)})
+
+
 # ---------------------------------------------------------------------------
 # Bot endpoints (NEW)
 # ---------------------------------------------------------------------------
@@ -1226,6 +1287,11 @@ a:hover { text-decoration: underline; }
   <div id="top-picks-list" class="picks-grid"><div class="loading" style="grid-column:1/-1">Analyzing markets...</div></div>
 </div>
 
+<div class="section">
+  <div class="section-title">Open Positions <span class="badge" id="pos-badge">0</span><button class="refresh-btn" onclick="loadPositions()">Refresh</button></div>
+  <div id="pos-table"><div class="loading">Loading positions...</div></div>
+</div>
+
 <div class="chart-section">
   <div class="chart-header">
     <span class="chart-title">P/L Performance</span>
@@ -1662,13 +1728,63 @@ function drawPLChart(trades) {
   ctx.fill();
 }
 
+async function loadPositions() {
+  try {
+    const data = await fetch(API + '/positions').then(r => r.json());
+    const positions = data.positions || [];
+    document.getElementById('pos-badge').textContent = positions.length;
+    if (positions.length === 0) {
+      document.getElementById('pos-table').innerHTML = '<div class="empty">No open positions. Place a trade to get started.</div>';
+      return;
+    }
+    let html = '<table><tr><th>Market</th><th>Contracts</th><th>Exposure</th><th>Time Left</th><th>Status</th></tr>';
+    positions.forEach(p => {
+      let timeLeft = '--';
+      let statusClass = 'result-pending';
+      let statusLabel = 'Active';
+      if (p.result) {
+        statusLabel = p.result === 'yes' ? 'WON' : 'LOST';
+        statusClass = p.result === 'yes' ? 'result-win' : 'result-loss';
+        timeLeft = 'Settled';
+      } else if (p.close_time) {
+        const close = new Date(p.close_time);
+        const now = new Date();
+        const diff = close - now;
+        if (diff <= 0) {
+          timeLeft = 'Settling...';
+        } else {
+          const mins = Math.floor(diff / 60000);
+          const hrs = Math.floor(mins / 60);
+          const days = Math.floor(hrs / 24);
+          if (days > 0) timeLeft = days + 'd ' + (hrs % 24) + 'h';
+          else if (hrs > 0) timeLeft = hrs + 'h ' + (mins % 60) + 'm';
+          else timeLeft = mins + 'm';
+        }
+      }
+      const exposure = (p.market_exposure / 100).toFixed(2);
+      html += '<tr>';
+      html += '<td>' + (p.title || p.ticker).substring(0, 60) + '</td>';
+      html += '<td>' + p.yes_contracts + '</td>';
+      html += '<td>$' + exposure + '</td>';
+      html += '<td style="color:#ff8c00;font-weight:600">' + timeLeft + '</td>';
+      html += '<td class="' + statusClass + '">' + statusLabel + '</td>';
+      html += '</tr>';
+    });
+    html += '</table>';
+    document.getElementById('pos-table').innerHTML = html;
+  } catch(e) {
+    document.getElementById('pos-table').innerHTML = '<div class="empty">Error: ' + e.message + '</div>';
+  }
+}
+
 // Load everything on page load
 loadStatus();
 loadTopPicks();
+loadPositions();
 loadMispriced();
 loadTrades();
 // Auto-refresh every 30 seconds
-setInterval(() => { loadStatus(); loadTopPicks(); loadTrades(); }, 30000);
+setInterval(() => { loadStatus(); loadTopPicks(); loadPositions(); loadTrades(); }, 30000);
 </script>
 </body>
 </html>
