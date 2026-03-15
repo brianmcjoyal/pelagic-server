@@ -533,7 +533,7 @@ def place_kalshi_order(ticker, side, price_cents, count=1):
         "type": "limit",
         "count": count,
         "client_order_id": str(uuid.uuid4()),
-        "time_in_force": "gtc",
+        "time_in_force": "good_till_canceled",
     }
     if side == "yes":
         payload["yes_price"] = price_cents
