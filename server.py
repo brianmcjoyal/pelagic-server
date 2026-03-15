@@ -454,59 +454,53 @@ def fetch_metaculus():
 
 
 def fetch_smarkets():
-    """Fetch markets from Smarkets (UK prediction market, good non-sports)."""
+    """Fetch popular markets from Smarkets (UK prediction market)."""
+    # Smarkets requires multiple nested API calls per event which is too slow.
+    # Use their popular/featured endpoint instead for a quick snapshot.
     try:
         resp = requests.get(
-            "https://api.smarkets.com/v3/events/",
-            params={"state": "upcoming", "type_domain": "politics,current_affairs",
-                    "type_scope": "single_event", "limit": 100,
-                    "sort": "id", "is_politics": "true"},
-            timeout=TIMEOUT,
+            "https://api.smarkets.com/v3/popular/event_ids/sport/",
+            timeout=5,
         )
-        resp.raise_for_status()
-        events = resp.json().get("events", [])
+        # If the popular endpoint doesn't work, just return empty
+        if resp.status_code != 200:
+            return []
+        event_ids = resp.json().get("popular_event_ids", [])[:10]  # top 10 only
     except Exception:
         return []
     out = []
-    for ev in events:
+    for eid in event_ids:
         try:
-            eid = ev.get("id", "")
-            # Get markets for each event
-            mkt_resp = requests.get(
-                f"https://api.smarkets.com/v3/events/{eid}/markets/",
-                timeout=5,
-            )
-            mkt_resp.raise_for_status()
-            markets = mkt_resp.json().get("markets", [])
-            for mkt in markets:
+            ev_resp = requests.get(f"https://api.smarkets.com/v3/events/{eid}/", timeout=3)
+            if ev_resp.status_code != 200:
+                continue
+            ev = ev_resp.json().get("event", {})
+            ev_name = ev.get("name", "")
+            mkt_resp = requests.get(f"https://api.smarkets.com/v3/events/{eid}/markets/", timeout=3)
+            if mkt_resp.status_code != 200:
+                continue
+            for mkt in mkt_resp.json().get("markets", [])[:3]:  # max 3 markets per event
                 mid = mkt.get("id", "")
-                # Get prices
                 try:
-                    price_resp = requests.get(
-                        f"https://api.smarkets.com/v3/markets/{mid}/last_executed_prices/",
-                        timeout=5,
-                    )
-                    price_resp.raise_for_status()
-                    prices = price_resp.json().get("last_executed_prices", {})
-                    if not prices:
+                    pr = requests.get(f"https://api.smarkets.com/v3/markets/{mid}/last_executed_prices/", timeout=3)
+                    if pr.status_code != 200:
                         continue
-                    # First contract's price
-                    for cid, pdata in prices.items():
-                        yes = float(pdata.get("last_executed_price", 0)) / 10000
+                    for cid, pd in pr.json().get("last_executed_prices", {}).items():
+                        yes = float(pd.get("last_executed_price", 0)) / 10000
                         if 0.02 < yes < 0.98:
                             out.append({
-                                "platform": "smarkets",
-                                "id": str(mid) + "_" + str(cid),
-                                "question": ev.get("name", "") + " - " + mkt.get("name", ""),
-                                "yes": round(yes, 4),
-                                "no": round(1 - yes, 4),
-                                "volume": 0,
-                                "url": f"https://smarkets.com/event/{eid}",
+                                "platform": "smarkets", "id": f"{mid}_{cid}",
+                                "question": f"{ev_name} - {mkt.get('name', '')}",
+                                "yes": round(yes, 4), "no": round(1 - yes, 4),
+                                "volume": 0, "url": f"https://smarkets.com/event/{eid}",
                             })
+                        break  # only first contract
                 except Exception:
                     continue
         except Exception:
             continue
+        if len(out) >= 20:
+            break
     return out
 
 
@@ -654,14 +648,14 @@ def fetch_all_markets():
     all_markets = []
     with ThreadPoolExecutor(max_workers=6) as pool:
         futures = {pool.submit(fn): name for name, fn in ALL_FETCHERS.items()}
-        for future in as_completed(futures):
+        for future in as_completed(futures, timeout=30):  # 30s max for all fetchers
             name = futures[future]
             try:
-                result = future.result()
+                result = future.result(timeout=15)  # 15s max per platform
                 print(f"[FETCH] {name}: {len(result)} markets")
                 all_markets.extend(result)
             except Exception as e:
-                print(f"[FETCH] {name}: ERROR {e}")
+                print(f"[FETCH] {name}: ERROR/TIMEOUT {e}")
                 continue
     if all_markets:
         _market_cache["data"] = all_markets
@@ -778,6 +772,9 @@ def find_opportunities(all_markets, min_similarity=0.55, max_cost=0.98):
         nq = normalize_question(m["question"])
         if len(nq.split()) < 3:
             continue
+        # Skip parlays
+        if (m.get("question") or "").lower().count("yes ") >= 2:
+            continue
         entries.append((nq, m))
 
     keyword_index = _build_keyword_index(entries)
@@ -846,6 +843,9 @@ def find_consensus_mispricings(all_markets):
     for m in all_markets:
         nq = normalize_question(m["question"])
         if len(nq.split()) < 3:
+            continue
+        # Skip parlays
+        if m["platform"] == "kalshi" and (m.get("question") or "").lower().count("yes ") >= 2:
             continue
         if m["platform"] == "kalshi":
             kalshi.append((nq, m))
@@ -1285,11 +1285,15 @@ def top_picks():
     picks = []
 
     # Build Kalshi and other-platform market lists
+    # GLOBAL: filter out all parlays upfront — they can't cross-platform match
     kalshi_markets = []
     other_markets = []
     for m in all_markets:
         nq = normalize_question(m["question"])
         if len(nq.split()) < 3:
+            continue
+        # Skip parlays globally — titles with multiple "yes " are multi-leg combos
+        if m["platform"] == "kalshi" and (m.get("question") or "").lower().count("yes ") >= 2:
             continue
         if m["platform"] == "kalshi":
             kalshi_markets.append((nq, m))
