@@ -304,10 +304,38 @@ def fetch_kalshi():
                 raw.extend(r.json().get("markets", []))
             fetched_events += 1
         except Exception as e:
+            print(f"[FETCH] kalshi event {et}: ERROR {e}")
             fetched_events += 1
             continue
 
     print(f"[FETCH] kalshi: {len(raw)} markets from {fetched_events} events")
+
+    # Fallback: if events approach yielded nothing, do a simple paginated fetch
+    if not raw:
+        print("[FETCH] kalshi: events approach yielded 0, trying direct pagination")
+        cursor = None
+        for page_num in range(3):
+            try:
+                mh = signed_headers("GET", "/markets")
+                params = {"limit": 1000, "status": "open"}
+                if cursor:
+                    params["cursor"] = cursor
+                r = requests.get(
+                    KALSHI_BASE_URL + KALSHI_API_PREFIX + "/markets",
+                    headers=mh, params=params, timeout=10,
+                )
+                if not r.ok:
+                    print(f"[FETCH] kalshi fallback page {page_num+1}: HTTP {r.status_code}")
+                    break
+                data = r.json()
+                raw.extend(data.get("markets", []))
+                cursor = data.get("cursor")
+                print(f"[FETCH] kalshi fallback page {page_num+1}: {len(raw)} total markets")
+                if not cursor:
+                    break
+            except Exception as e:
+                print(f"[FETCH] kalshi fallback error: {e}")
+                break
     print(f"[FETCH] kalshi: {non_parlay_count} real markets after filtering parlays")
     out = []
     skipped_parlays = 0
@@ -1130,6 +1158,28 @@ def health():
     k = load_private_key()
     return jsonify({"status": "ok", "private_key_loaded": k is not None, "bot_enabled": BOT_CONFIG["enabled"]})
 
+
+@app.route("/test-fetch")
+def test_fetch():
+    """Debug: run fetch_kalshi() and return stats."""
+    try:
+        import time
+        t0 = time.time()
+        markets = fetch_kalshi()
+        elapsed = time.time() - t0
+        non_sports = [m for m in markets if not m.get("is_sports")]
+        sports = [m for m in markets if m.get("is_sports")]
+        return jsonify({
+            "total": len(markets),
+            "sports": len(sports),
+            "non_sports": len(non_sports),
+            "elapsed_sec": round(elapsed, 2),
+            "sample_non_sports": [{"q": m["question"][:60], "vol": m.get("volume"), "yes": m["yes"]} for m in non_sports[:5]],
+            "sample_sports": [{"q": m["question"][:60], "vol": m.get("volume"), "yes": m["yes"]} for m in sports[:5]],
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({"error": str(e), "tb": traceback.format_exc()})
 
 @app.route("/test-events")
 def test_events():
