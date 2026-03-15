@@ -1016,7 +1016,7 @@ def top_picks():
 
     # Strategy 3: Best Kalshi value plays (high implied probability divergence from 50/50)
     # Fill remaining slots with the most volatile/interesting Kalshi markets
-    if len(picks) < 10:
+    if len(picks) < 30:
         sorted_kalshi = sorted(kalshi_markets, key=lambda x: abs(x[1]["yes"] - 0.5))
         for nq_k, km in sorted_kalshi:
             if any(p["kalshi_ticker"] == km["id"] for p in picks):
@@ -1048,12 +1048,12 @@ def top_picks():
                 "score": 0.01,
                 "prices": {"kalshi_yes": round(km["yes"] * 100, 1), "kalshi_no": round(km["no"] * 100, 1)},
             })
-            if len(picks) >= 10:
+            if len(picks) >= 30:
                 break
 
-    # Sort by score (best opportunities first) and take top 10
+    # Sort by score (best opportunities first) and take top 30 (split into sports/non-sports on frontend)
     picks.sort(key=lambda x: x["score"], reverse=True)
-    picks = picks[:10]
+    picks = picks[:30]
     for i, p in enumerate(picks):
         p["rank"] = i + 1
 
@@ -1286,6 +1286,13 @@ a:hover { text-decoration: underline; }
 .pick-execute { background: transparent; color: #00ff88; border: 1px solid #00ff88; padding: 4px 8px; border-radius: 2px; cursor: pointer; font-size: 9px; font-weight: 700; font-family: 'Courier New', monospace; text-transform: uppercase; letter-spacing: 0.5px; width: 100%; margin-top: 6px; }
 .pick-execute:hover { background: #00ff88; color: #000; }
 .pick-execute:disabled { border-color: #333; color: #555; cursor: not-allowed; background: transparent; }
+/* Tabs */
+.tab-bar { display: flex; gap: 0; margin-bottom: 12px; border-bottom: 2px solid #222; }
+.tab-btn { background: transparent; border: none; color: #666; font-family: 'Courier New', monospace; font-size: 13px; font-weight: 700; padding: 8px 20px; cursor: pointer; text-transform: uppercase; letter-spacing: 1.5px; border-bottom: 2px solid transparent; margin-bottom: -2px; }
+.tab-btn.active { color: #ff8c00; border-bottom-color: #ff8c00; }
+.tab-btn:hover { color: #ff8c00; }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
 /* Toast notifications */
 .toast-container { position: fixed; top: 16px; right: 16px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
 .toast { pointer-events: auto; padding: 12px 18px; border-radius: 3px; font-size: 11px; font-family: 'Courier New', monospace; color: #fff; max-width: 380px; animation: toastIn 0.3s ease, toastOut 0.4s ease 4.6s; opacity: 0; word-break: break-word; }
@@ -1352,14 +1359,31 @@ a:hover { text-decoration: underline; }
   <button class="toggle-btn enable" id="toggle-btn" onclick="toggleBot()">Enable Bot</button>
 </div>
 
-<div class="top-picks">
-  <div class="section-title">Top 10 Picks <span class="badge" id="picks-badge">0</span><button class="refresh-btn" onclick="loadTopPicks()">Refresh</button></div>
-  <div id="top-picks-list" class="picks-grid"><div class="loading" style="grid-column:1/-1">Analyzing markets...</div></div>
+<div class="tab-bar">
+  <button class="tab-btn active" onclick="switchTab('sports')">Sports</button>
+  <button class="tab-btn" onclick="switchTab('non-sports')">Non-Sports</button>
 </div>
 
-<div class="section">
-  <div class="section-title">Settling Today <span class="badge" id="today-badge">0</span><button class="refresh-btn" onclick="loadTodayPicks()">Refresh</button></div>
-  <div id="today-table"><div class="loading">Loading today's markets...</div></div>
+<div class="tab-content active" id="tab-sports">
+  <div class="top-picks">
+    <div class="section-title">Top 10 Sports Picks <span class="badge" id="picks-badge-sports">0</span><button class="refresh-btn" onclick="loadTopPicks()">Refresh</button></div>
+    <div id="top-picks-list-sports" class="picks-grid"><div class="loading" style="grid-column:1/-1">Analyzing markets...</div></div>
+  </div>
+  <div class="section">
+    <div class="section-title">Sports Settling Today <span class="badge" id="today-badge-sports">0</span><button class="refresh-btn" onclick="loadTodayPicks()">Refresh</button></div>
+    <div id="today-table-sports"><div class="loading">Loading...</div></div>
+  </div>
+</div>
+
+<div class="tab-content" id="tab-non-sports">
+  <div class="top-picks">
+    <div class="section-title">Top 10 Non-Sports Picks <span class="badge" id="picks-badge-nonsports">0</span><button class="refresh-btn" onclick="loadTopPicks()">Refresh</button></div>
+    <div id="top-picks-list-nonsports" class="picks-grid"><div class="loading" style="grid-column:1/-1">Analyzing markets...</div></div>
+  </div>
+  <div class="section">
+    <div class="section-title">Non-Sports Settling Today <span class="badge" id="today-badge-nonsports">0</span><button class="refresh-btn" onclick="loadTodayPicks()">Refresh</button></div>
+    <div id="today-table-nonsports"><div class="loading">Loading...</div></div>
+  </div>
 </div>
 
 <div class="section">
@@ -1390,6 +1414,46 @@ a:hover { text-decoration: underline; }
 
 <script>
 const API = window.location.origin;
+
+const SPORTS_KEYWORDS = ['nba','nfl','mlb','nhl','ufc','nascar','f1','pga','ncaa','atp','wta','fifa',
+  'points','rebounds','assists','goals','touchdowns','yards','strikeouts','hits','runs',
+  'wins by','over under','spread','moneyline','parlay',
+  'lakers','celtics','warriors','bulls','heat','nuggets','mavericks','clippers','knicks','nets',
+  'chiefs','eagles','cowboys','49ers','ravens','bills','dolphins','lions','bengals',
+  'yankees','dodgers','mets','braves','astros','padres','phillies','cubs','red sox',
+  'oilers','panthers','rangers','bruins','avalanche','maple leafs','golden knights',
+  'lebron','curry','jokic','doncic','giannis','tatum','durant','embiid','booker',
+  'mahomes','allen','hurts','lamar','burrow','kelce',
+  'duke','gonzaga','houston','alabama','auburn','kentucky','kansas','purdue','uconn',
+  'premier league','champions league','la liga','serie a','bundesliga',
+  'liverpool','arsenal','manchester','chelsea','bayern','barcelona','real madrid',
+  'tennis','alcaraz','djokovic','sinner','medvedev','swiatek','sabalenka',
+  'boxing','mma','fight','round','knockout',
+  'game','match','team','player','season','playoff','championship','tournament','league','sport',
+  'reaves','westbrook','murray','herro','leonard','banchero','adebayo','suggs','ware',
+  'deandre','demar','derozan','precious','achiuwa','derrick','jones',
+  'denver','miami','boston','dallas','los angeles','orlando','cleveland','minnesota','memphis','sacramento',
+  'hawks','hornets','wizards','pacers','pistons','rockets','spurs','jazz','blazers','kings','suns','bucks','raptors','magic','grizzlies','pelicans','timberwolves','thunder',
+  'car hurricanes','nyi islanders','ott senators','det red wings','min wild','col avalanche','dal stars','nyr rangers','nj devils','mtl canadiens','tor maple leafs',
+  'vgk golden knights','sporting cp','bayern munich','manchester city',
+  'prairie view','kennesaw','utah','uc irvine','akron','st. john'];
+
+function isSports(q) {
+  const lower = q.toLowerCase();
+  return SPORTS_KEYWORDS.some(kw => lower.includes(kw));
+}
+
+function switchTab(tab) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  if (tab === 'sports') {
+    document.querySelectorAll('.tab-btn')[0].classList.add('active');
+    document.getElementById('tab-sports').classList.add('active');
+  } else {
+    document.querySelectorAll('.tab-btn')[1].classList.add('active');
+    document.getElementById('tab-non-sports').classList.add('active');
+  }
+}
 
 function showToast(msg, type) {
   const c = document.getElementById('toast-container');
@@ -1585,64 +1649,85 @@ function drawPickChart(canvasId, prices, signal) {
 
 let _picksFirstLoad = true;
 let _picksData = [];
+
+function renderPickCard(p, idx, prefix) {
+  const sigClass = p.signal === 'buy_yes' ? 'yes' : 'no';
+  const sigLabel = p.signal === 'buy_yes' ? 'BUY YES' : 'BUY NO';
+  const confClass = p.confidence.toLowerCase();
+  const typeLabel = p.type === 'consensus' ? 'CONSENSUS' : p.type === 'arbitrage' ? 'ARBITRAGE' : 'VALUE';
+  let h = '<div class="pick-card">';
+  h += '<div class="pick-rank">#' + (idx + 1) + '</div>';
+  h += '<div class="pick-header">';
+  h += '<span class="pick-signal ' + sigClass + '">' + sigLabel + '</span>';
+  h += '<span class="pick-conf ' + confClass + '">' + p.confidence + '</span>';
+  h += '<span class="pick-meta">' + typeLabel + '</span>';
+  var winPct;
+  if (p.consensus_yes_price && p.type === 'consensus') {
+    winPct = p.signal === 'buy_yes' ? (p.consensus_yes_price * 100) : ((1 - p.consensus_yes_price) * 100);
+  } else {
+    winPct = p.signal === 'buy_yes' ? (p.kalshi_yes_price * 100) : ((1 - p.kalshi_yes_price) * 100);
+  }
+  var winColor = winPct >= 60 ? '#00ff88' : winPct >= 45 ? '#ff8c00' : '#ff4444';
+  h += '<span class="pick-meta" style="color:' + winColor + ';font-weight:700">' + winPct.toFixed(0) + '% WIN</span>';
+  h += '<span class="pick-meta">DEV <b>' + (p.deviation * 100).toFixed(1) + '%</b></span>';
+  if (p.platform_count > 0) h += '<span class="pick-meta">' + p.platform_count + ' PLATFORMS</span>';
+  h += '</div>';
+  h += '<div class="pick-question"><a href="' + p.kalshi_url + '" target="_blank">' + p.kalshi_question + '</a></div>';
+  h += '<div class="pick-edge">' + p.edge_summary + '</div>';
+  h += '<div class="pick-chart"><canvas id="' + prefix + '-chart-' + idx + '"></canvas></div>';
+  h += '<div class="pick-thesis">' + p.thesis + '</div>';
+  h += '<div class="pick-footer">';
+  h += '<span class="pick-meta">COST <b>' + p.price_cents + '¢</b></span>';
+  h += '<span class="pick-profit">+$' + p.potential_profit_usd.toFixed(2) + ' potential</span>';
+  var ct = Math.max(1, Math.floor(500 / p.price_cents));
+  var cost = (p.price_cents * ct / 100).toFixed(2);
+  // Store the global index for trade execution
+  h += '<button class="pick-execute" onclick="executePickTrade(this, ' + p._globalIdx + ')">Trade ' + ct + 'x @ $' + cost + '</button>';
+  h += '</div>';
+  h += '</div>';
+  return h;
+}
+
 async function loadTopPicks() {
   if (_picksFirstLoad) {
-    document.getElementById('top-picks-list').innerHTML = '<div class="loading" style="grid-column:1/-1">Scanning 4 platforms...</div>';
+    document.getElementById('top-picks-list-sports').innerHTML = '<div class="loading" style="grid-column:1/-1">Scanning 4 platforms...</div>';
+    document.getElementById('top-picks-list-nonsports').innerHTML = '<div class="loading" style="grid-column:1/-1">Scanning 4 platforms...</div>';
   }
   try {
     const data = await fetch(API + '/top-picks').then(r => r.json());
     _picksFirstLoad = false;
     const picks = data.picks || [];
+    // Tag each pick with global index for trade execution
+    picks.forEach((p, i) => { p._globalIdx = i; });
     _picksData = picks;
-    document.getElementById('picks-badge').textContent = picks.length;
-    if (picks.length === 0) {
-      document.getElementById('top-picks-list').innerHTML = '<div class="empty" style="grid-column:1/-1">No picks right now. Markets are efficiently priced.</div>';
-      return;
+
+    const sports = picks.filter(p => isSports(p.kalshi_question));
+    const nonSports = picks.filter(p => !isSports(p.kalshi_question));
+
+    // Render sports
+    document.getElementById('picks-badge-sports').textContent = sports.length;
+    if (sports.length === 0) {
+      document.getElementById('top-picks-list-sports').innerHTML = '<div class="empty" style="grid-column:1/-1">No sports picks right now.</div>';
+    } else {
+      let html = '';
+      sports.slice(0, 10).forEach((p, idx) => { html += renderPickCard(p, idx, 'sports'); });
+      document.getElementById('top-picks-list-sports').innerHTML = html;
+      sports.slice(0, 10).forEach((p, idx) => { drawPickChart('sports-chart-' + idx, p.prices || {}, p.signal); });
     }
-    let html = '';
-    picks.forEach((p, idx) => {
-      const sigClass = p.signal === 'buy_yes' ? 'yes' : 'no';
-      const sigLabel = p.signal === 'buy_yes' ? 'BUY YES' : 'BUY NO';
-      const confClass = p.confidence.toLowerCase();
-      const typeLabel = p.type === 'consensus' ? 'CONSENSUS' : p.type === 'arbitrage' ? 'ARBITRAGE' : 'VALUE';
-      html += '<div class="pick-card">';
-      html += '<div class="pick-rank">#' + p.rank + '</div>';
-      html += '<div class="pick-header">';
-      html += '<span class="pick-signal ' + sigClass + '">' + sigLabel + '</span>';
-      html += '<span class="pick-conf ' + confClass + '">' + p.confidence + '</span>';
-      html += '<span class="pick-meta">' + typeLabel + '</span>';
-      // Win probability: consensus price if available, otherwise market implied
-      var winPct;
-      if (p.consensus_yes_price && p.type === 'consensus') {
-        winPct = p.signal === 'buy_yes' ? (p.consensus_yes_price * 100) : ((1 - p.consensus_yes_price) * 100);
-      } else {
-        winPct = p.signal === 'buy_yes' ? (p.kalshi_yes_price * 100) : ((1 - p.kalshi_yes_price) * 100);
-      }
-      var winColor = winPct >= 60 ? '#00ff88' : winPct >= 45 ? '#ff8c00' : '#ff4444';
-      html += '<span class="pick-meta" style="color:' + winColor + ';font-weight:700">' + winPct.toFixed(0) + '% WIN</span>';
-      html += '<span class="pick-meta">DEV <b>' + (p.deviation * 100).toFixed(1) + '%</b></span>';
-      if (p.platform_count > 0) html += '<span class="pick-meta">' + p.platform_count + ' PLATFORMS</span>';
-      html += '</div>';
-      html += '<div class="pick-question"><a href="' + p.kalshi_url + '" target="_blank">' + p.kalshi_question + '</a></div>';
-      html += '<div class="pick-edge">' + p.edge_summary + '</div>';
-      html += '<div class="pick-chart"><canvas id="pick-chart-' + idx + '"></canvas></div>';
-      html += '<div class="pick-thesis">' + p.thesis + '</div>';
-      html += '<div class="pick-footer">';
-      html += '<span class="pick-meta">COST <b>' + p.price_cents + '¢</b></span>';
-      html += '<span class="pick-profit">+$' + p.potential_profit_usd.toFixed(2) + ' potential</span>';
-      var ct = Math.max(1, Math.floor(500 / p.price_cents));
-      var cost = (p.price_cents * ct / 100).toFixed(2);
-      html += '<button class="pick-execute" onclick="executePickTrade(this, ' + idx + ')">Trade ' + ct + 'x @ $' + cost + '</button>';
-      html += '</div>';
-      html += '</div>';
-    });
-    document.getElementById('top-picks-list').innerHTML = html;
-    // Draw charts after DOM update
-    picks.forEach((p, idx) => {
-      drawPickChart('pick-chart-' + idx, p.prices || {}, p.signal);
-    });
+
+    // Render non-sports
+    document.getElementById('picks-badge-nonsports').textContent = nonSports.length;
+    if (nonSports.length === 0) {
+      document.getElementById('top-picks-list-nonsports').innerHTML = '<div class="empty" style="grid-column:1/-1">No non-sports picks right now.</div>';
+    } else {
+      let html = '';
+      nonSports.slice(0, 10).forEach((p, idx) => { html += renderPickCard(p, idx, 'nonsports'); });
+      document.getElementById('top-picks-list-nonsports').innerHTML = html;
+      nonSports.slice(0, 10).forEach((p, idx) => { drawPickChart('nonsports-chart-' + idx, p.prices || {}, p.signal); });
+    }
   } catch(e) {
-    document.getElementById('top-picks-list').innerHTML = '<div class="empty" style="grid-column:1/-1">Error: ' + e.message + '</div>';
+    document.getElementById('top-picks-list-sports').innerHTML = '<div class="empty" style="grid-column:1/-1">Error: ' + e.message + '</div>';
+    document.getElementById('top-picks-list-nonsports').innerHTML = '<div class="empty" style="grid-column:1/-1">Error: ' + e.message + '</div>';
   }
 }
 
@@ -1813,36 +1898,46 @@ function drawPLChart(trades) {
 }
 
 let _todayData = [];
+
+function renderTodayTable(picks, containerId, badgeId) {
+  document.getElementById(badgeId).textContent = picks.length;
+  if (picks.length === 0) {
+    document.getElementById(containerId).innerHTML = '<div class="empty">No markets settling today.</div>';
+    return;
+  }
+  let html = '<table><tr><th>Market</th><th>YES</th><th>NO</th><th>Signal</th><th>Settles In</th><th>Potential</th><th>Action</th></tr>';
+  picks.forEach((p) => {
+    const sigClass = p.signal === 'buy_yes' ? 'side-yes' : 'side-no';
+    const sigLabel = p.signal === 'buy_yes' ? 'BUY YES' : 'BUY NO';
+    var ct = Math.max(1, Math.floor(500 / p.price_cents));
+    var cost = (p.price_cents * ct / 100).toFixed(2);
+    html += '<tr>';
+    html += '<td><a href="' + p.kalshi_url + '" target="_blank">' + p.kalshi_question.substring(0, 55) + '</a></td>';
+    html += '<td>' + p.yes_price + '¢</td>';
+    html += '<td>' + p.no_price + '¢</td>';
+    html += '<td class="' + sigClass + '">' + sigLabel + '</td>';
+    html += '<td style="color:#ff8c00;font-weight:700">' + p.time_left + '</td>';
+    html += '<td class="result-win">+$' + p.potential_profit_usd.toFixed(2) + '</td>';
+    html += '<td><button class="trade-btn" onclick="executeTodayTrade(this,' + p._globalIdx + ')">Trade ' + ct + 'x $' + cost + '</button></td>';
+    html += '</tr>';
+  });
+  html += '</table>';
+  document.getElementById(containerId).innerHTML = html;
+}
+
 async function loadTodayPicks() {
   try {
     const data = await fetch(API + '/today-picks').then(r => r.json());
     const picks = data.picks || [];
+    picks.forEach((p, i) => { p._globalIdx = i; });
     _todayData = picks;
-    document.getElementById('today-badge').textContent = picks.length;
-    if (picks.length === 0) {
-      document.getElementById('today-table').innerHTML = '<div class="empty">No markets settling today.</div>';
-      return;
-    }
-    let html = '<table><tr><th>Market</th><th>YES</th><th>NO</th><th>Signal</th><th>Settles In</th><th>Potential</th><th>Action</th></tr>';
-    picks.forEach((p, idx) => {
-      const sigClass = p.signal === 'buy_yes' ? 'side-yes' : 'side-no';
-      const sigLabel = p.signal === 'buy_yes' ? 'BUY YES' : 'BUY NO';
-      var ct = Math.max(1, Math.floor(500 / p.price_cents));
-      var cost = (p.price_cents * ct / 100).toFixed(2);
-      html += '<tr>';
-      html += '<td><a href="' + p.kalshi_url + '" target="_blank">' + p.kalshi_question.substring(0, 55) + '</a></td>';
-      html += '<td>' + p.yes_price + '¢</td>';
-      html += '<td>' + p.no_price + '¢</td>';
-      html += '<td class="' + sigClass + '">' + sigLabel + '</td>';
-      html += '<td style="color:#ff8c00;font-weight:700">' + p.time_left + '</td>';
-      html += '<td class="result-win">+$' + p.potential_profit_usd.toFixed(2) + '</td>';
-      html += '<td><button class="trade-btn" onclick="executeTodayTrade(this,' + idx + ')">Trade ' + ct + 'x $' + cost + '</button></td>';
-      html += '</tr>';
-    });
-    html += '</table>';
-    document.getElementById('today-table').innerHTML = html;
+    const sports = picks.filter(p => isSports(p.kalshi_question));
+    const nonSports = picks.filter(p => !isSports(p.kalshi_question));
+    renderTodayTable(sports, 'today-table-sports', 'today-badge-sports');
+    renderTodayTable(nonSports, 'today-table-nonsports', 'today-badge-nonsports');
   } catch(e) {
-    document.getElementById('today-table').innerHTML = '<div class="empty">Error: ' + e.message + '</div>';
+    document.getElementById('today-table-sports').innerHTML = '<div class="empty">Error: ' + e.message + '</div>';
+    document.getElementById('today-table-nonsports').innerHTML = '<div class="empty">Error: ' + e.message + '</div>';
   }
 }
 
