@@ -1482,19 +1482,20 @@ a:hover { text-decoration: underline; }
   </div>
 </div>
 
+<div style="margin-bottom:12px">
+  <button id="auto-trade-btn" onclick="toggleAutoTrade()" style="
+    padding: 12px 32px; font-family: 'JetBrains Mono', monospace; font-size: 1em; font-weight: 700;
+    border: 2px solid #ff4444; background: rgba(255,68,68,0.15); color: #ff4444;
+    cursor: pointer; text-transform: uppercase; letter-spacing: 2px; width: 100%;
+  ">AUTO-TRADE: --</button>
+</div>
+
 <div class="status-bar" id="status-bar">
   <div class="stat-card"><div class="stat-label">Balance</div><div class="stat-value green" id="balance">--</div></div>
   <div class="stat-card"><div class="stat-label">Markets Scanned</div><div class="stat-value blue" id="markets-scanned">--</div></div>
   <div class="stat-card"><div class="stat-label">Mispriced Found</div><div class="stat-value yellow" id="mispriced-count">--</div></div>
   <div class="stat-card"><div class="stat-label">Trades Today</div><div class="stat-value" id="trades-today">--</div></div>
   <div class="stat-card"><div class="stat-label">Daily Spent</div><div class="stat-value red" id="daily-spent">--</div></div>
-  <div class="stat-card" style="display:flex;align-items:center;justify-content:center;min-width:180px">
-    <button id="auto-trade-btn" onclick="toggleAutoTrade()" style="
-      padding: 10px 20px; font-family: 'JetBrains Mono', monospace; font-size: 0.85em; font-weight: 700;
-      border: 2px solid #ff4444; background: rgba(255,68,68,0.15); color: #ff4444;
-      cursor: pointer; text-transform: uppercase; letter-spacing: 1px; width: 100%;
-    ">AUTO-TRADE: --</button>
-  </div>
 </div>
 
 <div class="tab-bar">
