@@ -186,7 +186,7 @@ def fetch_kalshi():
                 "yes":      round(yes, 4),
                 "no":       round(no, 4),
                 "volume":   m.get("volume", 0),
-                "close_time": m.get("close_time") or m.get("expected_expiration_time"),
+                "close_time": m.get("expected_expiration_time") or m.get("close_time"),
                 "url":      "https://kalshi.com/markets/" + ticker,
             })
         except Exception:
@@ -790,7 +790,7 @@ def positions():
                 mkt_resp.raise_for_status()
                 mkt = mkt_resp.json().get("market", {})
                 title = mkt.get("title", ticker)
-                close_time = mkt.get("close_time") or mkt.get("expected_expiration_time")
+                close_time = mkt.get("expected_expiration_time") or mkt.get("close_time")
                 result = mkt.get("result")
             except Exception:
                 pass
@@ -1611,6 +1611,15 @@ async function loadTopPicks() {
       html += '<span class="pick-signal ' + sigClass + '">' + sigLabel + '</span>';
       html += '<span class="pick-conf ' + confClass + '">' + p.confidence + '</span>';
       html += '<span class="pick-meta">' + typeLabel + '</span>';
+      // Win probability: consensus price if available, otherwise market implied
+      var winPct;
+      if (p.consensus_yes_price && p.type === 'consensus') {
+        winPct = p.signal === 'buy_yes' ? (p.consensus_yes_price * 100) : ((1 - p.consensus_yes_price) * 100);
+      } else {
+        winPct = p.signal === 'buy_yes' ? (p.kalshi_yes_price * 100) : ((1 - p.kalshi_yes_price) * 100);
+      }
+      var winColor = winPct >= 60 ? '#00ff88' : winPct >= 45 ? '#ff8c00' : '#ff4444';
+      html += '<span class="pick-meta" style="color:' + winColor + ';font-weight:700">' + winPct.toFixed(0) + '% WIN</span>';
       html += '<span class="pick-meta">DEV <b>' + (p.deviation * 100).toFixed(1) + '%</b></span>';
       if (p.platform_count > 0) html += '<span class="pick-meta">' + p.platform_count + ' PLATFORMS</span>';
       html += '</div>';
