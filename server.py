@@ -157,6 +157,18 @@ def signed_headers(method, path):
     }
 
 # ---------------------------------------------------------------------------
+# Parlay detection
+# ---------------------------------------------------------------------------
+
+def _is_parlay_title(title):
+    """Return True if a market title looks like a multi-leg parlay."""
+    lower = (title or "").lower()
+    # Count "yes " and "no " prefixes — parlays list multiple legs
+    yes_count = lower.count("yes ")
+    no_count = lower.count("no ")
+    return (yes_count + no_count) >= 2
+
+# ---------------------------------------------------------------------------
 # Sports classification — server-side using ticker prefixes + targeted keywords
 # ---------------------------------------------------------------------------
 
@@ -200,24 +212,21 @@ _SPORTS_TITLE_KEYWORDS = [
     # Soccer
     "liverpool", "arsenal", "manchester", "chelsea", "bayern", "barcelona",
     "real madrid", "tottenham", "sporting cp",
-    # NBA players
-    "lebron", "curry", "jokic", "jokić", "doncic", "dončić", "giannis",
-    "tatum", "durant", "embiid", "booker", "reaves", "westbrook", "murray",
-    "herro", "leonard", "banchero", "adebayo", "suggs", "ware", "morant",
-    "edwards", "fox", "haliburton", "brunson", "shai", "gilgeous",
-    "deandre ayton", "demar derozan", "derrick jones", "paolo banchero",
-    "bam adebayo", "jalen suggs", "austin reaves", "nikola jokic",
-    "luka doncic", "anthony davis", "kawhi",
-    # NFL players
-    "mahomes", "allen", "hurts", "lamar", "burrow", "kelce",
-    # Tennis
-    "alcaraz", "djokovic", "sinner", "medvedev", "swiatek", "sabalenka",
-    # College
-    "duke", "gonzaga", "alabama", "auburn", "kentucky", "kansas", "purdue",
-    "uconn", "prairie view", "kennesaw", "uc irvine", "akron", "st. john",
+    # NBA players (distinctive names only — avoid generic surnames)
+    "lebron", "jokic", "jokić", "doncic", "dončić", "giannis",
+    "embiid", "westbrook", "haliburton", "gilgeous",
+    "nikola jokic", "luka doncic", "anthony davis", "kawhi leonard",
+    "jalen brunson", "paolo banchero", "bam adebayo", "austin reaves",
+    # NFL players (distinctive names only)
+    "mahomes", "kelce", "lamar jackson",
+    # Tennis (distinctive names)
+    "djokovic", "alcaraz", "sinner", "swiatek", "sabalenka",
+    # College (only when combined with sports context - use multi-word)
+    "march madness", "ncaa tournament", "final four", "sweet sixteen",
     # General sports
     "game 1", "game 2", "game 3", "game 4", "game 5", "game 6", "game 7",
-    "vs.", "playoff", "championship", "tournament",
+    "playoff", "stanley cup", "super bowl", "world series",
+    "the players championship", "masters tournament",
 ]
 
 
@@ -229,8 +238,8 @@ def _is_sports_market(ticker, event_ticker, title):
         if t.startswith(pfx) or et.startswith(pfx):
             return True
     lower_title = (title or "").lower()
-    # Also catch parlay-style titles with multiple "yes" entries (these are sports parlays)
-    if lower_title.count("yes ") >= 2:
+    # Also catch parlay-style titles (these are sports parlays)
+    if _is_parlay_title(title):
         return True
     return any(kw in lower_title for kw in _SPORTS_TITLE_KEYWORDS)
 
@@ -773,7 +782,7 @@ def find_opportunities(all_markets, min_similarity=0.55, max_cost=0.98):
         if len(nq.split()) < 3:
             continue
         # Skip parlays
-        if (m.get("question") or "").lower().count("yes ") >= 2:
+        if _is_parlay_title(m.get("question", "")):
             continue
         entries.append((nq, m))
 
@@ -845,7 +854,7 @@ def find_consensus_mispricings(all_markets):
         if len(nq.split()) < 3:
             continue
         # Skip parlays
-        if m["platform"] == "kalshi" and (m.get("question") or "").lower().count("yes ") >= 2:
+        if m["platform"] == "kalshi" and _is_parlay_title(m.get("question", "")):
             continue
         if m["platform"] == "kalshi":
             kalshi.append((nq, m))
@@ -1293,7 +1302,7 @@ def top_picks():
         if len(nq.split()) < 3:
             continue
         # Skip parlays globally — titles with multiple "yes " are multi-leg combos
-        if m["platform"] == "kalshi" and (m.get("question") or "").lower().count("yes ") >= 2:
+        if m["platform"] == "kalshi" and _is_parlay_title(m.get("question", "")):
             continue
         if m["platform"] == "kalshi":
             kalshi_markets.append((nq, m))
@@ -1496,8 +1505,7 @@ def top_picks():
         if km["id"] in existing_tickers:
             continue
         # Skip parlays
-        title_lower = km["question"].lower()
-        if title_lower.count("yes ") >= 2:
+        if _is_parlay_title(km["question"]):
             continue
         kalshi_vol = km.get("volume", 0)
 
@@ -1630,8 +1638,7 @@ def today_picks():
         if m["platform"] != "kalshi":
             continue
         # Skip parlays (multi-outcome markets)
-        title_lower = (m.get("question") or "").lower()
-        if title_lower.count("yes ") >= 2:
+        if _is_parlay_title(m.get("question", "")):
             continue
         # Skip duplicates
         if m["id"] in seen_tickers:
