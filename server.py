@@ -453,16 +453,74 @@ def fetch_metaculus():
     return out
 
 
+def fetch_smarkets():
+    """Fetch markets from Smarkets (UK prediction market, good non-sports)."""
+    try:
+        resp = requests.get(
+            "https://api.smarkets.com/v3/events/",
+            params={"state": "upcoming", "type_domain": "politics,current_affairs",
+                    "type_scope": "single_event", "limit": 100,
+                    "sort": "id", "is_politics": "true"},
+            timeout=TIMEOUT,
+        )
+        resp.raise_for_status()
+        events = resp.json().get("events", [])
+    except Exception:
+        return []
+    out = []
+    for ev in events:
+        try:
+            eid = ev.get("id", "")
+            # Get markets for each event
+            mkt_resp = requests.get(
+                f"https://api.smarkets.com/v3/events/{eid}/markets/",
+                timeout=5,
+            )
+            mkt_resp.raise_for_status()
+            markets = mkt_resp.json().get("markets", [])
+            for mkt in markets:
+                mid = mkt.get("id", "")
+                # Get prices
+                try:
+                    price_resp = requests.get(
+                        f"https://api.smarkets.com/v3/markets/{mid}/last_executed_prices/",
+                        timeout=5,
+                    )
+                    price_resp.raise_for_status()
+                    prices = price_resp.json().get("last_executed_prices", {})
+                    if not prices:
+                        continue
+                    # First contract's price
+                    for cid, pdata in prices.items():
+                        yes = float(pdata.get("last_executed_price", 0)) / 10000
+                        if 0.02 < yes < 0.98:
+                            out.append({
+                                "platform": "smarkets",
+                                "id": str(mid) + "_" + str(cid),
+                                "question": ev.get("name", "") + " - " + mkt.get("name", ""),
+                                "yes": round(yes, 4),
+                                "no": round(1 - yes, 4),
+                                "volume": 0,
+                                "url": f"https://smarkets.com/event/{eid}",
+                            })
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    return out
+
+
 ALL_FETCHERS = {
     "kalshi":     fetch_kalshi,
     "polymarket": fetch_polymarket,
     "predictit":  fetch_predictit,
     "manifold":   fetch_manifold,
     "metaculus":  fetch_metaculus,
+    "smarkets":   fetch_smarkets,
 }
 
 # Platform weights for consensus — higher liquidity = more trusted
-PLAT_WEIGHT_GLOBAL = {"polymarket": 3.0, "predictit": 2.0, "manifold": 1.0, "metaculus": 1.5}
+PLAT_WEIGHT_GLOBAL = {"polymarket": 3.0, "predictit": 2.0, "manifold": 1.0, "metaculus": 1.5, "smarkets": 1.5}
 
 # ---------------------------------------------------------------------------
 # News Research Engine — fetch headlines from trusted sources
@@ -594,7 +652,7 @@ def fetch_all_markets():
     if _market_cache["time"] and (now - _market_cache["time"]).total_seconds() < 12 and _market_cache["data"]:
         return _market_cache["data"]
     all_markets = []
-    with ThreadPoolExecutor(max_workers=5) as pool:
+    with ThreadPoolExecutor(max_workers=6) as pool:
         futures = {pool.submit(fn): name for name, fn in ALL_FETCHERS.items()}
         for future in as_completed(futures):
             name = futures[future]
@@ -1357,6 +1415,7 @@ def top_picks():
         })
 
     # ── Strategy 2: Arbitrage pairs ──
+    existing_tickers = {p["kalshi_ticker"] for p in picks}
     opps = find_opportunities(all_markets, min_similarity=0.50, max_cost=1.0)
     for opp in opps[:20]:
         buy_yes = opp["buy_yes"]
@@ -1367,53 +1426,56 @@ def top_picks():
             kalshi_side = buy_yes
             other_side = buy_no
             signal = "buy_yes"
-            ticker = ""
-            for nq_k, km in kalshi_markets:
-                if similarity(nq_k, normalize_question(opp["question_a"]), km["question"], opp["question_a"]) > 0.5:
-                    ticker = km["id"]; matched_km = km; break
-                if similarity(nq_k, normalize_question(opp["question_b"]), km["question"], opp["question_b"]) > 0.5:
-                    ticker = km["id"]; matched_km = km; break
         elif buy_no["platform"] == "kalshi":
             kalshi_side = buy_no
             other_side = buy_yes
             signal = "buy_no"
-            ticker = ""
-            for nq_k, km in kalshi_markets:
-                if similarity(nq_k, normalize_question(opp["question_a"]), km["question"], opp["question_a"]) > 0.5:
-                    ticker = km["id"]; matched_km = km; break
-                if similarity(nq_k, normalize_question(opp["question_b"]), km["question"], opp["question_b"]) > 0.5:
-                    ticker = km["id"]; matched_km = km; break
-        if not kalshi_side or not ticker:
+        if not kalshi_side:
             continue
-        if any(p["kalshi_ticker"] == ticker for p in picks):
+        # Find matching Kalshi market ticker
+        ticker = ""
+        for nq_k, km in kalshi_markets:
+            if similarity(nq_k, normalize_question(opp["question_a"]), km["question"], opp["question_a"]) > 0.5:
+                ticker = km["id"]; matched_km = km; break
+            if similarity(nq_k, normalize_question(opp["question_b"]), km["question"], opp["question_b"]) > 0.5:
+                ticker = km["id"]; matched_km = km; break
+        if not ticker or ticker in existing_tickers:
             continue
+        existing_tickers.add(ticker)
         price_cents = int(kalshi_side["price"] * 100)
         spread = abs(buy_yes["price"] - (1 - buy_no["price"]))
+        kalshi_title = matched_km["question"] if matched_km else opp["question_a"]
+        other_price = other_side["price"]
         edge = f"Arbitrage: buy {signal.replace('buy_','')} on Kalshi at {price_cents}¢, hedge on {other_side['platform'].title()}"
         thesis = f"Price spread of {opp['profit_pct']:.1f}% between Kalshi and {other_side['platform'].title()}. "
         thesis += f"Estimated profit: ${opp['estimated_profit']:.4f} per contract after fees."
+        # Better win probability for arbitrage — use the consensus side price
+        if signal == "buy_yes":
+            win_prob = min(0.95, max(other_price, kalshi_side["price"]))
+        else:
+            win_prob = min(0.95, max(1 - other_price, 1 - kalshi_side["price"]))
         picks.append({
             "type": "arbitrage",
             "kalshi_ticker": ticker,
-            "kalshi_question": opp["question_a"],
+            "kalshi_question": kalshi_title,
             "kalshi_yes_price": buy_yes["price"] if buy_yes["platform"] == "kalshi" else 1 - buy_no["price"],
             "kalshi_url": kalshi_side["url"],
             "consensus_yes_price": buy_yes["price"] if buy_yes["platform"] != "kalshi" else 1 - buy_no["price"],
             "deviation": round(spread, 4),
             "signal": signal,
             "price_cents": price_cents,
-            "matching_platforms": [{"platform": other_side["platform"], "yes": round(1 - other_side["price"], 4) if signal == "buy_no" else other_side["price"], "similarity": opp["similarity"]}],
+            "matching_platforms": [{"platform": other_side["platform"], "yes": round(1 - other_price, 4) if signal == "buy_no" else round(other_price, 4), "similarity": opp["similarity"]}],
             "edge_summary": edge,
             "thesis": thesis,
             "potential_profit_usd": round(opp["estimated_profit"], 2),
             "confidence": "HIGH" if opp["estimated_profit"] > 0.05 else "MEDIUM" if opp["estimated_profit"] > 0.02 else "LOW",
             "platform_count": 1,
-            "win_probability": round(1 - kalshi_side["price"], 4) if kalshi_side["price"] < 0.5 else round(kalshi_side["price"], 4),
+            "win_probability": round(win_prob, 4),
             "score": round(opp["estimated_profit"] * 10 + 0.5, 4),
             "is_sports": matched_km.get("is_sports", False) if matched_km else False,
             "prices": {
                 "kalshi": round(kalshi_side["price"] * 100, 1),
-                other_side["platform"]: round(other_side["price"] * 100, 1),
+                other_side["platform"]: round(other_price * 100, 1),
             },
         })
 
@@ -1814,7 +1876,7 @@ a:hover { text-decoration: underline; }
   </svg>
   <div>
     <h1><span>Trade</span>Shark</h1>
-    <p class="subtitle">Cross-platform prediction market trading &bull; Scanning 5 platforms every 15 seconds</p>
+    <p class="subtitle">Cross-platform prediction market trading &bull; Scanning 6 platforms + news every 15 seconds</p>
   </div>
 </div>
 
@@ -2175,8 +2237,8 @@ function renderPickCard(p, idx, prefix) {
 
 async function loadTopPicks() {
   if (_picksFirstLoad) {
-    document.getElementById('top-picks-list-sports').innerHTML = '<div class="loading" style="grid-column:1/-1">Scanning 5 platforms + news...</div>';
-    document.getElementById('top-picks-list-nonsports').innerHTML = '<div class="loading" style="grid-column:1/-1">Scanning 5 platforms + news...</div>';
+    document.getElementById('top-picks-list-sports').innerHTML = '<div class="loading" style="grid-column:1/-1">Scanning 6 platforms + news...</div>';
+    document.getElementById('top-picks-list-nonsports').innerHTML = '<div class="loading" style="grid-column:1/-1">Scanning 6 platforms + news...</div>';
   }
   try {
     const data = await fetch(API + '/top-picks').then(r => r.json());
