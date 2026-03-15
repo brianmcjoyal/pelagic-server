@@ -258,47 +258,79 @@ def _is_sports_market(ticker, event_ticker, title):
 # ---------------------------------------------------------------------------
 
 def fetch_kalshi():
-    path = "/markets"
-    headers = signed_headers("GET", path)
-    if not headers:
-        return []
-    raw = []
+    """Fetch Kalshi markets using events API to skip parlays entirely."""
+    # Step 1: Get all events (these are the real market categories, no parlays)
+    events_path = "/events"
+    event_tickers = []
     cursor = None
-    non_parlay_count = 0
     start_time = datetime.datetime.utcnow()
-    # Keep paginating until we have 200+ non-parlay markets, hit 10 pages, or 20s elapsed
-    for page_num in range(10):
+    for page_num in range(5):
         elapsed = (datetime.datetime.utcnow() - start_time).total_seconds()
-        if elapsed > 20:
-            print(f"[FETCH] kalshi: time limit reached after {page_num} pages")
+        if elapsed > 10:
             break
         try:
-            params = {"limit": 1000, "status": "open"}
+            h = signed_headers("GET", events_path)
+            if not h:
+                break
+            params = {"limit": 200, "status": "open"}
             if cursor:
                 params["cursor"] = cursor
-            headers = signed_headers("GET", path)
             resp = requests.get(
-                KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
-                headers=headers, params=params, timeout=8,
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + events_path,
+                headers=h, params=params, timeout=8,
             )
-            resp.raise_for_status()
-            data = resp.json()
-            page = data.get("markets", [])
-            for m in page:
-                et = m.get("event_ticker", "")
-                if et.upper().startswith("KXMVE"):
-                    continue
-                raw.append(m)
-                non_parlay_count += 1
-            cursor = data.get("cursor")
-            print(f"[FETCH] kalshi page {page_num+1}: {len(page)} raw, {non_parlay_count} real so far ({elapsed:.1f}s)")
-            if not cursor or len(page) < 1000:
+            if not resp.ok:
+                print(f"[FETCH] kalshi events page {page_num+1}: HTTP {resp.status_code}")
                 break
-            if non_parlay_count >= 200:
+            data = resp.json()
+            events = data.get("events", [])
+            for ev in events:
+                et = ev.get("event_ticker", "")
+                if not et.upper().startswith("KXMVE"):
+                    event_tickers.append(et)
+            cursor = data.get("cursor")
+            print(f"[FETCH] kalshi events page {page_num+1}: {len(events)} events, {len(event_tickers)} non-parlay")
+            if not cursor or len(events) < 200:
                 break
         except Exception as e:
-            print(f"[FETCH] kalshi page {page_num+1} error: {e}")
+            print(f"[FETCH] kalshi events error: {e}")
             break
+
+    print(f"[FETCH] kalshi: {len(event_tickers)} non-parlay event tickers found")
+
+    # Step 2: Fetch markets for each event in parallel
+    raw = []
+    def _fetch_markets_for_event(et):
+        try:
+            h = signed_headers("GET", "/markets")
+            if not h:
+                return []
+            r = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + "/markets",
+                headers=h, params={"limit": 200, "event_ticker": et, "status": "open"},
+                timeout=8,
+            )
+            return r.json().get("markets", []) if r.ok else []
+        except Exception:
+            return []
+
+    # Process in batches of 5 to avoid rate limiting
+    batch_size = 5
+    for i in range(0, len(event_tickers), batch_size):
+        elapsed = (datetime.datetime.utcnow() - start_time).total_seconds()
+        if elapsed > 20:
+            print(f"[FETCH] kalshi: time limit, got {len(raw)} markets from {i}/{len(event_tickers)} events")
+            break
+        batch = event_tickers[i:i+batch_size]
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = [pool.submit(_fetch_markets_for_event, et) for et in batch]
+            for f in futures:
+                try:
+                    raw.extend(f.result(timeout=10))
+                except Exception:
+                    continue
+
+    print(f"[FETCH] kalshi: {len(raw)} total markets from {len(event_tickers)} events")
     print(f"[FETCH] kalshi: {non_parlay_count} real markets after filtering parlays")
     out = []
     skipped_parlays = 0
