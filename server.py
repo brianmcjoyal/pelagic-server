@@ -162,17 +162,29 @@ def fetch_kalshi():
     headers = signed_headers("GET", path)
     if not headers:
         return []
-    try:
-        resp = requests.get(
-            KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
-            headers=headers,
-            params={"limit": 200, "status": "open"},
-            timeout=TIMEOUT,
-        )
-        resp.raise_for_status()
-        raw = resp.json().get("markets", [])
-    except Exception:
-        return []
+    raw = []
+    cursor = None
+    # Fetch up to 2 pages (1000 markets each) to get both sports and non-sports
+    for _ in range(2):
+        try:
+            params = {"limit": 1000, "status": "open"}
+            if cursor:
+                params["cursor"] = cursor
+            headers = signed_headers("GET", path)
+            resp = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
+                headers=headers,
+                params=params,
+                timeout=TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            raw.extend(data.get("markets", []))
+            cursor = data.get("cursor")
+            if not cursor:
+                break
+        except Exception:
+            break
     out = []
     for m in raw:
         try:
