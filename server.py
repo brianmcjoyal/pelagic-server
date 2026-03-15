@@ -1222,22 +1222,19 @@ import time as _time
 
 def _background_loop():
     """Simple background loop that runs scans and warms cache."""
-    _time.sleep(8)  # wait for server to fully start
+    _time.sleep(10)  # wait for server to fully start
     print("[BG] Background loop started")
-    scan_counter = 0
     while True:
         try:
-            # Run bot scan every iteration (~15s effective)
+            # Run bot scan (updates BOT_STATE for status endpoint)
             run_bot_scan()
-            scan_counter += 1
-            # Warm picks cache every 4th scan (~60s)
-            if scan_counter % 4 == 1:
-                _warm_picks_cache()
+            # Warm the picks cache so /top-picks is fast
+            _warm_picks_cache()
         except Exception as e:
             import traceback
             print(f"[BG] Error in background loop: {e}")
             traceback.print_exc()
-        _time.sleep(15)
+        _time.sleep(30)  # scan every 30s
 
 _bg_thread = None
 
@@ -1664,10 +1661,7 @@ def top_picks():
     # Serve cached data if fresh (60s TTL)
     if _picks_cache["time"] and (now - _picks_cache["time"]).total_seconds() < 60 and _picks_cache["data"] is not None:
         return jsonify(_picks_cache["data"])
-    # If no cache yet, return empty immediately — don't block the page
-    # The scheduler or auto-refresh will fill the cache
-    if _picks_cache["data"] is None:
-        return jsonify(_EMPTY_PICKS)
+    # If cache expired or empty, do a full scan (may take 20-30s first time)
     all_markets = fetch_all_markets()
     picks = []
 
