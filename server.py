@@ -1233,10 +1233,27 @@ scheduler.add_job(
 )
 scheduler.start()
 atexit.register(scheduler.shutdown)
+print(f"[STARTUP] Scheduler started with {len(scheduler.get_jobs())} jobs: {[j.id for j in scheduler.get_jobs()]}")
 
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+@app.route("/debug-scheduler")
+def debug_scheduler():
+    jobs = []
+    for j in scheduler.get_jobs():
+        jobs.append({
+            "id": j.id,
+            "next_run": str(j.next_run_time),
+            "trigger": str(j.trigger),
+        })
+    return jsonify({
+        "running": scheduler.running,
+        "jobs": jobs,
+        "picks_cache_has_data": _picks_cache["data"] is not None,
+        "picks_cache_time": str(_picks_cache["time"]),
+    })
 
 @app.route("/health")
 def health():
