@@ -1032,7 +1032,7 @@ def top_picks():
     all_markets = fetch_all_markets()
     picks = []
 
-    # Strategy 1: Consensus mispricings (any deviation with 1+ platform match)
+    # Build Kalshi and other-platform market lists
     kalshi_markets = []
     other_markets = []
     for m in all_markets:
@@ -1044,7 +1044,7 @@ def top_picks():
         else:
             other_markets.append((nq, m))
 
-    # Build keyword index for other markets for fast lookup
+    # Build keyword index for other markets
     other_kw_index = {}
     for idx_o, (nq_o, om) in enumerate(other_markets):
         for word in set(nq_o.split()):
@@ -1052,31 +1052,30 @@ def top_picks():
                 other_kw_index[word] = set()
             other_kw_index[word].add(idx_o)
 
-    # Platform liquidity weights — higher volume platforms get more influence
+    # Platform liquidity weights
     PLAT_WEIGHT = {"polymarket": 3.0, "predictit": 2.0, "manifold": 1.0}
 
-    # Helper: compute time-to-expiry bonus (sooner = better)
     def _time_bonus(market):
         ct = market.get("close_time")
         if not ct:
-            return 0.5  # unknown expiry = neutral
+            return 0.5
         try:
             exp = datetime.datetime.fromisoformat(ct.replace("Z", "+00:00").replace("+00:00", ""))
         except Exception:
             return 0.5
         hours_left = max(0, (exp - now).total_seconds() / 3600)
         if hours_left <= 12:
-            return 1.5   # settling today — most predictable
+            return 1.5
         elif hours_left <= 48:
-            return 1.2   # settling soon
+            return 1.2
         elif hours_left <= 168:
-            return 1.0   # this week
+            return 1.0
         else:
-            return 0.6   # far out — less predictable
+            return 0.6
 
+    # ── Strategy 1: Cross-platform consensus picks ──
     for nq_k, km in kalshi_markets:
         matches = []
-        # Find candidate other markets sharing 2+ keywords
         candidate_counts = {}
         for w in set(nq_k.split()):
             for idx_o in other_kw_index.get(w, ()):
@@ -1086,7 +1085,6 @@ def top_picks():
             nq_o, om = other_markets[idx_o]
             sim = similarity(nq_k, nq_o, km["question"], om["question"])
             if sim >= 0.40:
-                # Skip matches where other platform has 0 or near-0 price (not a real market)
                 if om["yes"] < 0.03 or om["yes"] > 0.97:
                     continue
                 matches.append({
@@ -1096,19 +1094,15 @@ def top_picks():
         if not matches:
             continue
 
-        # Liquidity-weighted consensus — Polymarket counts 3x more than Manifold
         total_weight = sum(PLAT_WEIGHT.get(m["platform"], 1.0) for m in matches)
         consensus_yes = sum(m["yes"] * PLAT_WEIGHT.get(m["platform"], 1.0) for m in matches) / total_weight
         deviation = abs(km["yes"] - consensus_yes)
         if deviation < 0.02:
             continue
-        # Skip suspiciously large deviations — likely a false match
         if deviation > 0.40:
             continue
 
-        # Volume filter — skip if Kalshi market has zero volume (illiquid)
         kalshi_vol = km.get("volume", 0)
-
         plat_prices = [f"{p['platform'].title()} {p['yes']*100:.0f}¢" for p in matches]
         k_price = km["yes"] * 100
         c_price = consensus_yes * 100
@@ -1128,10 +1122,8 @@ def top_picks():
             thesis += f"Buy NO at {price_cents}¢ — consensus expects YES to drop toward {c_price:.0f}¢."
             potential = round((k_price - c_price) / 100, 2)
 
-        # Win probability = consensus estimate for the side we're buying
         win_prob = min(0.95, consensus_yes if signal == "buy_yes" else 1 - consensus_yes)
 
-        # Confidence based on multiple factors
         if deviation >= 0.20 and len(matches) >= 2 and kalshi_vol > 0:
             confidence = "HIGH"
         elif deviation >= 0.10 or len(matches) >= 2:
@@ -1139,7 +1131,6 @@ def top_picks():
         else:
             confidence = "LOW"
 
-        # Smart scoring: win_prob × edge × platform_bonus × time_bonus × volume_bonus
         plat_bonus = 1 + 0.25 * (len(matches) - 1)
         time_b = _time_bonus(km)
         vol_bonus = 1.3 if kalshi_vol > 100 else 1.0 if kalshi_vol > 0 else 0.5
@@ -1171,12 +1162,11 @@ def top_picks():
             },
         })
 
-    # Strategy 2: Arbitrage pairs (cross-platform price gaps)
+    # ── Strategy 2: Arbitrage pairs ──
     opps = find_opportunities(all_markets, min_similarity=0.50, max_cost=1.0)
     for opp in opps[:20]:
         buy_yes = opp["buy_yes"]
         buy_no = opp["buy_no"]
-        # Only include if Kalshi is involved
         kalshi_side = None
         matched_km = None
         if buy_yes["platform"] == "kalshi":
@@ -1186,11 +1176,9 @@ def top_picks():
             ticker = ""
             for nq_k, km in kalshi_markets:
                 if similarity(nq_k, normalize_question(opp["question_a"]), km["question"], opp["question_a"]) > 0.5:
-                    ticker = km["id"]; matched_km = km
-                    break
+                    ticker = km["id"]; matched_km = km; break
                 if similarity(nq_k, normalize_question(opp["question_b"]), km["question"], opp["question_b"]) > 0.5:
-                    ticker = km["id"]; matched_km = km
-                    break
+                    ticker = km["id"]; matched_km = km; break
         elif buy_no["platform"] == "kalshi":
             kalshi_side = buy_no
             other_side = buy_yes
@@ -1198,21 +1186,17 @@ def top_picks():
             ticker = ""
             for nq_k, km in kalshi_markets:
                 if similarity(nq_k, normalize_question(opp["question_a"]), km["question"], opp["question_a"]) > 0.5:
-                    ticker = km["id"]; matched_km = km
-                    break
+                    ticker = km["id"]; matched_km = km; break
                 if similarity(nq_k, normalize_question(opp["question_b"]), km["question"], opp["question_b"]) > 0.5:
-                    ticker = km["id"]; matched_km = km
-                    break
+                    ticker = km["id"]; matched_km = km; break
         if not kalshi_side or not ticker:
             continue
-        # Skip duplicates already found via consensus
         if any(p["kalshi_ticker"] == ticker for p in picks):
             continue
         price_cents = int(kalshi_side["price"] * 100)
         spread = abs(buy_yes["price"] - (1 - buy_no["price"]))
         edge = f"Arbitrage: buy {signal.replace('buy_','')} on Kalshi at {price_cents}¢, hedge on {other_side['platform'].title()}"
         thesis = f"Price spread of {opp['profit_pct']:.1f}% between Kalshi and {other_side['platform'].title()}. "
-        thesis += f"Kalshi {signal.replace('buy_','')} at {price_cents}¢ vs {other_side['platform'].title()} at {int(other_side['price']*100)}¢. "
         thesis += f"Estimated profit: ${opp['estimated_profit']:.4f} per contract after fees."
         picks.append({
             "type": "arbitrage",
@@ -1239,74 +1223,78 @@ def top_picks():
             },
         })
 
-    # Strategy 3: High-conviction Kalshi picks (strong implied probability + volume)
-    # Markets where price heavily favors one side AND has real trading volume
-    if len(picks) < 30:
-        # Sort by how far from 50/50 — furthest = strongest signal
-        sorted_kalshi = sorted(kalshi_markets, key=lambda x: abs(x[1]["yes"] - 0.5), reverse=True)
-        for nq_k, km in sorted_kalshi:
-            if any(p["kalshi_ticker"] == km["id"] for p in picks):
-                continue
-            # Only show markets with strong directional signal (>65% or <35%)
-            if 0.35 <= km["yes"] <= 0.65:
-                continue
-            kalshi_vol = km.get("volume", 0)
-            if km["yes"] >= 0.65:
-                signal = "buy_yes"
-                win_prob = km["yes"]
-                price_cents = km.get("yes_ask_cents") or int(km["yes"] * 100)
-            else:
-                signal = "buy_no"
-                win_prob = 1 - km["yes"]
-                price_cents = km.get("no_ask_cents") or int(km["no"] * 100)
-            side_label = "YES" if signal == "buy_yes" else "NO"
-            edge = f"{win_prob*100:.0f}% implied probability — buy {side_label} at {price_cents}¢"
-            thesis = f"Kalshi prices this at {km['yes']*100:.0f}¢ YES / {km['no']*100:.0f}¢ NO"
-            if kalshi_vol > 0:
-                thesis += f" with {kalshi_vol:,} contracts traded"
-            thesis += f". The {win_prob*100:.0f}% implied probability suggests strong market conviction. "
-            thesis += f"Pay {price_cents}¢ to win $1 if correct ({(100-price_cents)}¢ profit)."
-            time_b = _time_bonus(km)
-            vol_bonus = 1.3 if kalshi_vol > 100 else 1.0 if kalshi_vol > 0 else 0.4
-            score = win_prob * time_b * vol_bonus * 0.5
-            if win_prob >= 0.75 and kalshi_vol > 50:
-                confidence = "MEDIUM"
-            elif win_prob >= 0.80:
-                confidence = "MEDIUM"
-            else:
-                confidence = "LOW"
-            picks.append({
-                "type": "high_conviction",
-                "kalshi_ticker": km["id"],
-                "kalshi_question": km["question"],
-                "kalshi_yes_price": km["yes"],
-                "kalshi_url": km["url"],
-                "consensus_yes_price": win_prob,
-                "deviation": round(abs(km["yes"] - 0.5), 4),
-                "signal": signal,
-                "price_cents": price_cents,
-                "matching_platforms": [],
-                "edge_summary": edge,
-                "thesis": thesis,
-                "potential_profit_usd": round((100 - price_cents) / 100, 2),
-                "confidence": confidence,
-                "platform_count": 0,
-                "win_probability": round(win_prob, 4),
-                "score": round(score, 4),
-                "volume": kalshi_vol,
-                "is_sports": km.get("is_sports", False),
-                "prices": {"kalshi_yes": round(km["yes"] * 100, 1), "kalshi_no": round(km["no"] * 100, 1)},
-            })
-            if len(picks) >= 30:
-                break
+    # ── Strategy 3: High-probability singles (only with volume, no parlays) ──
+    # Only used to fill remaining slots — these are Kalshi-only with strong directional signal
+    # Must have volume > 0 AND strong probability (>70% or <30%) AND NOT a parlay
+    sorted_kalshi = sorted(kalshi_markets, key=lambda x: abs(x[1]["yes"] - 0.5), reverse=True)
+    existing_tickers = {p["kalshi_ticker"] for p in picks}
+    for nq_k, km in sorted_kalshi:
+        if km["id"] in existing_tickers:
+            continue
+        # Skip parlays (multi-outcome markets with "yes " in title multiple times)
+        title_lower = km["question"].lower()
+        if title_lower.count("yes ") >= 2:
+            continue
+        # Must have volume (real market activity)
+        kalshi_vol = km.get("volume", 0)
+        if kalshi_vol < 10:
+            continue
+        # Must have strong directional signal
+        if 0.30 <= km["yes"] <= 0.70:
+            continue
+        if km["yes"] >= 0.70:
+            signal = "buy_yes"
+            win_prob = min(0.92, km["yes"])  # Cap — single platform can't be >92%
+            price_cents = km.get("yes_ask_cents") or int(km["yes"] * 100)
+        else:
+            signal = "buy_no"
+            win_prob = min(0.92, 1 - km["yes"])
+            price_cents = km.get("no_ask_cents") or int(km["no"] * 100)
+        side_label = "YES" if signal == "buy_yes" else "NO"
+        edge = f"{win_prob*100:.0f}% market probability — buy {side_label} at {price_cents}¢"
+        thesis = f"Kalshi market at {km['yes']*100:.0f}¢ YES / {km['no']*100:.0f}¢ NO"
+        thesis += f" with {kalshi_vol:,} contracts traded."
+        thesis += f" Buy {side_label} at {price_cents}¢ for {(100-price_cents)}¢ profit if correct."
+        time_b = _time_bonus(km)
+        vol_bonus = 1.3 if kalshi_vol > 100 else 1.0
+        score = win_prob * time_b * vol_bonus * 0.4  # Lower weight than consensus picks
+        confidence = "MEDIUM" if win_prob >= 0.80 and kalshi_vol > 50 else "LOW"
+        picks.append({
+            "type": "high_probability",
+            "kalshi_ticker": km["id"],
+            "kalshi_question": km["question"],
+            "kalshi_yes_price": km["yes"],
+            "kalshi_url": km["url"],
+            "consensus_yes_price": round(win_prob, 4),
+            "deviation": round(abs(km["yes"] - 0.5), 4),
+            "signal": signal,
+            "price_cents": price_cents,
+            "matching_platforms": [],
+            "edge_summary": edge,
+            "thesis": thesis,
+            "potential_profit_usd": round((100 - price_cents) / 100, 2),
+            "confidence": confidence,
+            "platform_count": 0,
+            "win_probability": round(win_prob, 4),
+            "score": round(score, 4),
+            "volume": kalshi_vol,
+            "is_sports": km.get("is_sports", False),
+            "prices": {"kalshi_yes": round(km["yes"] * 100, 1), "kalshi_no": round(km["no"] * 100, 1)},
+        })
+        existing_tickers.add(km["id"])
 
-    # Sort by score (best opportunities first) and take top 30 (split into sports/non-sports on frontend)
-    picks.sort(key=lambda x: x["score"], reverse=True)
-    picks = picks[:30]
-    for i, p in enumerate(picks):
+    # ── Split into sports & non-sports, return exactly 10 each ──
+    sports_picks = sorted([p for p in picks if p.get("is_sports")], key=lambda x: x["score"], reverse=True)[:10]
+    nonsports_picks = sorted([p for p in picks if not p.get("is_sports")], key=lambda x: x["score"], reverse=True)[:10]
+
+    # Re-rank within each category
+    for i, p in enumerate(sports_picks):
+        p["rank"] = i + 1
+    for i, p in enumerate(nonsports_picks):
         p["rank"] = i + 1
 
-    result = {"picks": picks, "total_scanned": len(all_markets)}
+    all_ranked = sports_picks + nonsports_picks
+    result = {"picks": all_ranked, "sports_count": len(sports_picks), "nonsports_count": len(nonsports_picks), "total_scanned": len(all_markets)}
     _picks_cache["data"] = result
     _picks_cache["time"] = datetime.datetime.utcnow()
     return jsonify(result)
@@ -1321,8 +1309,20 @@ def today_picks():
     tomorrow_end = today_end + datetime.timedelta(hours=12)  # include early morning settles
 
     today_markets = []
+    seen_tickers = set()
     for m in all_markets:
         if m["platform"] != "kalshi":
+            continue
+        # Skip parlays (multi-outcome markets)
+        title_lower = (m.get("question") or "").lower()
+        if title_lower.count("yes ") >= 2:
+            continue
+        # Skip duplicates
+        if m["id"] in seen_tickers:
+            continue
+        seen_tickers.add(m["id"])
+        # Must have some volume (real market)
+        if (m.get("volume") or 0) < 5:
             continue
         ct = m.get("close_time")
         if not ct:
@@ -1344,6 +1344,10 @@ def today_picks():
             time_left = f"{hrs}h {mins}m"
         else:
             time_left = f"{mins}m"
+
+        # Don't show 50/50 markets — must have some directional signal
+        if 0.40 <= m["yes"] <= 0.60:
+            continue
 
         price_cents = min(int(m["yes"] * 100), int(m["no"] * 100))
         cheaper_side = "buy_yes" if m["yes"] <= m["no"] else "buy_no"
@@ -1904,9 +1908,9 @@ function renderPickCard(p, idx, prefix) {
   const sigClass = p.signal === 'buy_yes' ? 'yes' : 'no';
   const sigLabel = p.signal === 'buy_yes' ? 'BET YES' : 'BET NO';
   const confClass = p.confidence.toLowerCase();
-  const typeLabels = {consensus: 'CROSS-PLATFORM', arbitrage: 'ARBITRAGE', high_conviction: 'STRONG SIGNAL'};
+  const typeLabels = {consensus: 'CROSS-PLATFORM', arbitrage: 'ARBITRAGE', high_probability: 'HIGH PROB'};
   const typeLabel = typeLabels[p.type] || 'PICK';
-  const typeColors = {consensus: '#00ff88', arbitrage: '#ff8c00', high_conviction: '#4a9eff'};
+  const typeColors = {consensus: '#00ff88', arbitrage: '#ff8c00', high_probability: '#4a9eff'};
   const typeColor = typeColors[p.type] || '#888';
   let h = '<div class="pick-card">';
   h += '<div class="pick-rank">#' + (idx + 1) + '</div>';
@@ -1916,7 +1920,8 @@ function renderPickCard(p, idx, prefix) {
   h += '<span class="pick-meta" style="color:' + typeColor + '">' + typeLabel + '</span>';
   var winPct = (p.win_probability || 0.5) * 100;
   var winColor = winPct >= 70 ? '#00ff88' : winPct >= 55 ? '#ff8c00' : '#ff4444';
-  h += '<span class="pick-meta" style="color:' + winColor + ';font-weight:700;font-size:1.2em">' + winPct.toFixed(0) + '%</span>';
+  var winLabel = p.type === 'consensus' ? ' WIN' : p.type === 'arbitrage' ? ' ARB' : '';
+  h += '<span class="pick-meta" style="color:' + winColor + ';font-weight:700;font-size:1.2em">' + winPct.toFixed(0) + '%' + winLabel + '</span>';
   if (p.deviation > 0.02) h += '<span class="pick-meta">EDGE <b>' + (p.deviation * 100).toFixed(0) + '%</b></span>';
   if (p.platform_count > 0) h += '<span class="pick-meta">' + p.platform_count + ' PLATFORM' + (p.platform_count > 1 ? 'S' : '') + '</span>';
   if (p.volume > 0) h += '<span class="pick-meta" style="color:#666">' + p.volume.toLocaleString() + ' vol</span>';
@@ -1949,29 +1954,29 @@ async function loadTopPicks() {
     picks.forEach((p, i) => { p._globalIdx = i; });
     _picksData = picks;
 
-    const sports = picks.filter(p => isSports(p));
-    const nonSports = picks.filter(p => !isSports(p));
+    const sports = picks.filter(p => isSports(p)).slice(0, 10);
+    const nonSports = picks.filter(p => !isSports(p)).slice(0, 10);
 
-    // Render sports
+    // Render sports (exactly 10 or however many available)
     document.getElementById('picks-badge-sports').textContent = sports.length;
     if (sports.length === 0) {
       document.getElementById('top-picks-list-sports').innerHTML = '<div class="empty" style="grid-column:1/-1">No sports picks right now.</div>';
     } else {
       let html = '';
-      sports.slice(0, 10).forEach((p, idx) => { html += renderPickCard(p, idx, 'sports'); });
+      sports.forEach((p, idx) => { html += renderPickCard(p, idx, 'sports'); });
       document.getElementById('top-picks-list-sports').innerHTML = html;
-      sports.slice(0, 10).forEach((p, idx) => { drawPickChart('sports-chart-' + idx, p.prices || {}, p.signal); });
+      sports.forEach((p, idx) => { drawPickChart('sports-chart-' + idx, p.prices || {}, p.signal); });
     }
 
-    // Render non-sports
+    // Render non-sports (exactly 10 or however many available)
     document.getElementById('picks-badge-nonsports').textContent = nonSports.length;
     if (nonSports.length === 0) {
       document.getElementById('top-picks-list-nonsports').innerHTML = '<div class="empty" style="grid-column:1/-1">No non-sports picks right now.</div>';
     } else {
       let html = '';
-      nonSports.slice(0, 10).forEach((p, idx) => { html += renderPickCard(p, idx, 'nonsports'); });
+      nonSports.forEach((p, idx) => { html += renderPickCard(p, idx, 'nonsports'); });
       document.getElementById('top-picks-list-nonsports').innerHTML = html;
-      nonSports.slice(0, 10).forEach((p, idx) => { drawPickChart('nonsports-chart-' + idx, p.prices || {}, p.signal); });
+      nonSports.forEach((p, idx) => { drawPickChart('nonsports-chart-' + idx, p.prices || {}, p.signal); });
     }
   } catch(e) {
     document.getElementById('top-picks-list-sports').innerHTML = '<div class="empty" style="grid-column:1/-1">Error: ' + e.message + '</div>';
@@ -2073,18 +2078,23 @@ function drawPLChart(trades) {
   const w = rect.width, h = rect.height;
   ctx.clearRect(0, 0, w, h);
 
-  // Build cumulative P/L from trades
+  // Build cumulative P/L from actual settled data
   let points = [{x: 0, y: 0}];
   let cumPL = 0;
-  if (trades && trades.length > 0) {
+  if (window._settledData && window._settledData.length > 0) {
+    window._settledData.forEach((s, i) => {
+      cumPL += s.pnl_usd || 0;
+      points.push({x: i + 1, y: cumPL});
+    });
+  } else if (trades && trades.length > 0) {
+    // No settled data yet — show cost spent as negative until settled
     trades.forEach((t, i) => {
       if (t.success) {
-        cumPL += (Math.random() > 0.4 ? 1 : -1) * (t.cost_usd || t.price_cents/100 || 0.5) * (0.1 + Math.random() * 0.3);
+        cumPL -= (t.cost_usd || 0);
       }
       points.push({x: i + 1, y: cumPL});
     });
   } else {
-    // Demo data showing flat line
     for (let i = 1; i <= 20; i++) points.push({x: i, y: 0});
   }
 
@@ -2276,6 +2286,7 @@ async function loadPositions() {
 async function loadSettled() {
   try {
     const data = await fetch(API + '/settled').then(r => r.json());
+    window._settledData = data.settled || [];
     const el = document.getElementById('settled-stats');
     const w = data.wins || 0, l = data.losses || 0, wr = data.win_rate || 0;
     const pnl = data.total_pnl_usd || 0;
