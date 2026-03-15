@@ -69,6 +69,41 @@ BOT_STATE = {
     "errors": [],
 }
 
+import json as _json
+
+_STATE_FILE = "/tmp/tradeshark_state.json"
+
+def _save_state():
+    """Persist trade data to disk."""
+    try:
+        data = {
+            "all_trades": BOT_STATE["all_trades"],
+            "trades_today": BOT_STATE["trades_today"],
+            "daily_spent_usd": BOT_STATE["daily_spent_usd"],
+            "trade_date": BOT_STATE["trade_date"],
+        }
+        with open(_STATE_FILE, "w") as f:
+            _json.dump(data, f)
+    except Exception as e:
+        print(f"[STATE] Save error: {e}")
+
+def _load_state():
+    """Restore trade data from disk."""
+    try:
+        with open(_STATE_FILE, "r") as f:
+            data = _json.load(f)
+        BOT_STATE["all_trades"] = data.get("all_trades", [])
+        BOT_STATE["trades_today"] = data.get("trades_today", [])
+        BOT_STATE["daily_spent_usd"] = data.get("daily_spent_usd", 0.0)
+        BOT_STATE["trade_date"] = data.get("trade_date", None)
+        print(f"[STATE] Restored {len(BOT_STATE['all_trades'])} trades from disk")
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[STATE] Load error: {e}")
+
+_load_state()
+
 # ---------------------------------------------------------------------------
 # Kalshi auth helpers
 # ---------------------------------------------------------------------------
@@ -622,6 +657,7 @@ def run_bot_scan():
             if trade_record["success"]:
                 BOT_STATE["daily_spent_usd"] += cost_usd
             print(f"[BOT] Trade: {side} {opp['kalshi_ticker']} @ {opp['price_cents']}c | success={trade_record['success']}")
+            _save_state()
 
     except Exception as e:
         BOT_STATE["errors"].append({"time": now.isoformat(), "error": str(e)})
@@ -996,6 +1032,7 @@ def execute_trade():
     BOT_STATE["trades_today"].append(trade_record)
     if trade_record["success"]:
         BOT_STATE["daily_spent_usd"] += trade_record["cost_usd"]
+    _save_state()
     return jsonify(trade_record)
 
 
