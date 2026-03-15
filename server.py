@@ -1479,44 +1479,76 @@ def top_picks():
             },
         })
 
-    # ── Strategy 3: High-probability singles (only with volume, no parlays) ──
-    # Only used to fill remaining slots — these are Kalshi-only with strong directional signal
-    # Must have volume > 0 AND strong probability (>70% or <30%) AND NOT a parlay
-    sorted_kalshi = sorted(kalshi_markets, key=lambda x: abs(x[1]["yes"] - 0.5), reverse=True)
+    # ── Strategy 3: News-researched Kalshi picks ──
+    # High-volume markets where news can give us an edge
+    # Two tiers:
+    #   A) Strong directional (>70% or <30%) with any volume — market already has conviction
+    #   B) High-volume (>1000 vol) at ANY price — these are major markets worth analyzing
     existing_tickers = {p["kalshi_ticker"] for p in picks}
+
+    # Sort by volume (highest volume = most important markets)
+    sorted_kalshi = sorted(kalshi_markets, key=lambda x: x[1].get("volume", 0), reverse=True)
     for nq_k, km in sorted_kalshi:
         if km["id"] in existing_tickers:
             continue
-        # Skip parlays (multi-outcome markets with "yes " in title multiple times)
+        # Skip parlays
         title_lower = km["question"].lower()
         if title_lower.count("yes ") >= 2:
             continue
-        # Must have volume (real market activity)
         kalshi_vol = km.get("volume", 0)
-        if kalshi_vol < 10:
+
+        # Tier A: Strong directional with volume >= 10
+        # Tier B: High-volume (>=500) at any price — major markets
+        if kalshi_vol >= 500:
+            pass  # always include high-volume markets
+        elif kalshi_vol >= 10 and (km["yes"] > 0.70 or km["yes"] < 0.30):
+            pass  # include strong directional with some volume
+        else:
             continue
-        # Must have strong directional signal
-        if 0.30 <= km["yes"] <= 0.70:
-            continue
-        if km["yes"] >= 0.70:
+
+        # Determine signal based on market price
+        if km["yes"] >= 0.55:
             signal = "buy_yes"
-            win_prob = min(0.92, km["yes"])  # Cap — single platform can't be >92%
+            win_prob = min(0.92, km["yes"])
             price_cents = km.get("yes_ask_cents") or int(km["yes"] * 100)
         else:
             signal = "buy_no"
             win_prob = min(0.92, 1 - km["yes"])
             price_cents = km.get("no_ask_cents") or int(km["no"] * 100)
+
         side_label = "YES" if signal == "buy_yes" else "NO"
+
+        # Score: weight by volume (high-volume markets are better signals)
+        time_b = _time_bonus(km)
+        if kalshi_vol >= 10000:
+            vol_bonus = 2.0   # mega-volume = very high conviction
+        elif kalshi_vol >= 1000:
+            vol_bonus = 1.5
+        elif kalshi_vol >= 100:
+            vol_bonus = 1.2
+        else:
+            vol_bonus = 1.0
+
+        # Higher score for markets further from 50/50
+        directional_strength = abs(km["yes"] - 0.5) * 2  # 0-1 scale
+        score = win_prob * time_b * vol_bonus * (0.3 + directional_strength * 0.3)
+
+        if win_prob >= 0.80 and kalshi_vol >= 100:
+            confidence = "HIGH"
+        elif win_prob >= 0.65 and kalshi_vol >= 50:
+            confidence = "MEDIUM"
+        else:
+            confidence = "LOW"
+
         edge = f"{win_prob*100:.0f}% market probability — buy {side_label} at {price_cents}¢"
+        if kalshi_vol >= 1000:
+            edge += f" ({kalshi_vol:,} vol)"
         thesis = f"Kalshi market at {km['yes']*100:.0f}¢ YES / {km['no']*100:.0f}¢ NO"
         thesis += f" with {kalshi_vol:,} contracts traded."
         thesis += f" Buy {side_label} at {price_cents}¢ for {(100-price_cents)}¢ profit if correct."
-        time_b = _time_bonus(km)
-        vol_bonus = 1.3 if kalshi_vol > 100 else 1.0
-        score = win_prob * time_b * vol_bonus * 0.4  # Lower weight than consensus picks
-        confidence = "MEDIUM" if win_prob >= 0.80 and kalshi_vol > 50 else "LOW"
+
         picks.append({
-            "type": "high_probability",
+            "type": "news_researched",
             "kalshi_ticker": km["id"],
             "kalshi_question": km["question"],
             "kalshi_yes_price": km["yes"],
@@ -2188,9 +2220,9 @@ function renderPickCard(p, idx, prefix) {
   const sigClass = p.signal === 'buy_yes' ? 'yes' : 'no';
   const sigLabel = p.signal === 'buy_yes' ? 'BET YES' : 'BET NO';
   const confClass = p.confidence.toLowerCase();
-  const typeLabels = {consensus: 'CROSS-PLATFORM', arbitrage: 'ARBITRAGE', high_probability: 'HIGH PROB'};
+  const typeLabels = {consensus: 'CROSS-PLATFORM', arbitrage: 'ARBITRAGE', news_researched: 'NEWS + DATA', high_probability: 'HIGH PROB'};
   const typeLabel = typeLabels[p.type] || 'PICK';
-  const typeColors = {consensus: '#00ff88', arbitrage: '#ff8c00', high_probability: '#4a9eff'};
+  const typeColors = {consensus: '#00ff88', arbitrage: '#ff8c00', news_researched: '#c084fc', high_probability: '#4a9eff'};
   const typeColor = typeColors[p.type] || '#888';
   let h = '<div class="pick-card">';
   h += '<div class="pick-rank">#' + (idx + 1) + '</div>';
