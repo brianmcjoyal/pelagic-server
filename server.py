@@ -589,11 +589,11 @@ def find_opportunities(all_markets, min_similarity=0.55, max_cost=0.98):
 def find_consensus_mispricings(all_markets):
     """
     Find Kalshi markets where the price deviates from the consensus of
-    other platforms. If 2+ other platforms agree on a price and Kalshi
-    disagrees by 15%+, that's a trade signal.
+    other platforms. Requires 1+ platform match with any meaningful deviation.
+    Skips parlay markets that can't match cross-platform.
     """
-    min_dev = BOT_CONFIG["min_deviation"]
-    min_plats = BOT_CONFIG["min_platforms"]
+    min_dev = 0.05  # 5% minimum deviation — any edge counts
+    min_plats = 1   # Just 1 other platform agreeing is enough
 
     kalshi = []
     others = []
@@ -602,17 +602,35 @@ def find_consensus_mispricings(all_markets):
         if len(nq.split()) < 3:
             continue
         if m["platform"] == "kalshi":
+            # Skip parlays
+            if m["question"].count(",") >= 2:
+                continue
             kalshi.append((nq, m))
         else:
             others.append((nq, m))
+
+    # Build keyword index for fast lookup
+    other_kw_idx = {}
+    for i, (nq_o, om) in enumerate(others):
+        for word in set(nq_o.split()):
+            if word not in other_kw_idx:
+                other_kw_idx[word] = set()
+            other_kw_idx[word].add(i)
 
     mispricings = []
 
     for nq_k, km in kalshi:
         matches = []
-        for nq_o, om in others:
+        # Find candidates sharing 2+ keywords
+        candidate_counts = {}
+        for w in set(nq_k.split()):
+            for idx_o in other_kw_idx.get(w, ()):
+                candidate_counts[idx_o] = candidate_counts.get(idx_o, 0) + 1
+        candidates = [i for i, cnt in candidate_counts.items() if cnt >= 2]
+        for idx_o in candidates:
+            nq_o, om = others[idx_o]
             sim = similarity(nq_k, nq_o, km["question"], om["question"])
-            if sim >= 0.55:
+            if sim >= 0.40:
                 matches.append({"platform": om["platform"], "yes": om["yes"], "similarity": round(sim, 3)})
 
         if len(matches) < min_plats:
