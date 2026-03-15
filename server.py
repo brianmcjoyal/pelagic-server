@@ -1810,7 +1810,30 @@ def top_picks():
     nonsports_picks = sorted([p for p in picks if not p.get("is_sports")], key=lambda x: x["score"], reverse=True)[:10]
 
     # ── Top 5 hero picks: ranked by real win likelihood (honest probability) ──
-    all_sorted = sorted(picks, key=lambda x: (x.get("real_win_likelihood", 0), x.get("score", 0)), reverse=True)
+    # Filter: must have volume, must settle within 90 days, must have real edge
+    def _is_hero_worthy(p):
+        # Must have SOME volume (people actually trading)
+        if (p.get("volume") or 0) < 10:
+            return False
+        # Must settle within 90 days (no 18-year bets)
+        ct = p.get("close_time")
+        if ct:
+            try:
+                exp = datetime.datetime.fromisoformat(ct.replace("Z", "+00:00").replace("+00:00", ""))
+                days_left = (exp - now).total_seconds() / 86400
+                if days_left > 90:
+                    return False
+            except Exception:
+                pass
+        # Must have positive edge (real_win > breakeven)
+        real_win = p.get("real_win_likelihood", 0)
+        breakeven = p.get("price_cents", 50) / 100
+        if real_win <= breakeven:
+            return False
+        return True
+
+    hero_candidates = [p for p in picks if _is_hero_worthy(p)]
+    all_sorted = sorted(hero_candidates, key=lambda x: (x.get("real_win_likelihood", 0), x.get("score", 0)), reverse=True)
     hero_picks = all_sorted[:5]
     for i, p in enumerate(hero_picks):
         p["hero_rank"] = i + 1
