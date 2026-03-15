@@ -325,6 +325,35 @@ def fetch_kalshi():
 
     print(f"[FETCH] kalshi: {len(raw)} markets from {fetched_events} events")
 
+    # Step 3: Also fetch markets sorted by close time to get short-term opportunities
+    existing_tickers = {m.get("ticker") for m in raw}
+    try:
+        for close_page in range(2):
+            mh = signed_headers("GET", path)
+            close_params = {"limit": 200, "status": "open"}
+            if close_page > 0:
+                close_params["cursor"] = close_cursor
+            cr = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
+                headers=mh, params=close_params, timeout=8,
+            )
+            if cr.ok:
+                close_mkts = cr.json().get("markets", [])
+                close_cursor = cr.json().get("cursor")
+                added = 0
+                for cm in close_mkts:
+                    if cm.get("ticker") not in existing_tickers:
+                        raw.append(cm)
+                        existing_tickers.add(cm.get("ticker"))
+                        added += 1
+                print(f"[FETCH] kalshi close-time page {close_page+1}: +{added} new markets")
+                if not close_cursor:
+                    break
+            else:
+                break
+    except Exception as e:
+        print(f"[FETCH] kalshi close-time fetch error: {e}")
+
     # Fallback: if events approach yielded nothing, do a simple paginated fetch
     if not raw:
         print("[FETCH] kalshi: events approach yielded 0, trying direct pagination")
@@ -1585,22 +1614,29 @@ def top_picks():
     PLAT_WEIGHT = PLAT_WEIGHT_GLOBAL
 
     def _time_bonus(market):
+        """Heavily favor markets that settle SOON — that's where we compound."""
         ct = market.get("close_time")
         if not ct:
-            return 0.5
+            return 0.1
         try:
             exp = datetime.datetime.fromisoformat(ct.replace("Z", "+00:00").replace("+00:00", ""))
         except Exception:
-            return 0.5
-        hours_left = max(0, (exp - now).total_seconds() / 3600)
-        if hours_left <= 12:
-            return 1.5
-        elif hours_left <= 48:
-            return 1.2
-        elif hours_left <= 168:
-            return 1.0
+            return 0.1
+        days_left = max(0, (exp - now).total_seconds() / 86400)
+        if days_left <= 1:
+            return 3.0      # settles TODAY — highest priority
+        elif days_left <= 7:
+            return 2.5      # this week
+        elif days_left <= 30:
+            return 2.0      # this month
+        elif days_left <= 90:
+            return 1.5      # this quarter
+        elif days_left <= 365:
+            return 0.8      # this year — ok
+        elif days_left <= 730:
+            return 0.3      # 1-2 years — deprioritize
         else:
-            return 0.6
+            return 0.05     # 2+ years — basically ignore
 
     # ── Strategy 1: Cross-platform consensus picks ──
     for nq_k, km in kalshi_markets:
@@ -1951,14 +1987,15 @@ def top_picks():
         return True
 
     hero_candidates = [p for p in picks if _is_hero_worthy(p)]
-    # Rank by: cross-platform first, then edge (deviation), then volume
-    # This puts the picks with the most independent verification at the top
+    # Rank by: time_bonus (settle soon) * cross-platform * edge * volume
+    # This puts the picks we can compound fastest at the top
     def _hero_sort_key(p):
-        is_xplat = 1 if p.get("type") in ("consensus", "arbitrage", "cross_validated") else 0
-        plat_count = p.get("platform_count", 0)
+        is_xplat = 2.0 if p.get("type") in ("consensus", "arbitrage", "cross_validated") else 1.0
+        plat_count = 1 + p.get("platform_count", 0) * 0.3
         deviation = p.get("deviation", 0)
-        vol = p.get("volume", 0)
-        return (is_xplat, plat_count, deviation, vol)
+        vol = min(2.0, 1.0 + (p.get("volume", 0) / 10000))
+        tb = _time_bonus(p)
+        return tb * is_xplat * plat_count * (1 + deviation) * vol
     all_sorted = sorted(hero_candidates, key=_hero_sort_key, reverse=True)
     hero_picks = all_sorted[:5]
     for i, p in enumerate(hero_picks):
