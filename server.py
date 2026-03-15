@@ -1141,6 +1141,27 @@ def health():
     return jsonify({"status": "ok", "private_key_loaded": k is not None, "bot_enabled": BOT_CONFIG["enabled"]})
 
 
+@app.route("/test-events")
+def test_events():
+    """Debug: test the events API directly."""
+    try:
+        h = signed_headers("GET", "/events")
+        if not h:
+            return jsonify({"error": "no auth headers"})
+        resp = requests.get(
+            KALSHI_BASE_URL + KALSHI_API_PREFIX + "/events",
+            headers=h, params={"limit": 5, "status": "open"}, timeout=10,
+        )
+        return jsonify({
+            "status_code": resp.status_code,
+            "url": resp.url,
+            "body_keys": list(resp.json().keys()) if resp.ok else resp.text[:200],
+            "events_count": len(resp.json().get("events", [])) if resp.ok else 0,
+            "sample": [{"ticker": e.get("event_ticker"), "title": e.get("title", "")[:60]} for e in resp.json().get("events", [])[:3]] if resp.ok else [],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
 @app.route("/debug-markets")
 def debug_markets():
     all_m = fetch_all_markets()
