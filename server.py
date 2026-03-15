@@ -1073,14 +1073,26 @@ def health():
 
 @app.route("/debug-markets")
 def debug_markets():
-    path = "/markets"
-    headers = signed_headers("GET", path)
-    if not headers:
-        return jsonify({"error": "no key"})
-    resp = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + path, headers=headers, params={"limit": 3, "status": "open"}, timeout=TIMEOUT)
-    raw = resp.json().get("markets", [])
-    # Return raw fields for first 3 markets
-    return jsonify({"sample": [dict(m) for m in raw[:3]]})
+    all_m = fetch_all_markets()
+    total = len(all_m)
+    kalshi = [m for m in all_m if m["platform"] == "kalshi"]
+    non_parlay = [m for m in kalshi if not _is_parlay_title(m["question"])]
+    non_sports = [m for m in non_parlay if not m.get("is_sports", False)]
+    sports = [m for m in non_parlay if m.get("is_sports", False)]
+    high_vol_ns = sorted([m for m in non_sports if m.get("volume", 0) >= 500], key=lambda x: x.get("volume", 0), reverse=True)
+    other = [m for m in all_m if m["platform"] != "kalshi"]
+    return jsonify({
+        "total": total,
+        "kalshi": len(kalshi),
+        "kalshi_non_parlay": len(non_parlay),
+        "kalshi_sports": len(sports),
+        "kalshi_non_sports": len(non_sports),
+        "kalshi_non_sports_high_vol": len(high_vol_ns),
+        "other_platforms": len(other),
+        "other_by_platform": {p: len([m for m in other if m["platform"] == p]) for p in set(m["platform"] for m in other)},
+        "sample_non_sports_high_vol": [{"q": m["question"][:80], "vol": m.get("volume"), "yes": m["yes"], "ticker": m["id"][:30]} for m in high_vol_ns[:10]],
+        "sample_non_sports": [{"q": m["question"][:80], "vol": m.get("volume"), "yes": m["yes"]} for m in non_sports[:10]],
+    })
 
 
 @app.route("/markets")
