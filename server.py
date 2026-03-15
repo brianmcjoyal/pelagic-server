@@ -2182,7 +2182,7 @@ a:hover { text-decoration: underline; }
 </div>
 
 <div class="hero-section">
-  <div class="section-title" style="font-size:15px;border-bottom:2px solid #00ff88;color:#00ff88">Best Bets — Top 5 Highest Probability <span class="badge" id="hero-badge" style="color:#00ff88;border-color:#00ff88">0</span><button class="refresh-btn" onclick="loadTopPicks()">Refresh</button></div>
+  <div class="section-title" style="font-size:15px;border-bottom:2px solid #00ff88;color:#00ff88">Best Bets — Top 5 Biggest Edge <span class="badge" id="hero-badge" style="color:#00ff88;border-color:#00ff88">0</span><button class="refresh-btn" onclick="loadTopPicks()">Refresh</button></div>
   <div id="hero-picks" class="hero-grid"><div class="loading" style="grid-column:1/-1">Scanning 6 platforms + news...</div></div>
 </div>
 
@@ -2262,17 +2262,39 @@ function renderHeroCard(p, idx) {
   var ct = Math.max(1, Math.floor(500 / p.price_cents));
   var cost = (p.price_cents * ct / 100).toFixed(2);
   var sideWord = p.signal === 'buy_yes' ? 'YES' : 'NO';
+  // Real edge = market probability - breakeven probability
+  // Breakeven = cost / payout = price_cents / 100
+  var breakeven = p.price_cents;  // you need to win this % to break even
+  var edge = winPct - breakeven;  // your actual advantage
+  var edgeColor = edge >= 10 ? '#00ff88' : edge >= 5 ? '#ff8c00' : edge >= 0 ? '#ffcc00' : '#ff4444';
+  var isConsensus = p.type === 'consensus' || p.type === 'arbitrage';
+  var sourceLabel = isConsensus ? 'CROSS-PLATFORM' : 'MARKET PRICE';
+  var sourceColor = isConsensus ? '#00ff88' : '#888';
+
   var h = '<div class="hero-card">';
   h += '<div class="hero-rank">#' + (idx + 1) + '</div>';
-  h += '<div class="hero-prob">' + winPct.toFixed(0) + '%</div>';
-  h += '<div class="hero-label">Win Probability</div>';
+  // Show edge prominently instead of raw market probability
+  if (edge > 0) {
+    h += '<div class="hero-prob" style="color:' + edgeColor + '">+' + edge.toFixed(0) + '%</div>';
+    h += '<div class="hero-label">Edge Over Breakeven</div>';
+  } else {
+    h += '<div class="hero-prob" style="color:#ff4444;font-size:22px">THIN</div>';
+    h += '<div class="hero-label">Marginal Edge</div>';
+  }
+  // Show market prob + cost breakdown
+  h += '<div style="display:flex;gap:8px;font-size:9px;color:#888;margin:3px 0">';
+  h += '<span>Market: <b style="color:#fff">' + winPct.toFixed(0) + '%</b></span>';
+  h += '<span>Cost: <b style="color:#fff">' + p.price_cents + '¢</b></span>';
+  h += '<span>Payout: <b style="color:#00ff88">$1.00</b></span>';
+  h += '</div>';
+  h += '<div style="font-size:8px;color:' + sourceColor + ';text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px">' + sourceLabel + '</div>';
+
   h += '<div class="hero-question"><a href="' + p.kalshi_url + '" target="_blank">' + p.kalshi_question + '</a></div>';
   var yesL = p.yes_label || 'Yes';
   var noL = p.no_label || 'No';
   var betMeaning = p.signal === 'buy_yes' ? yesL : noL;
   h += '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:4px">';
   h += '<span class="hero-signal ' + sigClass + '">' + sigLabel + '</span>';
-  h += '<span style="font-size:9px;color:#888">' + p.price_cents + '¢ per contract</span>';
   h += '</div>';
   if (betMeaning !== 'Yes' && betMeaning !== 'No') {
     h += '<div style="font-size:9px;color:#ffcc00;margin-bottom:4px;font-weight:600">→ Betting: ' + betMeaning + '</div>';
@@ -2282,7 +2304,7 @@ function renderHeroCard(p, idx) {
     h += '<div style="font-size:8px;color:' + sentColor + ';text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">📰 ' + p.news_sentiment + '</div>';
   }
   h += '<div class="hero-footer">';
-  h += '<span style="font-size:10px;color:#00ff88;font-weight:700">+$' + p.potential_profit_usd.toFixed(2) + '</span>';
+  h += '<span style="font-size:10px;color:#00ff88;font-weight:700">+' + (100 - p.price_cents) + '¢ if right</span>';
   h += '<button class="hero-execute" onclick="executePickTrade(this, ' + p._globalIdx + ')">Buy ' + sideWord + ' · $' + cost + '</button>';
   h += '</div>';
   h += '</div>';
