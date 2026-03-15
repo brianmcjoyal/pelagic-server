@@ -1595,6 +1595,13 @@ def top_picks():
         vol_bonus = 1.3 if kalshi_vol > 100 else 1.0 if kalshi_vol > 0 else 0.5
         score = win_prob * (1 + deviation) * plat_bonus * time_b * vol_bonus
 
+        # Real win likelihood: consensus-validated probability, discounted by uncertainty
+        # Cross-platform agreement = more reliable than single source
+        real_win = win_prob * (0.85 + 0.05 * min(len(matches), 3))  # 85-100% of market prob depending on matches
+        if kalshi_vol < 50:
+            real_win *= 0.85  # low volume = less reliable price
+        real_win = min(0.95, real_win)
+
         picks.append({
             "type": "consensus",
             "kalshi_ticker": km["id"],
@@ -1603,6 +1610,7 @@ def top_picks():
             "kalshi_url": km["url"],
             "yes_label": km.get("yes_label", "Yes"),
             "no_label": km.get("no_label", "No"),
+            "close_time": km.get("close_time"),
             "consensus_yes_price": round(consensus_yes, 4),
             "deviation": round(deviation, 4),
             "signal": signal,
@@ -1614,6 +1622,7 @@ def top_picks():
             "confidence": confidence,
             "platform_count": len(matches),
             "win_probability": round(win_prob, 4),
+            "real_win_likelihood": round(real_win, 4),
             "score": round(score, 4),
             "volume": kalshi_vol,
             "is_sports": km.get("is_sports", False),
@@ -1663,6 +1672,8 @@ def top_picks():
             win_prob = min(0.95, max(other_price, kalshi_side["price"]))
         else:
             win_prob = min(0.95, max(1 - other_price, 1 - kalshi_side["price"]))
+        # Arbitrage: cross-platform validated, apply 90% confidence to market prob
+        real_win = min(0.95, win_prob * 0.90)
         picks.append({
             "type": "arbitrage",
             "kalshi_ticker": ticker,
@@ -1671,6 +1682,7 @@ def top_picks():
             "kalshi_url": kalshi_side["url"],
             "yes_label": matched_km.get("yes_label", "Yes") if matched_km else "Yes",
             "no_label": matched_km.get("no_label", "No") if matched_km else "No",
+            "close_time": matched_km.get("close_time") if matched_km else None,
             "consensus_yes_price": buy_yes["price"] if buy_yes["platform"] != "kalshi" else 1 - buy_no["price"],
             "deviation": round(spread, 4),
             "signal": signal,
@@ -1682,6 +1694,7 @@ def top_picks():
             "confidence": "HIGH" if opp["estimated_profit"] > 0.05 else "MEDIUM" if opp["estimated_profit"] > 0.02 else "LOW",
             "platform_count": 1,
             "win_probability": round(win_prob, 4),
+            "real_win_likelihood": round(real_win, 4),
             "score": round(opp["estimated_profit"] * 10 + 0.5, 4),
             "is_sports": matched_km.get("is_sports", False) if matched_km else False,
             "prices": {
@@ -1759,6 +1772,11 @@ def top_picks():
         thesis += f" with {kalshi_vol:,} contracts traded."
         thesis += f" Buy {side_label} at {price_cents}¢ for {(100-price_cents)}¢ profit if correct."
 
+        # Single-platform: heavily discount — no independent validation
+        # High volume helps (more bettors = better price discovery)
+        vol_trust = 0.70 if kalshi_vol >= 5000 else 0.60 if kalshi_vol >= 1000 else 0.50 if kalshi_vol >= 100 else 0.40
+        real_win = min(0.90, win_prob * vol_trust)
+
         picks.append({
             "type": "news_researched",
             "kalshi_ticker": km["id"],
@@ -1767,6 +1785,7 @@ def top_picks():
             "kalshi_url": km["url"],
             "yes_label": km.get("yes_label", "Yes"),
             "no_label": km.get("no_label", "No"),
+            "close_time": km.get("close_time"),
             "consensus_yes_price": round(win_prob, 4),
             "deviation": round(abs(km["yes"] - 0.5), 4),
             "signal": signal,
@@ -1778,6 +1797,7 @@ def top_picks():
             "confidence": confidence,
             "platform_count": 0,
             "win_probability": round(win_prob, 4),
+            "real_win_likelihood": round(real_win, 4),
             "score": round(score, 4),
             "volume": kalshi_vol,
             "is_sports": km.get("is_sports", False),
@@ -1789,11 +1809,8 @@ def top_picks():
     sports_picks = sorted([p for p in picks if p.get("is_sports")], key=lambda x: x["score"], reverse=True)[:10]
     nonsports_picks = sorted([p for p in picks if not p.get("is_sports")], key=lambda x: x["score"], reverse=True)[:10]
 
-    # ── Top 5 hero picks: best overall bets ──
-    # Prioritize: consensus > arbitrage > single-platform, then by score
-    # This prevents 5 identical "92%" single-platform picks dominating the hero
-    type_bonus = {"consensus": 2.0, "arbitrage": 1.5, "news_researched": 1.0, "high_probability": 0.8}
-    all_sorted = sorted(picks, key=lambda x: x.get("score", 0) * type_bonus.get(x.get("type", ""), 1.0), reverse=True)
+    # ── Top 5 hero picks: ranked by real win likelihood (honest probability) ──
+    all_sorted = sorted(picks, key=lambda x: (x.get("real_win_likelihood", 0), x.get("score", 0)), reverse=True)
     hero_picks = all_sorted[:5]
     for i, p in enumerate(hero_picks):
         p["hero_rank"] = i + 1
@@ -2255,39 +2272,52 @@ function isSports(pick) {
   return !!pick.is_sports;
 }
 
+function formatSettleTime(closeTime) {
+  if (!closeTime) return 'TBD';
+  try {
+    var close = new Date(closeTime);
+    var now = new Date();
+    var diff = close - now;
+    if (diff <= 0) return 'Settling now';
+    var mins = Math.floor(diff / 60000);
+    var hrs = Math.floor(mins / 60);
+    var days = Math.floor(hrs / 24);
+    if (days > 365) return Math.floor(days/365) + 'y+';
+    if (days > 30) return Math.floor(days/30) + 'mo';
+    if (days > 0) return days + 'd ' + (hrs % 24) + 'h';
+    if (hrs > 0) return hrs + 'h ' + (mins % 60) + 'm';
+    return mins + 'm';
+  } catch(e) { return 'TBD'; }
+}
+
 function renderHeroCard(p, idx) {
   var sigClass = p.signal === 'buy_yes' ? 'yes' : 'no';
   var sigLabel = p.signal === 'buy_yes' ? 'BET YES' : 'BET NO';
-  var winPct = (p.win_probability || 0.5) * 100;
+  var realWin = (p.real_win_likelihood || p.win_probability || 0.5) * 100;
   var ct = Math.max(1, Math.floor(500 / p.price_cents));
   var cost = (p.price_cents * ct / 100).toFixed(2);
   var sideWord = p.signal === 'buy_yes' ? 'YES' : 'NO';
-  // Real edge = market probability - breakeven probability
-  // Breakeven = cost / payout = price_cents / 100
-  var breakeven = p.price_cents;  // you need to win this % to break even
-  var edge = winPct - breakeven;  // your actual advantage
-  var edgeColor = edge >= 10 ? '#00ff88' : edge >= 5 ? '#ff8c00' : edge >= 0 ? '#ffcc00' : '#ff4444';
   var isConsensus = p.type === 'consensus' || p.type === 'arbitrage';
-  var sourceLabel = isConsensus ? 'CROSS-PLATFORM' : 'MARKET PRICE';
-  var sourceColor = isConsensus ? '#00ff88' : '#888';
+  var sourceLabel = isConsensus ? 'CROSS-PLATFORM' : 'SINGLE PLATFORM';
+  var sourceColor = isConsensus ? '#00ff88' : '#666';
+  var winColor = realWin >= 70 ? '#00ff88' : realWin >= 50 ? '#ff8c00' : '#ff4444';
+  var settleTime = formatSettleTime(p.close_time);
 
   var h = '<div class="hero-card">';
   h += '<div class="hero-rank">#' + (idx + 1) + '</div>';
-  // Show edge prominently instead of raw market probability
-  if (edge > 0) {
-    h += '<div class="hero-prob" style="color:' + edgeColor + '">+' + edge.toFixed(0) + '%</div>';
-    h += '<div class="hero-label">Edge Over Breakeven</div>';
-  } else {
-    h += '<div class="hero-prob" style="color:#ff4444;font-size:22px">THIN</div>';
-    h += '<div class="hero-label">Marginal Edge</div>';
-  }
-  // Show market prob + cost breakdown
-  h += '<div style="display:flex;gap:8px;font-size:9px;color:#888;margin:3px 0">';
-  h += '<span>Market: <b style="color:#fff">' + winPct.toFixed(0) + '%</b></span>';
-  h += '<span>Cost: <b style="color:#fff">' + p.price_cents + '¢</b></span>';
-  h += '<span>Payout: <b style="color:#00ff88">$1.00</b></span>';
+  h += '<div class="hero-prob" style="color:' + winColor + '">' + realWin.toFixed(0) + '%</div>';
+  h += '<div class="hero-label">Likelihood of Winning</div>';
+  // Source + settlement time
+  h += '<div style="display:flex;gap:8px;font-size:8px;margin:3px 0;align-items:center">';
+  h += '<span style="color:' + sourceColor + ';text-transform:uppercase;letter-spacing:0.5px">' + sourceLabel + '</span>';
+  h += '<span style="color:#ff8c00;font-weight:700">⏱ ' + settleTime + '</span>';
   h += '</div>';
-  h += '<div style="font-size:8px;color:' + sourceColor + ';text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px">' + sourceLabel + '</div>';
+  // Cost breakdown
+  h += '<div style="display:flex;gap:8px;font-size:9px;color:#888;margin:2px 0">';
+  h += '<span>Cost: <b style="color:#fff">' + p.price_cents + '¢</b></span>';
+  h += '<span>Win: <b style="color:#00ff88">+' + (100 - p.price_cents) + '¢</b></span>';
+  h += '<span>Lose: <b style="color:#ff4444">-' + p.price_cents + '¢</b></span>';
+  h += '</div>';
 
   h += '<div class="hero-question"><a href="' + p.kalshi_url + '" target="_blank">' + p.kalshi_question + '</a></div>';
   var yesL = p.yes_label || 'Yes';
@@ -2304,7 +2334,7 @@ function renderHeroCard(p, idx) {
     h += '<div style="font-size:8px;color:' + sentColor + ';text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">📰 ' + p.news_sentiment + '</div>';
   }
   h += '<div class="hero-footer">';
-  h += '<span style="font-size:10px;color:#00ff88;font-weight:700">+' + (100 - p.price_cents) + '¢ if right</span>';
+  h += '<span style="font-size:9px;color:#888">' + (p.volume || 0).toLocaleString() + ' vol</span>';
   h += '<button class="hero-execute" onclick="executePickTrade(this, ' + p._globalIdx + ')">Buy ' + sideWord + ' · $' + cost + '</button>';
   h += '</div>';
   h += '</div>';
@@ -2536,11 +2566,11 @@ function renderPickCard(p, idx, prefix) {
   h += '<span class="pick-signal ' + sigClass + '">' + sigLabel + '</span>';
   h += '<span class="pick-conf ' + confClass + '">' + p.confidence + '</span>';
   h += '<span class="pick-meta" style="color:' + typeColor + '">' + typeLabel + '</span>';
-  var winPct = (p.win_probability || 0.5) * 100;
-  var winColor = winPct >= 70 ? '#00ff88' : winPct >= 55 ? '#ff8c00' : '#ff4444';
-  var winLabel = p.type === 'consensus' ? ' WIN' : p.type === 'arbitrage' ? ' ARB' : '';
-  h += '<span class="pick-meta" style="color:' + winColor + ';font-weight:700;font-size:1.2em">' + winPct.toFixed(0) + '%' + winLabel + '</span>';
-  if (p.deviation > 0.02) h += '<span class="pick-meta">EDGE <b>' + (p.deviation * 100).toFixed(0) + '%</b></span>';
+  var realWinPct = (p.real_win_likelihood || p.win_probability || 0.5) * 100;
+  var rwColor = realWinPct >= 70 ? '#00ff88' : realWinPct >= 50 ? '#ff8c00' : '#ff4444';
+  h += '<span class="pick-meta" style="color:' + rwColor + ';font-weight:700;font-size:1.2em">' + realWinPct.toFixed(0) + '%</span>';
+  var pickSettle = formatSettleTime(p.close_time);
+  h += '<span class="pick-meta" style="color:#ff8c00;font-weight:600">⏱ ' + pickSettle + '</span>';
   if (p.platform_count > 0) h += '<span class="pick-meta">' + p.platform_count + ' PLATFORM' + (p.platform_count > 1 ? 'S' : '') + '</span>';
   if (p.volume > 0) h += '<span class="pick-meta" style="color:#666">' + p.volume.toLocaleString() + ' vol</span>';
   h += '</div>';
