@@ -60,9 +60,9 @@ BOT_CONFIG = {
     "enabled": True,  # default ON — safety floor will auto-disable if needed
     "max_bet_usd": 5.0,           # max $5 per single trade — small, precise bets
     "max_daily_usd": 50.0,        # max $50/day total — capital preservation mode
-    "min_balance_usd": 50.0,      # stop all trading if cash below $50
-    "min_cash_reserve_pct": 0.50, # keep 50% of portfolio in cash
-    "max_open_positions": 10,     # max 10 positions — concentrated, high-conviction
+    "min_balance_usd": 10.0,      # stop all trading if cash below $10
+    "min_cash_reserve_pct": 0.05, # keep 5% of portfolio in cash — legacy positions skew ratio
+    "max_open_positions": 150,    # high limit — legacy positions settling, bot uses daily trade cap instead
     "min_deviation": 0.25,        # 25% mispricing vs consensus required — only big edges
     "min_platforms": 3,           # must appear on 3+ platforms — stronger validation
     "min_volume": 1000,           # minimum market volume — liquid markets only
@@ -1139,6 +1139,16 @@ def find_consensus_mispricings(all_markets):
     min_dev = 0.05  # 5% minimum deviation — any edge counts
     min_plats = 1   # Just 1 other platform agreeing is enough
 
+    # BLOCKED CATEGORIES — these markets lose money consistently
+    _BLOCKED_KEYWORDS = [
+        "temperature", "weather", "highest temp", "lowest temp", "degrees",
+        "fahrenheit", "celsius", "rainfall", "snow", "hurricane", "tornado",
+    ]
+
+    def _is_blocked_market(question):
+        q = question.lower()
+        return any(kw in q for kw in _BLOCKED_KEYWORDS)
+
     kalshi = []
     others = []
     for m in all_markets:
@@ -1147,6 +1157,9 @@ def find_consensus_mispricings(all_markets):
             continue
         # Skip parlays
         if m["platform"] == "kalshi" and _is_parlay_title(m.get("question", "")):
+            continue
+        # Skip weather/temperature markets — illiquid penny traps
+        if _is_blocked_market(m.get("question", "")):
             continue
         if m["platform"] == "kalshi":
             kalshi.append((nq, m))
@@ -3368,6 +3381,14 @@ def _background_loop():
         pass
 
     cycle = 0
+    # Pre-warm portfolio cache on startup so dashboard never shows --
+    try:
+        print("[STARTUP] Warming portfolio cache...")
+        with app.app_context():
+            portfolio_summary()
+        print("[STARTUP] Portfolio cache warm")
+    except Exception as e:
+        print(f"[STARTUP] Portfolio cache warm failed: {e}")
     while True:
         try:
             cycle += 1
@@ -3398,6 +3419,12 @@ def _background_loop():
                     pass
             # Warm the picks cache so /top-picks is fast
             _warm_picks_cache()
+            # Refresh portfolio cache so dashboard always has data
+            try:
+                with app.app_context():
+                    portfolio_summary()
+            except Exception:
+                pass
             # Enhanced auto-exit with trailing stops
             exits = enhanced_auto_exit()
             if not exits:
@@ -3819,9 +3846,20 @@ def settled_positions():
         return jsonify({"settled": [], "error": str(e)})
 
 
+_PORTFOLIO_CACHE = {"data": None, "ts": 0}
+_PORTFOLIO_CACHE_TTL = 15  # seconds — serve cached data between refreshes
+
 @app.route("/portfolio-summary")
 def portfolio_summary():
-    """Combined portfolio view: open positions + settled record + balance."""
+    """Combined portfolio view: open positions + settled record + balance.
+    Caches results for 15s so the dashboard always shows something."""
+    import time as _time
+    now = _time.time()
+
+    # Return cached data if fresh enough
+    if _PORTFOLIO_CACHE["data"] and (now - _PORTFOLIO_CACHE["ts"]) < _PORTFOLIO_CACHE_TTL:
+        return jsonify(_PORTFOLIO_CACHE["data"])
+
     try:
         # Balance
         bal_path = "/portfolio/balance"
@@ -3832,7 +3870,9 @@ def portfolio_summary():
             if bal_r.ok:
                 balance_usd = bal_r.json().get("balance", 0) / 100
         except Exception:
-            pass
+            # Use cached balance if API fails
+            if _PORTFOLIO_CACHE["data"]:
+                balance_usd = _PORTFOLIO_CACHE["data"].get("balance_usd", 0)
 
         # Open positions with P&L
         open_positions = check_position_prices()
@@ -3886,7 +3926,7 @@ def portfolio_summary():
         # Portfolio value = cash + current market value of positions (matches Kalshi)
         portfolio_value = balance_usd + total_market_value
 
-        return jsonify({
+        result = {
             "balance_usd": round(balance_usd, 2),
             "portfolio_value_usd": round(portfolio_value, 2),
             "positions_value_usd": round(total_market_value, 2),
@@ -3900,8 +3940,17 @@ def portfolio_summary():
             "win_rate": win_rate,
             "total_realized_usd": round(total_realized, 2),
             "settled_history": settled_list[-20:],
-        })
+        }
+
+        # Update cache
+        _PORTFOLIO_CACHE["data"] = result
+        _PORTFOLIO_CACHE["ts"] = now
+
+        return jsonify(result)
     except Exception as e:
+        # On total failure, return cached data if available
+        if _PORTFOLIO_CACHE["data"]:
+            return jsonify(_PORTFOLIO_CACHE["data"])
         return jsonify({"error": str(e)})
 
 
