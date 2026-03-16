@@ -1456,6 +1456,11 @@ def auto_exit_check():
 
         action = None
         reason = None
+
+        # Skip penny positions — no buyers exist, let them settle naturally
+        if current and current < 20:
+            continue
+
         if pnl_pct >= TAKE_PROFIT_PCT:
             action = "take_profit"
             reason = f"Up {pnl_pct}% — taking profit"
