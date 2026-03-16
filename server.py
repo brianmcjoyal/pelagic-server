@@ -3381,44 +3381,7 @@ def _background_loop():
         pass
 
     cycle = 0
-    # Pre-warm portfolio cache on startup so dashboard never shows --
-    # Delay to let gunicorn finish booting first
-    _time.sleep(5)
-    try:
-        print("[STARTUP] Warming portfolio cache...")
-        # Fetch balance + positions directly (no Flask context needed)
-        _bal = 0
-        try:
-            _bh = signed_headers("GET", "/portfolio/balance")
-            _br = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
-                              headers=_bh, timeout=10)
-            if _br.ok:
-                _bal = _br.json().get("balance", 0) / 100
-        except Exception:
-            pass
-        _pos = []
-        try:
-            _pos = check_position_prices()
-        except Exception:
-            pass
-        _mv = sum((p.get("current_price") or p.get("entry_price") or 0) * p.get("count", 0)
-                  for p in _pos) / 100
-        _PORTFOLIO_CACHE["data"] = {
-            "balance_usd": round(_bal, 2),
-            "portfolio_value_usd": round(_bal + _mv, 2),
-            "positions_value_usd": round(_mv, 2),
-            "open_positions": _pos,
-            "open_count": len(_pos),
-            "total_invested_usd": round(sum(p.get("market_exposure_cents", 0) for p in _pos) / 100, 2),
-            "total_unrealized_usd": 0,
-            "wins": 0, "losses": 0, "breakeven": 0, "win_rate": 0,
-            "total_realized_usd": 0,
-            "settled_history": [],
-        }
-        _PORTFOLIO_CACHE["ts"] = _time.time()
-        print(f"[STARTUP] Portfolio cache warm: ${_bal:.2f} cash, {len(_pos)} positions")
-    except Exception as e:
-        print(f"[STARTUP] Portfolio cache warm failed: {e}")
+    # Portfolio cache warms naturally on first background cycle — no startup delay
     while True:
         try:
             cycle += 1
