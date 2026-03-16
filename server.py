@@ -1130,8 +1130,188 @@ def place_kalshi_order(ticker, side, price_cents, count=1):
     except Exception as e:
         return {"error": str(e)}
 
+def sell_kalshi_position(ticker, side, price_cents, count=1):
+    """Sell an existing position on Kalshi."""
+    path = "/portfolio/orders"
+    headers = signed_headers("POST", path)
+    if not headers:
+        return {"error": "No API key"}
+
+    price_dollars = f"{price_cents / 100:.4f}"
+    payload = {
+        "ticker": ticker,
+        "action": "sell",
+        "side": side,
+        "type": "limit",
+        "count": count,
+        "client_order_id": str(uuid.uuid4()),
+        "time_in_force": "immediate_or_cancel",
+    }
+    if side == "yes":
+        payload["yes_price_dollars"] = price_dollars
+    else:
+        payload["no_price_dollars"] = price_dollars
+
+    try:
+        resp = requests.post(
+            KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
+            headers=headers,
+            json=payload,
+            timeout=TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except requests.exceptions.HTTPError as e:
+        body = ""
+        try:
+            body = e.response.text
+        except Exception:
+            pass
+        return {"error": str(e), "response_body": body}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def check_position_prices():
+    """Check current market prices for all open positions.
+    Returns list of positions with current price, entry price, P&L."""
+    path = "/portfolio/positions"
+    headers = signed_headers("GET", path)
+    if not headers:
+        return []
+    try:
+        resp = requests.get(
+            KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
+            headers=headers,
+            params={"limit": 100, "settlement_status": "unsettled"},
+            timeout=TIMEOUT,
+        )
+        resp.raise_for_status()
+        positions_list = resp.json().get("market_positions", [])
+        enriched = []
+        for pos in positions_list:
+            ticker = pos.get("ticker", "")
+            position_count = pos.get("position", 0)
+            if position_count == 0:
+                continue  # no active position
+
+            # Get current market price
+            market_path = f"/markets/{ticker}"
+            mkt_headers = signed_headers("GET", market_path)
+            title = ticker
+            current_yes_price = None
+            current_no_price = None
+            close_time = None
+            try:
+                mkt_resp = requests.get(
+                    KALSHI_BASE_URL + KALSHI_API_PREFIX + market_path,
+                    headers=mkt_headers, timeout=5,
+                )
+                if mkt_resp.ok:
+                    mkt = mkt_resp.json().get("market", {})
+                    title = mkt.get("title", ticker)
+                    close_time = mkt.get("expected_expiration_time") or mkt.get("close_time")
+                    # Get current ask prices
+                    yes_ask = mkt.get("yes_ask_dollars") or mkt.get("yes_ask")
+                    no_ask = mkt.get("no_ask_dollars") or mkt.get("no_ask")
+                    if yes_ask:
+                        try:
+                            current_yes_price = int(round(float(yes_ask) * 100)) if isinstance(yes_ask, str) else int(yes_ask * 100 if yes_ask < 1 else yes_ask)
+                        except Exception:
+                            pass
+                    if no_ask:
+                        try:
+                            current_no_price = int(round(float(no_ask) * 100)) if isinstance(no_ask, str) else int(no_ask * 100 if no_ask < 1 else no_ask)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            # Determine our side and calculate P&L
+            # position > 0 means we hold YES, position < 0 means we hold NO
+            side = "yes" if position_count > 0 else "no"
+            abs_count = abs(position_count)
+
+            # Find our entry price from trade history
+            entry_price = None
+            for t in BOT_STATE.get("all_trades", []):
+                if t.get("ticker") == ticker:
+                    entry_price = t.get("price_cents")
+                    break
+
+            current_price = current_yes_price if side == "yes" else current_no_price
+            unrealized_pnl = None
+            pnl_pct = None
+            if entry_price and current_price:
+                unrealized_pnl = (current_price - entry_price) * abs_count
+                pnl_pct = round((current_price - entry_price) / max(1, entry_price) * 100, 1)
+
+            enriched.append({
+                "ticker": ticker,
+                "title": title,
+                "side": side,
+                "count": abs_count,
+                "entry_price": entry_price,
+                "current_price": current_price,
+                "current_yes": current_yes_price,
+                "current_no": current_no_price,
+                "unrealized_pnl_cents": unrealized_pnl,
+                "pnl_pct": pnl_pct,
+                "close_time": close_time,
+            })
+        return enriched
+    except Exception as e:
+        print(f"[MONITOR] Error: {e}")
+        return []
+
+
+# Auto-exit thresholds
+TAKE_PROFIT_PCT = 20   # sell when up 20%+
+STOP_LOSS_PCT = -15     # sell when down 15%+
+
+def auto_exit_check():
+    """Check positions and auto-exit based on profit/loss thresholds."""
+    if not BOT_CONFIG.get("enabled"):
+        return []  # only auto-exit when bot is enabled
+    positions = check_position_prices()
+    exits = []
+    for pos in positions:
+        pnl_pct = pos.get("pnl_pct")
+        if pnl_pct is None:
+            continue
+        ticker = pos["ticker"]
+        side = pos["side"]
+        count = pos["count"]
+        current = pos["current_price"]
+
+        action = None
+        reason = None
+        if pnl_pct >= TAKE_PROFIT_PCT:
+            action = "take_profit"
+            reason = f"Up {pnl_pct}% — taking profit"
+        elif pnl_pct <= STOP_LOSS_PCT:
+            action = "stop_loss"
+            reason = f"Down {pnl_pct}% — cutting losses"
+
+        if action and current:
+            # Sell at current bid (slightly below ask for instant fill)
+            sell_price = max(1, current - 1)
+            result = sell_kalshi_position(ticker, side, sell_price, count)
+            exits.append({
+                "ticker": ticker,
+                "title": pos["title"],
+                "action": action,
+                "reason": reason,
+                "pnl_pct": pnl_pct,
+                "sell_price": sell_price,
+                "result": result,
+            })
+            print(f"[AUTO-EXIT] {action}: {ticker} at {sell_price}c ({reason})")
+    return exits
+
+
 # ---------------------------------------------------------------------------
-# Bot scanner (runs every 10 minutes)
+# Bot scanner
 # ---------------------------------------------------------------------------
 
 def run_bot_scan():
@@ -1221,15 +1401,22 @@ import threading
 import time as _time
 
 def _background_loop():
-    """Simple background loop that runs scans and warms cache."""
+    """Simple background loop that runs scans, warms cache, monitors positions."""
     _time.sleep(10)  # wait for server to fully start
     print("[BG] Background loop started")
+    cycle = 0
     while True:
         try:
+            cycle += 1
             # Run bot scan (updates BOT_STATE for status endpoint)
             run_bot_scan()
             # Warm the picks cache so /top-picks is fast
             _warm_picks_cache()
+            # Check positions for auto-exit every cycle
+            exits = auto_exit_check()
+            if exits:
+                for ex in exits:
+                    print(f"[BG] Auto-exit: {ex['action']} on {ex['ticker']} ({ex['reason']})")
         except Exception as e:
             import traceback
             print(f"[BG] Error in background loop: {e}")
@@ -2060,7 +2247,7 @@ def top_picks():
         })
         existing_tickers.add(km["id"])
 
-    MAX_SETTLE_DAYS = 90  # 3 months max — we need compounding!
+    MAX_SETTLE_DAYS = 180  # 6 months — we can exit early via sell, so longer horizon is OK
 
     def _days_to_settle(p):
         ct = p.get("close_time")
@@ -2329,6 +2516,44 @@ def execute_trade():
         BOT_STATE["daily_spent_usd"] += trade_record["cost_usd"]
     _save_state()
     return jsonify(trade_record)
+
+
+@app.route("/sell-position", methods=["POST"])
+def sell_position():
+    """Sell an open position."""
+    data = request.get_json(force=True)
+    ticker = data.get("ticker")
+    side = data.get("side")
+    price_cents = data.get("price_cents")
+    count = data.get("count", 1)
+    if not all([ticker, side, price_cents]):
+        return jsonify({"error": "Missing ticker, side, or price_cents"}), 400
+    result = sell_kalshi_position(ticker, side, int(price_cents), int(count))
+    trade_record = {
+        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "ticker": ticker,
+        "side": side,
+        "action": "sell",
+        "price_cents": int(price_cents),
+        "count": int(count),
+        "result": result,
+        "success": "error" not in result,
+    }
+    BOT_STATE["all_trades"].append(trade_record)
+    _save_state()
+    return jsonify(trade_record)
+
+
+@app.route("/position-monitor")
+def position_monitor():
+    """Get all open positions with current prices and P&L."""
+    positions = check_position_prices()
+    return jsonify({
+        "positions": positions,
+        "auto_exit_enabled": BOT_CONFIG.get("enabled", False),
+        "take_profit_pct": TAKE_PROFIT_PCT,
+        "stop_loss_pct": STOP_LOSS_PCT,
+    })
 
 
 @app.route("/")
@@ -3292,50 +3517,71 @@ async function executeTodayTrade(btn, idx) {
 
 async function loadPositions() {
   try {
-    const data = await fetch(API + '/positions').then(r => r.json());
+    // Use position-monitor for enriched data with current prices
+    const data = await fetch(API + '/position-monitor').then(r => r.json());
     const positions = data.positions || [];
     document.getElementById('pos-badge').textContent = positions.length;
     if (positions.length === 0) {
       document.getElementById('pos-table').innerHTML = '<div class="empty">No open positions. Place a trade to get started.</div>';
       return;
     }
-    let html = '<table><tr><th>Market</th><th>Contracts</th><th>Exposure</th><th>Time Left</th><th>Status</th></tr>';
+    let html = '<table><tr><th>Market</th><th>Side</th><th>Qty</th><th>Entry</th><th>Now</th><th>P&L</th><th>Time Left</th><th>Action</th></tr>';
     positions.forEach(p => {
-      let timeLeft = '--';
-      let statusClass = 'result-pending';
-      let statusLabel = 'Active';
-      if (p.result) {
-        statusLabel = p.result === 'yes' ? 'WON' : 'LOST';
-        statusClass = p.result === 'yes' ? 'result-win' : 'result-loss';
-        timeLeft = 'Settled';
-      } else if (p.close_time) {
-        const close = new Date(p.close_time);
-        const now = new Date();
-        const diff = close - now;
-        if (diff <= 0) {
-          timeLeft = 'Settling...';
-        } else {
-          const mins = Math.floor(diff / 60000);
-          const hrs = Math.floor(mins / 60);
-          const days = Math.floor(hrs / 24);
-          if (days > 0) timeLeft = days + 'd ' + (hrs % 24) + 'h';
-          else if (hrs > 0) timeLeft = hrs + 'h ' + (mins % 60) + 'm';
-          else timeLeft = mins + 'm';
-        }
+      var timeLeft = formatSettleTime(p.close_time);
+      var pnlText = '--';
+      var pnlColor = '#888';
+      if (p.pnl_pct !== null && p.pnl_pct !== undefined) {
+        pnlColor = p.pnl_pct >= 0 ? '#00ff88' : '#ff4444';
+        var pnlCents = p.unrealized_pnl_cents || 0;
+        pnlText = (p.pnl_pct >= 0 ? '+' : '') + p.pnl_pct + '% (' + (pnlCents >= 0 ? '+' : '') + (pnlCents / 100).toFixed(2) + ')';
       }
-      const exposure = (p.market_exposure / 100).toFixed(2);
+      var sideColor = p.side === 'yes' ? '#00ff88' : '#ff4444';
+      var sellPrice = p.current_price ? Math.max(1, p.current_price - 1) : 0;
       html += '<tr>';
-      html += '<td>' + (p.title || p.ticker).substring(0, 60) + '</td>';
-      html += '<td>' + p.yes_contracts + '</td>';
-      html += '<td>$' + exposure + '</td>';
-      html += '<td style="color:#ff8c00;font-weight:600">' + timeLeft + '</td>';
-      html += '<td class="' + statusClass + '">' + statusLabel + '</td>';
+      html += '<td style="max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (p.title || p.ticker) + '</td>';
+      html += '<td style="color:' + sideColor + ';font-weight:700">' + p.side.toUpperCase() + '</td>';
+      html += '<td>' + p.count + '</td>';
+      html += '<td>' + (p.entry_price || '?') + 'c</td>';
+      html += '<td style="font-weight:700">' + (p.current_price || '?') + 'c</td>';
+      html += '<td style="color:' + pnlColor + ';font-weight:700">' + pnlText + '</td>';
+      html += '<td style="color:#ff8c00">' + timeLeft + '</td>';
+      if (sellPrice > 0) {
+        html += '<td><button class="hero-execute" style="font-size:9px;padding:3px 8px" onclick="sellPosition(\'' + p.ticker + '\',\'' + p.side + '\',' + sellPrice + ',' + p.count + ')">SELL ' + sellPrice + 'c</button></td>';
+      } else {
+        html += '<td style="color:#555">--</td>';
+      }
       html += '</tr>';
     });
     html += '</table>';
+    // Auto-exit status
+    if (data.auto_exit_enabled) {
+      html += '<div style="margin-top:6px;font-size:8px;color:#00ff88">Auto-exit active: sell at +' + data.take_profit_pct + '% / stop at ' + data.stop_loss_pct + '%</div>';
+    } else {
+      html += '<div style="margin-top:6px;font-size:8px;color:#666">Auto-exit OFF (enable auto-trade to activate)</div>';
+    }
     document.getElementById('pos-table').innerHTML = html;
   } catch(e) {
     document.getElementById('pos-table').innerHTML = '<div class="empty">Error: ' + e.message + '</div>';
+  }
+}
+
+async function sellPosition(ticker, side, priceCents, count) {
+  if (!confirm('Sell ' + count + ' ' + side.toUpperCase() + ' contracts of ' + ticker + ' at ' + priceCents + 'c?')) return;
+  try {
+    const resp = await fetch(API + '/sell-position', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ticker: ticker, side: side, price_cents: priceCents, count: count})
+    });
+    const data = await resp.json();
+    if (data.success) {
+      showToast('Sold ' + count + ' contracts at ' + priceCents + 'c', 'success');
+    } else {
+      showToast('Sell failed: ' + (data.result ? data.result.error || data.result.response_body : 'Unknown'), 'error');
+    }
+    loadPositions();
+  } catch(e) {
+    showToast('Sell error: ' + e.message, 'error');
   }
 }
 
