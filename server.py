@@ -3382,11 +3382,41 @@ def _background_loop():
 
     cycle = 0
     # Pre-warm portfolio cache on startup so dashboard never shows --
+    # Delay to let gunicorn finish booting first
+    _time.sleep(5)
     try:
         print("[STARTUP] Warming portfolio cache...")
-        with app.app_context():
-            portfolio_summary()
-        print("[STARTUP] Portfolio cache warm")
+        # Fetch balance + positions directly (no Flask context needed)
+        _bal = 0
+        try:
+            _bh = signed_headers("GET", "/portfolio/balance")
+            _br = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
+                              headers=_bh, timeout=10)
+            if _br.ok:
+                _bal = _br.json().get("balance", 0) / 100
+        except Exception:
+            pass
+        _pos = []
+        try:
+            _pos = check_position_prices()
+        except Exception:
+            pass
+        _mv = sum((p.get("current_price") or p.get("entry_price") or 0) * p.get("count", 0)
+                  for p in _pos) / 100
+        _PORTFOLIO_CACHE["data"] = {
+            "balance_usd": round(_bal, 2),
+            "portfolio_value_usd": round(_bal + _mv, 2),
+            "positions_value_usd": round(_mv, 2),
+            "open_positions": _pos,
+            "open_count": len(_pos),
+            "total_invested_usd": round(sum(p.get("market_exposure_cents", 0) for p in _pos) / 100, 2),
+            "total_unrealized_usd": 0,
+            "wins": 0, "losses": 0, "breakeven": 0, "win_rate": 0,
+            "total_realized_usd": 0,
+            "settled_history": [],
+        }
+        _PORTFOLIO_CACHE["ts"] = _time.time()
+        print(f"[STARTUP] Portfolio cache warm: ${_bal:.2f} cash, {len(_pos)} positions")
     except Exception as e:
         print(f"[STARTUP] Portfolio cache warm failed: {e}")
     while True:
@@ -3421,8 +3451,39 @@ def _background_loop():
             _warm_picks_cache()
             # Refresh portfolio cache so dashboard always has data
             try:
-                with app.app_context():
-                    portfolio_summary()
+                _bal2 = 0
+                try:
+                    _bh2 = signed_headers("GET", "/portfolio/balance")
+                    _br2 = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
+                                       headers=_bh2, timeout=10)
+                    if _br2.ok:
+                        _bal2 = _br2.json().get("balance", 0) / 100
+                except Exception:
+                    if _PORTFOLIO_CACHE["data"]:
+                        _bal2 = _PORTFOLIO_CACHE["data"].get("balance_usd", 0)
+                _pos2 = []
+                try:
+                    _pos2 = check_position_prices()
+                except Exception:
+                    pass
+                _mv2 = sum((p.get("current_price") or p.get("entry_price") or 0) * p.get("count", 0)
+                           for p in _pos2) / 100
+                _PORTFOLIO_CACHE["data"] = {
+                    "balance_usd": round(_bal2, 2),
+                    "portfolio_value_usd": round(_bal2 + _mv2, 2),
+                    "positions_value_usd": round(_mv2, 2),
+                    "open_positions": _pos2,
+                    "open_count": len(_pos2),
+                    "total_invested_usd": round(sum(p.get("market_exposure_cents", 0) for p in _pos2) / 100, 2),
+                    "total_unrealized_usd": round(sum((p.get("unrealized_pnl_cents") or 0) for p in _pos2) / 100, 2),
+                    "wins": _PORTFOLIO_CACHE["data"].get("wins", 0) if _PORTFOLIO_CACHE["data"] else 0,
+                    "losses": _PORTFOLIO_CACHE["data"].get("losses", 0) if _PORTFOLIO_CACHE["data"] else 0,
+                    "breakeven": 0,
+                    "win_rate": _PORTFOLIO_CACHE["data"].get("win_rate", 0) if _PORTFOLIO_CACHE["data"] else 0,
+                    "total_realized_usd": _PORTFOLIO_CACHE["data"].get("total_realized_usd", 0) if _PORTFOLIO_CACHE["data"] else 0,
+                    "settled_history": _PORTFOLIO_CACHE["data"].get("settled_history", []) if _PORTFOLIO_CACHE["data"] else [],
+                }
+                _PORTFOLIO_CACHE["ts"] = _time.time()
             except Exception:
                 pass
             # Enhanced auto-exit with trailing stops
