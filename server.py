@@ -2884,10 +2884,16 @@ a:hover { text-decoration: underline; }
 .portfolio-stats .pstat { background: #050505; border: 1px solid #222; padding: 6px 10px; flex: 1; min-width: 90px; text-align: center; }
 .portfolio-stats .pstat .plabel { font-size: 7px; color: #666; text-transform: uppercase; letter-spacing: 1px; }
 .portfolio-stats .pstat .pval { font-size: 16px; font-weight: 800; font-family: 'Courier New', monospace; margin-top: 1px; }
+.pos-scroll { max-height: 560px; overflow-y: auto; border: 1px solid #1a1a1a; }
+.pos-scroll::-webkit-scrollbar { width: 6px; }
+.pos-scroll::-webkit-scrollbar-thumb { background: #444; border-radius: 3px; }
+.pos-scroll::-webkit-scrollbar-track { background: #0a0a0a; }
 .pos-table-compact { width: 100%; border-collapse: collapse; }
-.pos-table-compact th { text-align: left; padding: 4px 6px; font-size: 8px; color: #666; text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid #222; }
-.pos-table-compact td { padding: 5px 6px; font-size: 10px; color: #ccc; border-bottom: 1px solid #111; }
+.pos-table-compact thead { position: sticky; top: 0; z-index: 1; }
+.pos-table-compact th { text-align: left; padding: 2px 5px; font-size: 7px; color: #666; text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid #222; background: #0a0a0a; }
+.pos-table-compact td { padding: 2px 5px; font-size: 9px; color: #ccc; border-bottom: 1px solid #0d0d0d; line-height: 1.15; }
 .pos-table-compact tr:hover { background: #111; }
+.pos-count { font-size: 9px; color: #888; margin-left: 8px; }
 .wr-bar { height: 4px; background: #1a1a1a; margin-top: 3px; border-radius: 2px; overflow: hidden; }
 .wr-bar .fill { height: 100%; border-radius: 2px; }
 /* Top Picks - compact grid */
@@ -3291,34 +3297,48 @@ async function loadPortfolio() {
       posEl.innerHTML = '<div style="color:#555;font-size:10px;padding:6px">No open positions</div>';
       return;
     }
-    var html = '<table class="pos-table-compact"><tr><th>Market</th><th>Side</th><th>Qty</th><th>Entry</th><th>Now</th><th>P&L</th><th>Expires</th><th></th></tr>';
+    // Sort: biggest P&L movers first, then alphabetical
+    positions.sort(function(a, b) {
+      var aPnl = Math.abs(a.pnl_pct || 0);
+      var bPnl = Math.abs(b.pnl_pct || 0);
+      return bPnl - aPnl;
+    });
+    var html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">';
+    html += '<span class="pos-count">' + positions.length + ' open positions</span>';
+    var totalUp = positions.filter(function(p) { return (p.pnl_pct || 0) > 0; }).length;
+    var totalDown = positions.filter(function(p) { return (p.pnl_pct || 0) < 0; }).length;
+    var totalFlat = positions.length - totalUp - totalDown;
+    html += '<span class="pos-count"><span style="color:#00ff88">' + totalUp + ' up</span> · <span style="color:#ff4444">' + totalDown + ' down</span> · <span style="color:#555">' + totalFlat + ' flat</span></span>';
+    html += '</div>';
+    html += '<div class="pos-scroll"><table class="pos-table-compact"><thead><tr><th>Market</th><th>Side</th><th>Qty</th><th>Entry</th><th>Now</th><th>P&L</th><th>Exp</th><th></th></tr></thead><tbody>';
     positions.forEach(function(p) {
       var sideColor = p.side === 'yes' ? '#00ff88' : '#ff4444';
       var pnlText = '--';
       var pnlColor = '#555';
       if (p.pnl_pct !== null && p.pnl_pct !== undefined) {
-        pnlColor = p.pnl_pct >= 0 ? '#00ff88' : '#ff4444';
+        pnlColor = p.pnl_pct > 0 ? '#00ff88' : p.pnl_pct < 0 ? '#ff4444' : '#555';
         var cents = p.unrealized_pnl_cents || 0;
-        pnlText = (p.pnl_pct >= 0 ? '+' : '') + p.pnl_pct + '% (' + (cents >= 0 ? '+' : '') + '$' + (Math.abs(cents) / 100).toFixed(2) + ')';
+        pnlText = (p.pnl_pct >= 0 ? '+' : '') + p.pnl_pct + '%';
+        if (Math.abs(cents) >= 1) pnlText += ' ($' + (cents >= 0 ? '+' : '-') + (Math.abs(cents) / 100).toFixed(2) + ')';
       }
       var timeLeft = formatSettleTime(p.close_time);
       var sellPrice = p.current_price ? Math.max(1, p.current_price - 1) : 0;
       html += '<tr>';
-      html += '<td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><a href="https://kalshi.com/markets/' + p.ticker + '" target="_blank" style="color:#ddd">' + (p.title || p.ticker) + '</a></td>';
-      html += '<td style="color:' + sideColor + ';font-weight:700">' + p.side.toUpperCase() + '</td>';
-      html += '<td>' + p.count + '</td>';
-      html += '<td>' + (p.entry_price || '?') + 'c</td>';
-      html += '<td style="font-weight:700">' + (p.current_price || '?') + 'c</td>';
-      html += '<td style="color:' + pnlColor + ';font-weight:700">' + pnlText + '</td>';
-      html += '<td style="color:#ff8c00;font-size:9px">' + timeLeft + '</td>';
+      html += '<td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><a href="https://kalshi.com/markets/' + p.ticker + '" target="_blank" style="color:#ddd">' + (p.title || p.ticker) + '</a></td>';
+      html += '<td style="color:' + sideColor + ';font-weight:700;font-size:8px">' + p.side.toUpperCase() + '</td>';
+      html += '<td style="font-size:8px">' + p.count + '</td>';
+      html += '<td style="font-size:8px">' + (p.entry_price || '?') + 'c</td>';
+      html += '<td style="font-weight:700;font-size:8px">' + (p.current_price || '?') + 'c</td>';
+      html += '<td style="color:' + pnlColor + ';font-weight:700;font-size:8px">' + pnlText + '</td>';
+      html += '<td style="color:#ff8c00;font-size:8px">' + timeLeft + '</td>';
       if (sellPrice > 0) {
-        html += '<td><button class="hero-execute" style="font-size:8px;padding:2px 6px" onclick="sellPosition(&quot;' + p.ticker + '&quot;,&quot;' + p.side + '&quot;,' + sellPrice + ',' + p.count + ')">SELL</button></td>';
+        html += '<td><button class="hero-execute" style="font-size:7px;padding:1px 5px" onclick="sellPosition(&quot;' + p.ticker + '&quot;,&quot;' + p.side + '&quot;,' + sellPrice + ',' + p.count + ')">SELL</button></td>';
       } else {
         html += '<td></td>';
       }
       html += '</tr>';
     });
-    html += '</table>';
+    html += '</tbody></table></div>';
     posEl.innerHTML = html;
   } catch(e) {
     console.error('Portfolio load error:', e);
