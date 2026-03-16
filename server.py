@@ -1724,11 +1724,11 @@ LIVE_GAME_SERIES = [
 ]
 
 # Sniper settings
-SNIPE_MIN_PRICE = 90   # cents — buy if price >= 90c (high probability)
-SNIPE_MAX_PRICE = 97   # cents — don't buy at 98-99c (too little profit)
-SNIPE_BET_USD = 10.0   # dollars per snipe trade
-SNIPE_MAX_DAILY = 100.0 # max daily spend on snipes
-SNIPE_MAX_TRADES = 20   # max 20 snipes per day — more opportunities in live sports
+SNIPE_MIN_PRICE = 70   # cents — buy if price >= 70c (Brian's winning range)
+SNIPE_MAX_PRICE = 90   # cents — don't buy above 90c (too little profit margin)
+SNIPE_BET_USD = 15.0   # dollars per snipe trade — match Brian's $10-20 style
+SNIPE_MAX_DAILY = 50.0  # max daily spend on snipes
+SNIPE_MAX_TRADES = 10   # max 10 snipes per day — quality over quantity
 
 BOT_STATE["snipe_trades_today"] = []
 BOT_STATE["snipe_daily_spent"] = 0.0
@@ -1829,6 +1829,11 @@ def live_game_snipe():
                     if mcat in blocked:
                         continue
 
+                # Volume check — only snipe liquid markets
+                mkt_volume = mkt.get("volume", 0) or 0
+                if mkt_volume < 50:
+                    continue
+
                 # Parse prices
                 yes_ask = None
                 no_ask = None
@@ -1864,8 +1869,8 @@ def live_game_snipe():
                 if total_daily >= BOT_CONFIG["max_daily_usd"]:
                     break
 
-                # Calculate quantity — target SNIPE_BET_USD
-                count = max(1, min(10, int(SNIPE_BET_USD * 100 / price)))
+                # Calculate quantity — target SNIPE_BET_USD (up to 25 contracts)
+                count = max(1, min(25, int(SNIPE_BET_USD * 100 / price)))
                 cost_usd = (price * count) / 100.0
 
                 if BOT_STATE["snipe_daily_spent"] + cost_usd > SNIPE_MAX_DAILY:
@@ -1874,7 +1879,7 @@ def live_game_snipe():
                 # Check expected profit — only snipe if profit is meaningful
                 profit_per = 100 - price  # cents profit per contract if we win
                 expected_profit = profit_per * count / 100.0
-                if expected_profit < 0.10:  # skip if less than 10 cents potential
+                if expected_profit < 1.00:  # skip if less than $1 potential profit
                     continue
 
                 _log_activity(
