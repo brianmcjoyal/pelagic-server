@@ -2060,13 +2060,39 @@ def top_picks():
         })
         existing_tickers.add(km["id"])
 
+    MAX_SETTLE_DAYS = 90  # 3 months max — we need compounding!
+
+    def _days_to_settle(p):
+        ct = p.get("close_time")
+        if not ct:
+            return 9999
+        try:
+            exp = datetime.datetime.fromisoformat(ct.replace("Z", "+00:00").replace("+00:00", ""))
+            return max(0, (exp - now).total_seconds() / 86400)
+        except Exception:
+            return 9999
+
+    # ── Filter ALL picks to 90-day max settlement ──
+    picks = [p for p in picks if _days_to_settle(p) <= MAX_SETTLE_DAYS]
+
     # ── Split into sports & non-sports, return exactly 10 each ──
     sports_picks = sorted([p for p in picks if p.get("is_sports")], key=lambda x: x["score"], reverse=True)[:10]
     nonsports_picks = sorted([p for p in picks if not p.get("is_sports")], key=lambda x: x["score"], reverse=True)[:10]
 
-    # ── Top 5 hero picks: ranked by real win likelihood (honest probability) ──
-    # Filter: must have volume, must settle within 90 days, must have real edge
+    # ── Top 5 hero picks: ranked by cross-platform confidence ──
+
+    def _days_to_settle(p):
+        ct = p.get("close_time")
+        if not ct:
+            return 9999
+        try:
+            exp = datetime.datetime.fromisoformat(ct.replace("Z", "+00:00").replace("+00:00", ""))
+            return max(0, (exp - now).total_seconds() / 86400)
+        except Exception:
+            return 9999
+
     def _is_hero_worthy(p):
+        # 90-day filter already applied globally above
         # Must have SOME volume (people actually trading)
         if (p.get("volume") or 0) < 10:
             return False
@@ -2076,7 +2102,7 @@ def top_picks():
         # Filter out terrible risk/reward — if you pay 90¢+ to win $1,
         # the profit is tiny but the loss is huge. Skip these.
         price = p.get("price_cents", 50)
-        if price > 90:  # paying 90¢+ for $1 = max 10¢ profit
+        if price > 90:
             return False
         # Also skip super cheap (<5¢) — usually longshots with no edge
         if price < 5:
