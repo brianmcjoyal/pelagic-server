@@ -2253,7 +2253,7 @@ def _generate_picks():
         })
         existing_tickers.add(km["id"])
 
-    MAX_SETTLE_DAYS = 180  # 6 months — we can exit early via sell, so longer horizon is OK
+    MAX_SETTLE_DAYS = 365 * 5  # No limit — we sell positions for profit, don't wait for settlement
 
     def _days_to_settle(p):
         ct = p.get("close_time")
@@ -2318,14 +2318,21 @@ def _generate_picks():
         return True
 
     hero_candidates = [p for p in picks if _is_hero_worthy(p)]
-    # Rank by: time_bonus (settle soon) * cross-platform * edge * volume
+    # Rank by: edge size * platform validation * volume (liquidity)
+    # This finds the biggest money-making opportunities
     def _hero_sort_key(p):
-        is_xplat = 2.0 if p.get("type") in ("consensus", "arbitrage", "cross_validated") else 1.0
-        plat_count = 1 + p.get("platform_count", 0) * 0.3
+        # Cross-platform = much more trustworthy
+        is_xplat = 3.0 if p.get("type") in ("consensus", "arbitrage") else 1.5 if p.get("type") == "cross_validated" else 1.0
+        # More platforms = more confidence
+        plat_count = 1 + p.get("platform_count", 0) * 0.5
+        # Edge size = how mispriced it is = our profit opportunity
         deviation = p.get("deviation", 0)
-        vol = min(2.0, 1.0 + (p.get("volume", 0) / 10000))
-        tb = _time_bonus(p)
-        return tb * is_xplat * plat_count * (1 + deviation) * vol
+        # Volume = liquidity = can we actually get in and out
+        vol = min(3.0, 1.0 + (p.get("volume", 0) / 5000))
+        # Profit potential per contract (sweet spot is 20-70c cost)
+        price = p.get("price_cents", 50)
+        profit_ratio = (100 - price) / max(1, price)  # e.g. 30c cost = 2.33x
+        return is_xplat * plat_count * (1 + deviation * 3) * vol * (1 + profit_ratio * 0.3)
     all_sorted = sorted(hero_candidates, key=_hero_sort_key, reverse=True)
     # Deduplicate hero: only 1 pick per base event (avoid 4x recession variants)
     seen_events = set()
