@@ -1387,8 +1387,7 @@ def run_bot_scan():
 def _warm_picks_cache():
     """Pre-populate picks cache so the dashboard loads instantly."""
     try:
-        with app.test_request_context():
-            top_picks()
+        _generate_picks()
         print(f"[CACHE] Picks cache warmed: {_picks_cache['data']['total_scanned'] if _picks_cache.get('data') else 0} markets")
     except Exception as e:
         import traceback
@@ -1845,10 +1844,17 @@ _EMPTY_PICKS = {"picks": [], "hero": [], "misc": [], "sports_count": 0, "nonspor
 @app.route("/top-picks")
 def top_picks():
     now = datetime.datetime.utcnow()
-    # Serve cached data if fresh (60s TTL)
-    if _picks_cache["time"] and (now - _picks_cache["time"]).total_seconds() < 60 and _picks_cache["data"] is not None:
+    # ALWAYS serve cached data instantly — never block the page
+    if _picks_cache["data"] is not None:
         return jsonify(_picks_cache["data"])
-    # If cache expired or empty, do a full scan (may take 20-30s first time)
+    # No cache yet — return empty with status so page shows "scanning"
+    # Background thread will populate the cache within 30-60 seconds
+    return jsonify(_EMPTY_PICKS)
+
+
+def _generate_picks():
+    """Heavy lifting — called by background thread only, never by HTTP."""
+    now = datetime.datetime.utcnow()
     all_markets = fetch_all_markets()
     picks = []
 
@@ -2395,7 +2401,7 @@ def top_picks():
     result = {"picks": all_ranked, "hero": [p["kalshi_ticker"] for p in hero_picks], "misc": [p["kalshi_ticker"] for p in misc_picks], "sports_count": len(sports_picks), "nonsports_count": len(nonsports_picks), "hero_count": len(hero_picks), "misc_count": len(misc_picks), "total_scanned": len(all_markets)}
     _picks_cache["data"] = result
     _picks_cache["time"] = datetime.datetime.utcnow()
-    return jsonify(result)
+    return result
 
 
 @app.route("/today-picks")
