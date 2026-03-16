@@ -53,7 +53,7 @@ TIMEOUT = 8
 # Bot configuration and state
 # ---------------------------------------------------------------------------
 BOT_CONFIG = {
-    "enabled": False,
+    "enabled": True,  # default ON — safety floor at $200 will auto-disable if needed
     "max_bet_usd": 10.0,
     "max_daily_usd": 50.0,
     "min_balance_usd": 200.0,
@@ -138,7 +138,11 @@ def _hydrate_from_kalshi():
         if not resp.ok:
             print(f"[HYDRATE] Fills API returned {resp.status_code}")
             return
-        fills = resp.json().get("fills", [])
+        fills_data = resp.json()
+        fills = fills_data.get("fills", [])
+        if fills:
+            print(f"[HYDRATE] Sample fill keys: {list(fills[0].keys())}")
+            print(f"[HYDRATE] Sample fill: {_json.dumps(fills[0])[:500]}")
         if not fills:
             print("[HYDRATE] No fills found")
             return
@@ -156,15 +160,21 @@ def _hydrate_from_kalshi():
             ticker = fill.get("ticker", "")
             side = fill.get("side", "")
             action = fill.get("action", "buy")
-            count = fill.get("count", 0)
+            # Kalshi v2 removed integer count on March 12 2026 — use count_fp string
+            count = 0
+            try:
+                count_raw = fill.get("count_fp") or fill.get("count") or 0
+                count = int(float(str(count_raw)))
+            except Exception:
+                pass
             price_cents = 0
             try:
                 yes_price = fill.get("yes_price_dollars") or fill.get("yes_price")
                 no_price = fill.get("no_price_dollars") or fill.get("no_price")
                 if side == "yes" and yes_price:
-                    price_cents = int(round(float(yes_price) * 100)) if isinstance(yes_price, str) else int(yes_price * 100 if yes_price < 1 else yes_price)
+                    price_cents = int(round(float(str(yes_price)) * 100))
                 elif side == "no" and no_price:
-                    price_cents = int(round(float(no_price) * 100)) if isinstance(no_price, str) else int(no_price * 100 if no_price < 1 else no_price)
+                    price_cents = int(round(float(str(no_price)) * 100))
             except Exception:
                 pass
 
