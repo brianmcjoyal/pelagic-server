@@ -2109,8 +2109,8 @@ def find_mean_reversion_signals(all_markets):
             continue
         if vol < 500:  # only liquid markets
             continue
-        # Skip extreme prices (already at 95c or 5c — limited room to revert)
-        if yes_cents < 10 or yes_cents > 90:
+        # Skip extreme prices — penny bets are illiquid and hard to exit
+        if yes_cents < 20 or yes_cents > 80:
             continue
 
         if deviation > 0:
@@ -2170,7 +2170,7 @@ def market_make_opportunity(ticker, current_yes_cents, volume):
     buy_price = current_yes_cents - (_MM_SPREAD_CENTS // 2)
     sell_price = current_yes_cents + (_MM_SPREAD_CENTS // 2)
 
-    if buy_price < 5 or sell_price > 95:
+    if buy_price < 20 or sell_price > 80:
         return None
 
     return {
@@ -2609,7 +2609,7 @@ def run_quant_strategies(all_markets):
             break
 
         price_cents = sig.get("price_cents", 0)
-        if price_cents < 5 or price_cents > 95:
+        if price_cents < 20 or price_cents > 80:
             continue
 
         # Kelly sizing
