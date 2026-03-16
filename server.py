@@ -2077,7 +2077,6 @@ def top_picks():
 
     hero_candidates = [p for p in picks if _is_hero_worthy(p)]
     # Rank by: time_bonus (settle soon) * cross-platform * edge * volume
-    # This puts the picks we can compound fastest at the top
     def _hero_sort_key(p):
         is_xplat = 2.0 if p.get("type") in ("consensus", "arbitrage", "cross_validated") else 1.0
         plat_count = 1 + p.get("platform_count", 0) * 0.3
@@ -2086,7 +2085,23 @@ def top_picks():
         tb = _time_bonus(p)
         return tb * is_xplat * plat_count * (1 + deviation) * vol
     all_sorted = sorted(hero_candidates, key=_hero_sort_key, reverse=True)
-    hero_picks = all_sorted[:5]
+    # Deduplicate hero: only 1 pick per base event (avoid 4x recession variants)
+    seen_events = set()
+    hero_picks = []
+    for p in all_sorted:
+        # Normalize: strip trailing date/quarter suffixes for grouping
+        q = p.get("kalshi_question", "").lower().strip()
+        # Remove common suffixes that create duplicates
+        import re as _re
+        base_q = _re.sub(r'\s*(q[1-4]\s*20\d{2}|before\s+20\d{2}|by\s+20\d{2}|in\s+20\d{2}|on\s+dec\s+\d+.*|20\d{2})$', '', q).strip()
+        # Also use event_ticker prefix as grouping key
+        event_key = p.get("kalshi_ticker", "")[:12]  # first 12 chars of ticker
+        group_key = base_q[:50] + "|" + event_key
+        if group_key not in seen_events:
+            seen_events.add(group_key)
+            hero_picks.append(p)
+        if len(hero_picks) >= 5:
+            break
     for i, p in enumerate(hero_picks):
         p["hero_rank"] = i + 1
 
