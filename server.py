@@ -60,7 +60,7 @@ BOT_CONFIG = {
     "enabled": True,  # default ON — safety floor at $200 will auto-disable if needed
     "max_bet_usd": 25.0,          # max $25 per single trade (Kelly sizes dynamically)
     "max_daily_usd": 500.0,       # max $500/day total (bot + sniper combined)
-    "min_balance_usd": 200.0,     # stop all trading if cash below $200
+    "min_balance_usd": 50.0,      # stop all trading if cash below $50
     "min_cash_reserve_pct": 0.30, # keep 30% of portfolio in cash (more aggressive)
     "max_open_positions": 50,     # allow up to 50 positions (was 20)
     "min_deviation": 0.15,        # 15% mispricing vs consensus required
