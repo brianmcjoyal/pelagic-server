@@ -56,6 +56,7 @@ BOT_CONFIG = {
     "enabled": False,
     "max_bet_usd": 10.0,
     "max_daily_usd": 50.0,
+    "min_balance_usd": 200.0,
     "min_deviation": 0.15,
     "min_platforms": 2,
     "scan_interval_seconds": 15,
@@ -1385,6 +1386,23 @@ def run_bot_scan():
             _log_activity("Auto-trade OFF — skipping trades")
             return
 
+        # SAFETY: check balance floor before trading
+        min_balance = BOT_CONFIG.get("min_balance_usd", 200.0)
+        try:
+            bal_path = "/portfolio/balance"
+            bal_h = signed_headers("GET", bal_path)
+            bal_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + bal_path, headers=bal_h, timeout=TIMEOUT)
+            if bal_r.ok:
+                current_balance = bal_r.json().get("balance", 0) / 100
+                if current_balance < min_balance:
+                    _log_activity(f"SAFETY STOP: Balance ${current_balance:.2f} below ${min_balance:.2f} floor — no trades", "error")
+                    BOT_CONFIG["enabled"] = False
+                    _log_activity("Auto-trade DISABLED by safety floor", "error")
+                    return
+        except Exception as e:
+            _log_activity(f"Balance check failed: {e} — skipping trades for safety", "error")
+            return
+
         if BOT_STATE["daily_spent_usd"] >= BOT_CONFIG["max_daily_usd"]:
             _log_activity(f"Daily limit reached (${BOT_STATE['daily_spent_usd']:.2f}/{BOT_CONFIG['max_daily_usd']:.2f})")
             return
@@ -2670,7 +2688,7 @@ def today_picks():
 @app.route("/config", methods=["POST"])
 def config():
     data = request.get_json(force=True)
-    allowed = {"enabled", "max_bet_usd", "max_daily_usd", "min_deviation", "min_platforms"}
+    allowed = {"enabled", "max_bet_usd", "max_daily_usd", "min_balance_usd", "min_deviation", "min_platforms"}
     updated = {}
     for key in allowed:
         if key in data:
