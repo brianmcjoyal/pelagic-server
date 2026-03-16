@@ -1201,14 +1201,14 @@ def place_kalshi_order(ticker, side, price_cents, count=1):
     if not headers:
         return {"error": "No API key"}
 
-    # Convert cents to dollar string (Kalshi API v2 migrated to _dollars fields March 12 2026)
+    # Convert cents to dollar string (Kalshi API v2 migrated to _dollars and _fp fields March 12 2026)
     price_dollars = f"{price_cents / 100:.4f}"
     payload = {
         "ticker": ticker,
         "action": "buy",
         "side": side,
         "type": "limit",
-        "count": count,
+        "count_fp": f"{int(count)}.00",
         "client_order_id": str(uuid.uuid4()),
         "time_in_force": "immediate_or_cancel",
     }
@@ -1249,7 +1249,7 @@ def sell_kalshi_position(ticker, side, price_cents, count=1):
         "action": "sell",
         "side": side,
         "type": "limit",
-        "count": count,
+        "count_fp": f"{int(count)}.00",
         "client_order_id": str(uuid.uuid4()),
         "time_in_force": "immediate_or_cancel",
     }
@@ -1438,6 +1438,7 @@ def auto_exit_check():
             # Sell at current bid (slightly below ask for instant fill)
             sell_price = max(1, current - 1)
             result = sell_kalshi_position(ticker, side, sell_price, count)
+            success = "error" not in result
             exits.append({
                 "ticker": ticker,
                 "title": pos["title"],
@@ -1446,8 +1447,13 @@ def auto_exit_check():
                 "pnl_pct": pnl_pct,
                 "sell_price": sell_price,
                 "result": result,
+                "success": success,
             })
-            print(f"[AUTO-EXIT] {action}: {ticker} at {sell_price}c ({reason})")
+            if success:
+                print(f"[AUTO-EXIT] {action}: {ticker} at {sell_price}c ({reason})")
+            else:
+                print(f"[AUTO-EXIT] FAILED {action}: {ticker} — {result.get('error', '')[:100]}")
+                _log_activity(f"Auto-exit FAILED: {ticker} — {result.get('error', '')[:80]}", "error")
     return exits
 
 
