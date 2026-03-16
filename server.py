@@ -1694,6 +1694,11 @@ def positions():
         raw = resp.json()
         positions_list = raw.get("market_positions", [])
 
+        # Debug: log raw field names from first position
+        if positions_list:
+            print(f"[POSITIONS] Raw fields: {list(positions_list[0].keys())}")
+            print(f"[POSITIONS] Sample: {positions_list[0]}")
+
         # Enrich with market details (title, close time)
         enriched = []
         for pos in positions_list:
@@ -1717,8 +1722,6 @@ def positions():
             except Exception:
                 pass
 
-            yes_count = pos.get("market_exposure", 0)
-            no_count = pos.get("total_traded", 0)
             # Use the position fields from Kalshi
             enriched.append({
                 "ticker": ticker,
@@ -1731,6 +1734,7 @@ def positions():
                 "close_time": close_time,
                 "result": result,
                 "fees_paid": pos.get("fees_paid", 0),
+                "raw_fields": pos,  # include raw data for debugging
             })
         return jsonify({"positions": enriched})
     except Exception as e:
