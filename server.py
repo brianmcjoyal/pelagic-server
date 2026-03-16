@@ -1922,6 +1922,13 @@ def portfolio_summary():
         open_positions = check_position_prices()
         total_invested = sum(p.get("market_exposure_cents", 0) for p in open_positions) / 100
         total_unrealized = sum((p.get("unrealized_pnl_cents") or 0) for p in open_positions) / 100
+        # Current market value = sum of (current_price * count) for each position
+        # This matches what Kalshi shows as "Positions" value
+        total_market_value = 0
+        for p in open_positions:
+            cp = p.get("current_price") or p.get("entry_price") or 0
+            total_market_value += cp * p.get("count", 0)
+        total_market_value = total_market_value / 100  # cents to dollars
 
         # Settled stats
         settled_path = "/portfolio/positions"
@@ -1954,11 +1961,13 @@ def portfolio_summary():
             pass
 
         win_rate = round(wins / max(1, wins + losses) * 100, 1)
-        portfolio_value = balance_usd + total_invested
+        # Portfolio value = cash + current market value of positions (matches Kalshi)
+        portfolio_value = balance_usd + total_market_value
 
         return jsonify({
             "balance_usd": round(balance_usd, 2),
             "portfolio_value_usd": round(portfolio_value, 2),
+            "positions_value_usd": round(total_market_value, 2),
             "open_positions": open_positions,
             "open_count": len(open_positions),
             "total_invested_usd": round(total_invested, 2),
