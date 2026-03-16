@@ -1649,7 +1649,7 @@ LIVE_GAME_SERIES = [
 SNIPE_MIN_PRICE = 90   # cents — only buy if price >= 90c (very likely to win)
 SNIPE_MAX_PRICE = 98   # cents — don't buy at 99c (1c profit not worth it)
 SNIPE_BET_USD = 5.0    # dollars per snipe trade
-SNIPE_MAX_DAILY = 100.0 # max daily spend on snipes
+SNIPE_MAX_DAILY = 50.0 # max daily spend on snipes (shared with main bot limit)
 
 BOT_STATE["snipe_trades_today"] = []
 BOT_STATE["snipe_daily_spent"] = 0.0
@@ -1777,16 +1777,23 @@ def live_game_snipe():
                 if BOT_STATE["snipe_daily_spent"] >= SNIPE_MAX_DAILY:
                     break
 
+                # SAFETY: check total spending across BOTH bot + sniper vs cash
+                total_daily = BOT_STATE.get("daily_spent_usd", 0) + BOT_STATE["snipe_daily_spent"]
+                if total_daily >= BOT_CONFIG["max_daily_usd"]:
+                    break
+
                 # Calculate quantity — target SNIPE_BET_USD
-                count = max(1, min(20, int(SNIPE_BET_USD * 100 / price)))
+                count = max(1, min(10, int(SNIPE_BET_USD * 100 / price)))
                 cost_usd = (price * count) / 100.0
 
                 if BOT_STATE["snipe_daily_spent"] + cost_usd > SNIPE_MAX_DAILY:
                     continue
 
-                # Check expected profit
+                # Check expected profit — only snipe if profit is meaningful
                 profit_per = 100 - price  # cents profit per contract if we win
                 expected_profit = profit_per * count / 100.0
+                if expected_profit < 0.10:  # skip if less than 10 cents potential
+                    continue
 
                 _log_activity(
                     f"🎯 SNIPE: {side.upper()} {ticker} @ {price}c x{count} "
