@@ -3855,6 +3855,45 @@ def portfolio_summary():
 
 
 # ---------------------------------------------------------------------------
+# Ticker proxy — avoids CORS issues fetching stock/crypto prices client-side
+# ---------------------------------------------------------------------------
+
+@app.route("/ticker-prices")
+def ticker_prices():
+    """Proxy for CoinGecko + Yahoo Finance quotes."""
+    import requests as _req
+    result = {}
+    # Crypto
+    try:
+        cg = _req.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": "bitcoin,ethereum", "vs_currencies": "usd", "include_24hr_change": "true"},
+            timeout=5,
+        ).json()
+        result["btc"] = {"price": cg["bitcoin"]["usd"], "change": cg["bitcoin"].get("usd_24h_change")}
+        result["eth"] = {"price": cg["ethereum"]["usd"], "change": cg["ethereum"].get("usd_24h_change")}
+    except Exception:
+        pass
+    # Stocks via Yahoo v8 chart endpoint (v7 quote requires auth now)
+    for sym in ("VOO", "TSLA"):
+        try:
+            chart = _req.get(
+                f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}",
+                params={"interval": "1d", "range": "2d"},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=5,
+            ).json()
+            meta = chart["chart"]["result"][0]["meta"]
+            price = meta.get("regularMarketPrice", 0)
+            prev = meta.get("chartPreviousClose", 0)
+            chg = ((price - prev) / prev * 100) if prev else 0
+            result[sym.lower()] = {"price": price, "change": round(chg, 2)}
+        except Exception:
+            pass
+    return jsonify(result)
+
+
+# ---------------------------------------------------------------------------
 # Bot endpoints (NEW)
 # ---------------------------------------------------------------------------
 
@@ -4838,7 +4877,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d0d0d; color: #e0e0e0; overflow-x: hidden; -webkit-font-smoothing: antialiased; }
 .container { max-width: 1100px; margin: 0 auto; padding: 0 20px 40px; }
-.header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; position: sticky; top: 0; z-index: 100; background: rgba(13,13,13,0.92); backdrop-filter: blur(12px); border-bottom: 1px solid #1a1a1a; margin: 0 -20px 0; }
+/* Ticker bar */
+.ticker-bar { display: flex; align-items: center; justify-content: center; gap: 24px; padding: 6px 20px; background: #0a0a0a; border-bottom: 1px solid #1a1a1a; font-size: 12px; overflow-x: auto; }
+.ticker-item { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.ticker-symbol { color: #666; font-weight: 600; font-size: 11px; letter-spacing: 0.5px; }
+.ticker-price { color: #ccc; font-weight: 600; font-variant-numeric: tabular-nums; }
+.ticker-chg { font-size: 11px; font-weight: 600; }
+.ticker-chg.up { color: #00dc5a; }
+.ticker-chg.down { color: #ff5000; }
+/* Portfolio breakdown */
+.portfolio-breakdown { display: flex; align-items: center; justify-content: center; gap: 16px; margin-top: 12px; }
+.breakdown-item { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.breakdown-label { font-size: 11px; color: #666; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
+.breakdown-val { font-size: 16px; color: #ccc; font-weight: 600; }
+.breakdown-dot { width: 3px; height: 3px; border-radius: 50%; background: #333; }
+.header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; position: sticky; top: 28px; z-index: 100; background: rgba(13,13,13,0.92); backdrop-filter: blur(12px); border-bottom: 1px solid #1a1a1a; margin: 0 -20px 0; }
 .header-left { display: flex; align-items: center; gap: 12px; }
 .logo { width: 36px; height: 36px; }
 h1 { font-size: 20px; color: #fff; font-weight: 700; letter-spacing: -0.3px; }
@@ -5025,6 +5078,14 @@ a:hover { color: #7da5f5; }
 </style>
 </head>
 <body>
+<!-- Ticker bar -->
+<div class="ticker-bar" id="ticker-bar">
+  <div class="ticker-item"><span class="ticker-symbol">BTC</span> <span class="ticker-price" id="tk-btc">--</span> <span class="ticker-chg" id="tk-btc-chg"></span></div>
+  <div class="ticker-item"><span class="ticker-symbol">ETH</span> <span class="ticker-price" id="tk-eth">--</span> <span class="ticker-chg" id="tk-eth-chg"></span></div>
+  <div class="ticker-item"><span class="ticker-symbol">VOO</span> <span class="ticker-price" id="tk-voo">--</span> <span class="ticker-chg" id="tk-voo-chg"></span></div>
+  <div class="ticker-item"><span class="ticker-symbol">TSLA</span> <span class="ticker-price" id="tk-tsla">--</span> <span class="ticker-chg" id="tk-tsla-chg"></span></div>
+</div>
+
 <div class="header">
   <div class="header-left">
     <svg class="logo" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
@@ -5060,6 +5121,11 @@ a:hover { color: #7da5f5; }
 <div class="portfolio-hero">
   <div class="portfolio-value" id="pf-value">$0.00</div>
   <div class="portfolio-change flat" id="pf-change">$0.00 today</div>
+  <div class="portfolio-breakdown">
+    <div class="breakdown-item"><span class="breakdown-label">Cash Available</span><span class="breakdown-val" id="pf-cash-hero">--</span></div>
+    <div class="breakdown-dot"></div>
+    <div class="breakdown-item"><span class="breakdown-label">Invested</span><span class="breakdown-val" id="pf-invested-hero">--</span></div>
+  </div>
 </div>
 
 <!-- Hidden elements needed by loadStatus -->
@@ -5386,6 +5452,12 @@ async function loadPortfolio() {
       changeEl.textContent = (totalPnl >= 0 ? '+' : '-') + '$' + Math.abs(totalPnl).toFixed(2) + ' all time';
       changeEl.className = 'portfolio-change ' + (totalPnl > 0 ? 'up' : totalPnl < 0 ? 'down' : 'flat');
     }
+
+    // Hero breakdown (cash + invested under big number)
+    var cashHero = document.getElementById('pf-cash-hero');
+    var invHero = document.getElementById('pf-invested-hero');
+    if (cashHero) cashHero.textContent = '$' + (data.balance_usd || 0).toFixed(2);
+    if (invHero) invHero.textContent = '$' + (data.total_invested_usd || 0).toFixed(2);
 
     // Quick stats
     document.getElementById('pf-cash').textContent = '$' + (data.balance_usd || 0).toFixed(2);
@@ -6205,7 +6277,32 @@ async function loadSettled() {
   }
 }
 
+// --- Ticker bar: live prices via server proxy ---
+async function loadTicker() {
+  try {
+    var data = await fetch(API + '/ticker-prices').then(r => r.json());
+    ['btc','eth','voo','tsla'].forEach(function(sym) {
+      if (data[sym]) setTicker(sym, data[sym].price, data[sym].change);
+    });
+  } catch(e) { console.warn('Ticker error', e); }
+}
+
+function setTicker(sym, price, changePct) {
+  var priceEl = document.getElementById('tk-' + sym);
+  var chgEl = document.getElementById('tk-' + sym + '-chg');
+  if (!priceEl) return;
+  if (price >= 1000) priceEl.textContent = '$' + price.toLocaleString(undefined, {maximumFractionDigits: 0});
+  else if (price >= 1) priceEl.textContent = '$' + price.toFixed(2);
+  else priceEl.textContent = '$' + price.toFixed(4);
+  if (chgEl && changePct !== undefined && changePct !== null) {
+    var sign = changePct >= 0 ? '+' : '';
+    chgEl.textContent = sign + changePct.toFixed(2) + '%';
+    chgEl.className = 'ticker-chg ' + (changePct >= 0 ? 'up' : 'down');
+  }
+}
+
 // Load everything on page load
+loadTicker();
 loadStatus();
 loadActivity();
 loadPortfolio();
@@ -6215,7 +6312,8 @@ loadPositions();
 loadSettled();
 loadMispriced();
 loadTrades();
-// Auto-refresh: activity feed every 10s, portfolio every 30s, rest every 30s
+// Auto-refresh: ticker every 60s, activity every 10s, portfolio every 30s
+setInterval(() => { loadTicker(); }, 60000);
 setInterval(() => { loadActivity(); }, 10000);
 setInterval(() => { loadStatus(); loadPortfolio(); loadTopPicks(); loadTodayPicks(); loadPositions(); loadSettled(); loadTrades(); }, 30000);
 </script>
