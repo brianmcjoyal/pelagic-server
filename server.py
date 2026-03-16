@@ -2028,35 +2028,41 @@ def portfolio_summary():
             total_market_value += cp * p.get("count", 0)
         total_market_value = total_market_value / 100  # cents to dollars
 
-        # Settled stats
+        # Realized P&L: check ALL positions (settled AND unsettled with realized_pnl)
+        # When bot sells early, realized_pnl shows up on unsettled positions too
         settled_path = "/portfolio/positions"
         settled_h = signed_headers("GET", settled_path)
         wins = losses = breakeven = 0
         total_realized = 0
         settled_list = []
-        try:
-            sr = requests.get(
-                KALSHI_BASE_URL + KALSHI_API_PREFIX + settled_path,
-                headers=settled_h,
-                params={"limit": 200, "settlement_status": "settled"},
-                timeout=TIMEOUT,
-            )
-            if sr.ok:
-                for pos in sr.json().get("market_positions", []):
-                    pnl_cents = _parse_kalshi_dollars(pos.get("realized_pnl_dollars") or pos.get("realized_pnl"))
-                    pnl_usd = pnl_cents / 100
-                    total_realized += pnl_usd
-                    ticker = pos.get("ticker", "")
-                    if pnl_usd > 0.005:
-                        wins += 1
-                        settled_list.append({"ticker": ticker, "pnl_usd": round(pnl_usd, 2), "won": True})
-                    elif pnl_usd < -0.005:
-                        losses += 1
-                        settled_list.append({"ticker": ticker, "pnl_usd": round(pnl_usd, 2), "won": False})
-                    else:
-                        breakeven += 1
-        except Exception:
-            pass
+        for settlement_filter in ["settled", "unsettled"]:
+            try:
+                sr = requests.get(
+                    KALSHI_BASE_URL + KALSHI_API_PREFIX + settled_path,
+                    headers=settled_h,
+                    params={"limit": 200, "settlement_status": settlement_filter},
+                    timeout=TIMEOUT,
+                )
+                if sr.ok:
+                    for pos in sr.json().get("market_positions", []):
+                        pnl_cents = _parse_kalshi_dollars(pos.get("realized_pnl_dollars") or pos.get("realized_pnl"))
+                        pnl_usd = pnl_cents / 100
+                        ticker = pos.get("ticker", "")
+                        # Skip unsettled positions with zero realized P&L (still open, no sells)
+                        if settlement_filter == "unsettled" and abs(pnl_usd) < 0.005:
+                            continue
+                        total_realized += pnl_usd
+                        if pnl_usd > 0.005:
+                            wins += 1
+                            settled_list.append({"ticker": ticker, "pnl_usd": round(pnl_usd, 2), "won": True})
+                        elif pnl_usd < -0.005:
+                            losses += 1
+                            settled_list.append({"ticker": ticker, "pnl_usd": round(pnl_usd, 2), "won": False})
+                        else:
+                            if settlement_filter == "settled":
+                                breakeven += 1
+            except Exception:
+                pass
 
         win_rate = round(wins / max(1, wins + losses) * 100, 1)
         # Portfolio value = cash + current market value of positions (matches Kalshi)
