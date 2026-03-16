@@ -55,7 +55,7 @@ TIMEOUT = 8
 BOT_CONFIG = {
     "enabled": True,  # default ON — safety floor at $200 will auto-disable if needed
     "max_bet_usd": 10.0,
-    "max_daily_usd": 50.0,
+    "max_daily_usd": 500.0,
     "min_balance_usd": 200.0,
     "min_deviation": 0.15,
     "min_platforms": 2,
