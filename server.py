@@ -59,12 +59,13 @@ BOT_CONFIG = {
     "max_bet_usd": 25.0,          # max $25 per single trade (Kelly sizes dynamically)
     "max_daily_usd": 500.0,       # max $500/day total (bot + sniper combined)
     "min_balance_usd": 200.0,     # stop all trading if cash below $200
-    "min_cash_reserve_pct": 0.50, # keep 50% of portfolio value in cash
-    "max_open_positions": 20,     # never hold more than 20 positions
+    "min_cash_reserve_pct": 0.30, # keep 30% of portfolio in cash (more aggressive)
+    "max_open_positions": 50,     # allow up to 50 positions (was 20)
     "min_deviation": 0.15,        # 15% mispricing vs consensus required
     "min_platforms": 2,           # must appear on 2+ platforms
     "min_volume": 100,            # minimum market volume (liquidity check)
-    "scan_interval_seconds": 15,
+    "scan_interval_seconds": 10,  # 10s scan interval (faster for live markets)
+    "max_category_exposure": 10,  # max 10 positions per category (correlation limit)
 }
 
 BOT_STATE = {
@@ -1598,6 +1599,14 @@ def run_bot_scan():
                 continue  # Already traded this event — skip other outcomes
             traded_events.add(event_key)
 
+            # CORRELATION CHECK: don't over-concentrate in one category
+            cat_allowed, cat_name, cat_count = check_category_limit(
+                opp.get("kalshi_question", ""), opp["kalshi_ticker"], existing_positions
+            )
+            if not cat_allowed:
+                _log_activity(f"Category limit: {cat_name} has {cat_count} positions — skipping {opp['kalshi_ticker']}")
+                continue
+
             # EDGE CHECK: must have real cross-platform validation
             plat_count = opp.get("platform_count", 0) or len(opp.get("matching_platforms", []))
             deviation = opp.get("deviation", 0)
@@ -2503,8 +2512,64 @@ def run_quant_strategies(all_markets):
     if momentum_opps:
         active_strategies.append("momentum")
 
+    # Economic data signals (every 10th cycle — data is slow-moving)
+    try:
+        cycle = BOT_STATE.get("_quant_cycle", 0)
+        if cycle % 10 == 0 and FRED_API_KEY:
+            kalshi_mkts = [m for m in all_markets if m["platform"] == "kalshi"]
+            econ_signals_found = 0
+            for m in kalshi_mkts[:50]:  # check top 50 for economic relevance
+                econ_sig = econ_enhanced_signal(m["question"], m["yes"])
+                if econ_sig:
+                    econ_signals_found += 1
+                    yes_cents = int(m["yes"] * 100)
+                    all_signals.append({
+                        "ticker": m["id"],
+                        "question": m["question"],
+                        "signal": econ_sig["signal"],
+                        "price_cents": yes_cents if econ_sig["signal"] == "buy_yes" else 100 - yes_cents,
+                        "confidence": econ_sig["confidence"],
+                        "strategy": "economic_data",
+                        "econ_indicator": econ_sig["indicator"],
+                        "econ_trend": econ_sig["trend"],
+                        "url": m.get("url", ""),
+                    })
+            if econ_signals_found:
+                active_strategies.append("economic_data")
+                BOT_STATE["quant_stats"]["econ_signals"] = econ_signals_found
+    except Exception as e:
+        print(f"[QUANT] Economic data error: {e}")
+
     BOT_STATE["quant_stats"]["strategies_active"] = active_strategies
     BOT_STATE["_quant_cycle"] = BOT_STATE.get("_quant_cycle", 0) + 1
+
+    # ORDERBOOK CONFIRMATION — boost confidence of signals with favorable order book
+    for sig in all_signals:
+        try:
+            ticker = sig.get("ticker", "")
+            ob = analyze_orderbook(ticker)
+            if ob and ob.get("signal"):
+                # If orderbook agrees with our signal, boost confidence
+                if ob["signal"] == sig.get("signal"):
+                    sig["confidence"] = min(0.95, sig.get("confidence", 0.5) + 0.15)
+                    sig["ob_confirmed"] = True
+                # If orderbook disagrees, reduce confidence
+                elif ob["signal"] and ob["signal"] != sig.get("signal"):
+                    sig["confidence"] = max(0.1, sig.get("confidence", 0.5) - 0.1)
+                    sig["ob_confirmed"] = False
+                sig["ob_imbalance"] = ob["imbalance"]
+                sig["ob_spread"] = ob["spread"]
+                sig["ob_liquidity"] = ob["liquidity_score"]
+        except Exception:
+            pass
+
+    # VOLATILITY BOOST — prefer higher volatility markets (more profit opportunity)
+    for sig in all_signals:
+        ticker = sig.get("ticker", "")
+        vol_score = get_volatility_score(ticker)
+        if vol_score >= 5:
+            sig["confidence"] = min(0.95, sig.get("confidence", 0.5) + 0.05)
+            sig["volatility_score"] = vol_score
 
     # Score and sort all signals
     all_signals.sort(key=lambda x: x.get("confidence", 0), reverse=True)
@@ -2519,6 +2584,13 @@ def run_quant_strategies(all_markets):
             continue
         event_key = ticker.split("-")[0] if ticker else ""
         if event_key in existing_events:
+            continue
+
+        # CORRELATION CHECK — don't over-concentrate
+        cat_allowed, cat_name, cat_count = check_category_limit(
+            sig.get("question", ""), ticker, positions
+        )
+        if not cat_allowed:
             continue
 
         # Daily limit re-check
@@ -2608,6 +2680,600 @@ def run_quant_strategies(all_markets):
         )
 
 
+# ===========================================================================
+# SPEED + INTELLIGENCE UPGRADES
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 8. PARALLEL ORDER EXECUTION — Place multiple trades simultaneously
+# ---------------------------------------------------------------------------
+
+def place_orders_parallel(orders):
+    """Execute multiple Kalshi orders in parallel using ThreadPoolExecutor.
+
+    Args:
+        orders: list of dicts with {ticker, side, price_cents, count, metadata}
+
+    Returns:
+        list of {order, result, success} dicts
+    """
+    if not orders:
+        return []
+
+    def _exec_order(order):
+        result = place_kalshi_order(
+            order["ticker"], order["side"], order["price_cents"],
+            count=order.get("count", 1)
+        )
+        return {
+            "order": order,
+            "result": result,
+            "success": "error" not in result,
+        }
+
+    results = []
+    with ThreadPoolExecutor(max_workers=min(5, len(orders))) as pool:
+        futures = {pool.submit(_exec_order, o): o for o in orders}
+        for future in as_completed(futures, timeout=15):
+            try:
+                results.append(future.result(timeout=10))
+            except Exception as e:
+                results.append({
+                    "order": futures[future],
+                    "result": {"error": str(e)},
+                    "success": False,
+                })
+    return results
+
+
+# ---------------------------------------------------------------------------
+# 9. ORDER BOOK DEPTH ANALYSIS — See beyond top-of-book
+# ---------------------------------------------------------------------------
+
+_orderbook_cache = {}  # ticker -> {"bids": [], "asks": [], "time": datetime}
+_OB_CACHE_TTL = 15     # seconds
+
+def fetch_orderbook(ticker):
+    """Fetch full order book for a Kalshi market. Returns bid/ask depth."""
+    now = datetime.datetime.utcnow()
+    cached = _orderbook_cache.get(ticker)
+    if cached and (now - cached["time"]).total_seconds() < _OB_CACHE_TTL:
+        return cached
+
+    path = f"/markets/{ticker}/orderbook"
+    headers = signed_headers("GET", path)
+    if not headers:
+        return None
+
+    try:
+        resp = requests.get(
+            KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
+            headers=headers, timeout=5,
+        )
+        if not resp.ok:
+            return None
+        data = resp.json().get("orderbook", {})
+        # Parse yes bids and asks
+        yes_bids = []  # people wanting to buy YES (support below)
+        yes_asks = []  # people wanting to sell YES (resistance above)
+        for level in (data.get("yes") or []):
+            price = 0
+            try:
+                price = int(round(float(str(level.get("price_dollars", level.get("price", 0)))) * 100))
+            except Exception:
+                continue
+            qty = 0
+            try:
+                qty = int(float(str(level.get("quantity_fp", level.get("quantity", 0)))))
+            except Exception:
+                pass
+            if price > 0 and qty > 0:
+                yes_asks.append({"price": price, "qty": qty})
+
+        for level in (data.get("no") or []):
+            price = 0
+            try:
+                price = int(round(float(str(level.get("price_dollars", level.get("price", 0)))) * 100))
+            except Exception:
+                continue
+            qty = 0
+            try:
+                qty = int(float(str(level.get("quantity_fp", level.get("quantity", 0)))))
+            except Exception:
+                pass
+            if price > 0 and qty > 0:
+                yes_bids.append({"price": 100 - price, "qty": qty})
+
+        result = {
+            "yes_bids": sorted(yes_bids, key=lambda x: x["price"], reverse=True),
+            "yes_asks": sorted(yes_asks, key=lambda x: x["price"]),
+            "time": now,
+            "spread": 0,
+            "bid_depth": sum(b["qty"] for b in yes_bids),
+            "ask_depth": sum(a["qty"] for a in yes_asks),
+        }
+        if yes_bids and yes_asks:
+            result["spread"] = yes_asks[0]["price"] - yes_bids[0]["price"]
+
+        _orderbook_cache[ticker] = result
+        return result
+    except Exception as e:
+        print(f"[OB] Error fetching orderbook for {ticker}: {e}")
+        return None
+
+
+def analyze_orderbook(ticker):
+    """Analyze order book for trading signals.
+
+    Returns:
+        dict with liquidity score, imbalance signal, recommended side, spread
+    """
+    ob = fetch_orderbook(ticker)
+    if not ob:
+        return None
+
+    bid_depth = ob["bid_depth"]
+    ask_depth = ob["ask_depth"]
+    spread = ob["spread"]
+    total_depth = bid_depth + ask_depth
+
+    if total_depth == 0:
+        return None
+
+    # Imbalance: if bids >> asks, price likely going up (buy YES)
+    # if asks >> bids, price likely going down (buy NO)
+    imbalance = (bid_depth - ask_depth) / total_depth  # -1 to +1
+
+    liquidity_score = min(100, total_depth)  # 0-100
+
+    signal = None
+    if imbalance > 0.3 and spread <= 5:
+        signal = "buy_yes"  # strong bid side, price going up
+    elif imbalance < -0.3 and spread <= 5:
+        signal = "buy_no"   # strong ask side, price going down
+
+    return {
+        "bid_depth": bid_depth,
+        "ask_depth": ask_depth,
+        "spread": spread,
+        "imbalance": round(imbalance, 3),
+        "liquidity_score": liquidity_score,
+        "signal": signal,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 10. CORRELATION FILTER — Diversify across categories
+# ---------------------------------------------------------------------------
+# Don't put all eggs in one basket. Max N positions per category.
+
+_CATEGORY_KEYWORDS = {
+    "nba": ["nba", "basketball", "lakers", "celtics", "warriors", "bucks", "nuggets",
+            "knicks", "nets", "heat", "76ers", "mavericks", "suns", "cavaliers"],
+    "nfl": ["nfl", "football", "chiefs", "eagles", "49ers", "ravens", "bills",
+            "cowboys", "dolphins", "packers", "steelers", "bengals"],
+    "mlb": ["mlb", "baseball", "yankees", "dodgers", "mets", "braves", "astros",
+            "padres", "phillies", "cubs", "red sox"],
+    "nhl": ["nhl", "hockey", "oilers", "bruins", "avalanche", "maple leafs",
+            "penguins", "rangers", "golden knights"],
+    "soccer": ["soccer", "premier league", "epl", "champions league", "liverpool",
+               "arsenal", "manchester", "chelsea", "barcelona", "real madrid"],
+    "politics": ["president", "election", "congress", "senate", "governor",
+                 "democrat", "republican", "trump", "biden", "political"],
+    "economics": ["gdp", "inflation", "cpi", "fed", "interest rate", "unemployment",
+                  "recession", "jobs report", "economic", "treasury"],
+    "weather": ["temperature", "weather", "hurricane", "tornado", "rainfall",
+                "snow", "climate", "degrees", "fahrenheit", "celsius"],
+    "crypto": ["bitcoin", "ethereum", "crypto", "btc", "eth", "solana"],
+    "tech": ["ai", "artificial intelligence", "openai", "google", "apple",
+             "microsoft", "meta", "tesla", "spacex", "tech"],
+    "entertainment": ["oscar", "grammy", "emmy", "movie", "film", "box office",
+                      "netflix", "disney", "streaming"],
+}
+
+
+def classify_market_category(question, ticker=""):
+    """Classify a market into a category for correlation management."""
+    text = (question + " " + ticker).lower()
+    scores = {}
+    for cat, keywords in _CATEGORY_KEYWORDS.items():
+        hits = sum(1 for kw in keywords if kw in text)
+        if hits > 0:
+            scores[cat] = hits
+    if not scores:
+        return "other"
+    return max(scores, key=scores.get)
+
+
+def get_category_exposure(positions):
+    """Count how many positions are in each category."""
+    exposure = {}
+    for pos in positions:
+        title = pos.get("title", "") or pos.get("question", "")
+        ticker = pos.get("ticker", "")
+        cat = classify_market_category(title, ticker)
+        exposure[cat] = exposure.get(cat, 0) + 1
+    return exposure
+
+
+def check_category_limit(question, ticker, positions):
+    """Check if adding a position in this category would exceed the limit.
+
+    Returns:
+        (allowed: bool, category: str, current_count: int)
+    """
+    cat = classify_market_category(question, ticker)
+    max_per_cat = BOT_CONFIG.get("max_category_exposure", 10)
+    exposure = get_category_exposure(positions)
+    current = exposure.get(cat, 0)
+    return current < max_per_cat, cat, current
+
+
+# ---------------------------------------------------------------------------
+# 11. VOLATILITY SCORING — Focus on high-opportunity markets
+# ---------------------------------------------------------------------------
+# Markets with more price movement have more profit potential.
+
+_volatility_scores = {}  # ticker -> {"score": float, "samples": int}
+
+def update_volatility(ticker, price_cents):
+    """Track price variance for volatility scoring."""
+    if ticker not in _volatility_scores:
+        _volatility_scores[ticker] = {"prices": deque(maxlen=20), "score": 0}
+
+    state = _volatility_scores[ticker]
+    state["prices"].append(price_cents)
+
+    if len(state["prices"]) >= 5:
+        prices = list(state["prices"])
+        # Calculate standard deviation of recent prices
+        mean_p = sum(prices) / len(prices)
+        variance = sum((p - mean_p) ** 2 for p in prices) / len(prices)
+        state["score"] = round(math.sqrt(variance), 2)
+
+
+def get_volatility_score(ticker):
+    """Get volatility score for a ticker. Higher = more opportunity."""
+    state = _volatility_scores.get(ticker)
+    if not state:
+        return 0
+    return state["score"]
+
+
+def rank_by_volatility(tickers, min_score=2.0):
+    """Filter and rank tickers by volatility — focus capital on movers."""
+    scored = []
+    for t in tickers:
+        v = get_volatility_score(t)
+        if v >= min_score:
+            scored.append((t, v))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored
+
+
+# ---------------------------------------------------------------------------
+# 12. AUTO-REINVEST ON SETTLEMENT — Immediately redeploy settled capital
+# ---------------------------------------------------------------------------
+
+_last_settlement_check = None
+_known_settled = set()  # tickers we already processed
+
+def check_settlements_and_reinvest():
+    """Detect newly settled positions and immediately redeploy the freed capital.
+
+    When a position settles (win or lose), the capital is freed. Instead of
+    waiting for the next scan cycle, trigger an immediate trade scan.
+    """
+    global _last_settlement_check
+    now = datetime.datetime.utcnow()
+
+    # Only check every 60 seconds
+    if _last_settlement_check and (now - _last_settlement_check).total_seconds() < 60:
+        return []
+    _last_settlement_check = now
+
+    path = "/portfolio/positions"
+    headers = signed_headers("GET", path)
+    if not headers:
+        return []
+
+    try:
+        resp = requests.get(
+            KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
+            headers=headers,
+            params={"limit": 200, "settlement_status": "settled"},
+            timeout=TIMEOUT,
+        )
+        if not resp.ok:
+            return []
+
+        settled = resp.json().get("market_positions", [])
+        new_settlements = []
+
+        for pos in settled:
+            ticker = pos.get("ticker", "")
+            if ticker in _known_settled:
+                continue
+            _known_settled.add(ticker)
+            pnl_cents = _parse_kalshi_dollars(pos.get("realized_pnl_dollars") or pos.get("realized_pnl"))
+            pnl_usd = pnl_cents / 100
+            new_settlements.append({
+                "ticker": ticker,
+                "pnl_usd": round(pnl_usd, 2),
+                "won": pnl_usd > 0,
+            })
+
+        if new_settlements:
+            wins = sum(1 for s in new_settlements if s["won"])
+            losses = len(new_settlements) - wins
+            total_pnl = sum(s["pnl_usd"] for s in new_settlements)
+            _log_activity(
+                f"💰 Settlements: {len(new_settlements)} new ({wins}W/{losses}L) "
+                f"P&L: ${total_pnl:+.2f} — reinvesting freed capital",
+                "success" if total_pnl >= 0 else "info"
+            )
+            # Trigger immediate rescan to reinvest
+            return new_settlements
+
+        # Cap known_settled to prevent memory bloat
+        if len(_known_settled) > 500:
+            _known_settled.clear()
+
+        return []
+    except Exception as e:
+        print(f"[SETTLE] Error: {e}")
+        return []
+
+
+# ---------------------------------------------------------------------------
+# 13. TWITTER/X SENTIMENT — Social media moves markets first
+# ---------------------------------------------------------------------------
+# Use Nitter (public Twitter proxy) RSS feeds to scan trending topics
+
+_twitter_cache = {}
+_TWITTER_CACHE_TTL = 120  # 2 minutes
+
+def fetch_twitter_sentiment(query, max_results=10):
+    """Fetch recent tweets about a topic and analyze sentiment.
+
+    Uses Google News RSS as proxy for trending social topics since
+    direct Twitter API requires paid access. Headlines that mention
+    Twitter/X posts or social media trends are strong signals.
+    """
+    now = datetime.datetime.utcnow()
+    cache_key = f"tw_{query.lower().strip()}"
+    if cache_key in _twitter_cache:
+        cached = _twitter_cache[cache_key]
+        if (now - cached["time"]).total_seconds() < _TWITTER_CACHE_TTL:
+            return cached["data"]
+
+    # Augment query with social media keywords to find viral topics
+    social_query = f"{query} twitter OR trending OR viral OR social media"
+    headlines = fetch_news_headlines(social_query, max_results=max_results)
+
+    # Score sentiment
+    bullish_words = {"surge", "soar", "jump", "rise", "rally", "record", "high",
+                     "boost", "strong", "beat", "wins", "launch", "approve",
+                     "success", "trending", "viral", "breakout", "bullish"}
+    bearish_words = {"fall", "drop", "crash", "decline", "loss", "cut",
+                     "fail", "delay", "cancel", "down", "lose", "scandal",
+                     "controversy", "backlash", "collapse", "bearish"}
+
+    bull = bear = 0
+    for h in headlines:
+        words = set(h["title"].lower().split())
+        bull += len(words & bullish_words)
+        bear += len(words & bearish_words)
+
+    # Amplify signal if multiple sources agree
+    if len(headlines) >= 3 and (bull > bear * 2 or bear > bull * 2):
+        confidence = "high"
+    elif len(headlines) >= 2:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    result = {
+        "query": query,
+        "headlines": headlines,
+        "bull_signals": bull,
+        "bear_signals": bear,
+        "sentiment": "bullish" if bull > bear + 1 else ("bearish" if bear > bull + 1 else "neutral"),
+        "confidence": confidence,
+        "source_count": len(headlines),
+    }
+
+    _twitter_cache[cache_key] = {"data": result, "time": now}
+    # Trim cache
+    if len(_twitter_cache) > 100:
+        oldest = sorted(_twitter_cache.keys(), key=lambda k: _twitter_cache[k]["time"])
+        for k in oldest[:50]:
+            del _twitter_cache[k]
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 14. ECONOMIC DATA FEEDS — Trade on government data releases
+# ---------------------------------------------------------------------------
+# For inflation, jobs, GDP markets — fetch actual economic indicators
+
+_econ_cache = {}
+_ECON_CACHE_TTL = 3600  # 1 hour (gov data doesn't change frequently)
+
+# Key economic data sources (free, no API key needed)
+ECON_INDICATORS = {
+    "cpi": {
+        "url": "https://api.stlouisfed.org/fred/series/observations",
+        "series_id": "CPIAUCSL",
+        "name": "Consumer Price Index",
+        "keywords": ["cpi", "inflation", "consumer price"],
+    },
+    "unemployment": {
+        "url": "https://api.stlouisfed.org/fred/series/observations",
+        "series_id": "UNRATE",
+        "name": "Unemployment Rate",
+        "keywords": ["unemployment", "jobs", "jobless"],
+    },
+    "gdp": {
+        "url": "https://api.stlouisfed.org/fred/series/observations",
+        "series_id": "GDP",
+        "name": "Gross Domestic Product",
+        "keywords": ["gdp", "gross domestic", "economic growth"],
+    },
+    "fed_rate": {
+        "url": "https://api.stlouisfed.org/fred/series/observations",
+        "series_id": "FEDFUNDS",
+        "name": "Federal Funds Rate",
+        "keywords": ["fed", "interest rate", "federal reserve", "fomc"],
+    },
+}
+
+# FRED API key (free, public data)
+FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
+
+def fetch_economic_data(indicator_key):
+    """Fetch latest economic data from FRED (Federal Reserve Economic Data)."""
+    now = datetime.datetime.utcnow()
+    cache_key = f"econ_{indicator_key}"
+    if cache_key in _econ_cache:
+        cached = _econ_cache[cache_key]
+        if (now - cached["time"]).total_seconds() < _ECON_CACHE_TTL:
+            return cached["data"]
+
+    indicator = ECON_INDICATORS.get(indicator_key)
+    if not indicator or not FRED_API_KEY:
+        return None
+
+    try:
+        resp = requests.get(
+            indicator["url"],
+            params={
+                "series_id": indicator["series_id"],
+                "api_key": FRED_API_KEY,
+                "file_type": "json",
+                "sort_order": "desc",
+                "limit": 12,  # last 12 data points
+            },
+            timeout=10,
+        )
+        if not resp.ok:
+            return None
+
+        observations = resp.json().get("observations", [])
+        if not observations:
+            return None
+
+        # Parse values
+        values = []
+        for obs in observations:
+            try:
+                val = float(obs.get("value", ""))
+                date = obs.get("date", "")
+                values.append({"date": date, "value": val})
+            except (ValueError, TypeError):
+                continue
+
+        if not values:
+            return None
+
+        latest = values[0]["value"]
+        prev = values[1]["value"] if len(values) > 1 else latest
+        change = latest - prev
+        trend = "rising" if change > 0 else ("falling" if change < 0 else "flat")
+
+        # Calculate 6-month trend
+        if len(values) >= 6:
+            avg_recent = sum(v["value"] for v in values[:3]) / 3
+            avg_older = sum(v["value"] for v in values[3:6]) / 3
+            six_month_trend = "rising" if avg_recent > avg_older else "falling"
+        else:
+            six_month_trend = trend
+
+        result = {
+            "indicator": indicator["name"],
+            "latest_value": latest,
+            "previous_value": prev,
+            "change": round(change, 3),
+            "trend": trend,
+            "six_month_trend": six_month_trend,
+            "latest_date": values[0]["date"],
+            "history": values[:6],
+        }
+
+        _econ_cache[cache_key] = {"data": result, "time": now}
+        return result
+
+    except Exception as e:
+        print(f"[ECON] Error fetching {indicator_key}: {e}")
+        return None
+
+
+def match_market_to_econ(question):
+    """Check if a market question relates to an economic indicator.
+
+    Returns:
+        (indicator_key, confidence) or (None, 0)
+    """
+    q_lower = question.lower()
+    for key, indicator in ECON_INDICATORS.items():
+        hits = sum(1 for kw in indicator["keywords"] if kw in q_lower)
+        if hits >= 1:
+            return key, min(0.9, 0.3 + hits * 0.2)
+    return None, 0
+
+
+def econ_enhanced_signal(question, current_yes_price):
+    """Use economic data to enhance a trading signal.
+
+    If CPI is rising and a market asks "Will inflation be above X%?",
+    economic data gives us an informed edge.
+    """
+    indicator_key, confidence = match_market_to_econ(question)
+    if not indicator_key or confidence < 0.3:
+        return None
+
+    data = fetch_economic_data(indicator_key)
+    if not data:
+        return None
+
+    q_lower = question.lower()
+
+    # Detect "above" or "below" threshold questions
+    signal = None
+    import re as _re
+    # Pattern: "above X%" or "below X%" or "over X" or "under X"
+    above_match = _re.search(r'(above|over|exceed|higher than|at least)\s*(\d+\.?\d*)', q_lower)
+    below_match = _re.search(r'(below|under|less than|lower than|at most)\s*(\d+\.?\d*)', q_lower)
+
+    if above_match:
+        threshold = float(above_match.group(2))
+        # If trend is rising and latest is near/above threshold, likely YES
+        if data["trend"] == "rising" and data["latest_value"] >= threshold * 0.95:
+            signal = "buy_yes"
+        elif data["trend"] == "falling" and data["latest_value"] < threshold:
+            signal = "buy_no"
+    elif below_match:
+        threshold = float(below_match.group(2))
+        if data["trend"] == "falling" and data["latest_value"] <= threshold * 1.05:
+            signal = "buy_yes"
+        elif data["trend"] == "rising" and data["latest_value"] > threshold:
+            signal = "buy_no"
+
+    if not signal:
+        return None
+
+    return {
+        "indicator": data["indicator"],
+        "signal": signal,
+        "confidence": confidence,
+        "latest_value": data["latest_value"],
+        "trend": data["trend"],
+        "six_month_trend": data["six_month_trend"],
+        "strategy": "economic_data",
+    }
+
+
 # Use a simple background thread instead of APScheduler
 # APScheduler's threadpool doesn't reliably work with gunicorn
 import threading
@@ -2617,30 +3283,58 @@ def _background_loop():
     """Simple background loop that runs scans, warms cache, monitors positions."""
     _time.sleep(10)  # wait for server to fully start
     print("[BG] Background loop started")
-    _log_activity("Background engine started")
+    _log_activity("Background engine started — v2 TURBO")
     # Hydrate trade history from Kalshi on startup
     _hydrate_from_kalshi()
     _log_activity(f"Loaded {len(BOT_STATE['all_trades'])} trades from Kalshi (${BOT_STATE['daily_spent_usd']:.2f} spent today)")
+
+    # Initialize known settled positions on startup
+    try:
+        sh = signed_headers("GET", "/portfolio/positions")
+        if sh:
+            sr = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/positions",
+                headers=sh, params={"limit": 200, "settlement_status": "settled"},
+                timeout=TIMEOUT,
+            )
+            if sr.ok:
+                for pos in sr.json().get("market_positions", []):
+                    _known_settled.add(pos.get("ticker", ""))
+                print(f"[SETTLE] Initialized {len(_known_settled)} known settled positions")
+    except Exception:
+        pass
+
     cycle = 0
     while True:
         try:
             cycle += 1
-            # Run bot scan (updates BOT_STATE for status endpoint)
+            # Run bot scan with correlation + volatility (updates BOT_STATE)
             run_bot_scan()
             # Live game sniper — buy near-certain live sports outcomes
             live_game_snipe()
-            # QUANT ENGINE — run all quant strategies (every 3rd cycle to stagger)
+            # QUANT ENGINE — run all strategies (every 3rd cycle)
             if cycle % 3 == 0:
                 try:
                     all_mkts = fetch_all_markets()
+                    # Update volatility scores for all Kalshi markets
+                    for m in all_mkts:
+                        if m["platform"] == "kalshi":
+                            update_volatility(m["id"], int(m["yes"] * 100))
                     run_quant_strategies(all_mkts)
                 except Exception as qe:
                     print(f"[QUANT] Engine error: {qe}")
+            # Check for new settlements — reinvest freed capital
+            settlements = check_settlements_and_reinvest()
+            if settlements:
+                # Trigger immediate extra scan to deploy freed capital
+                try:
+                    run_bot_scan()
+                except Exception:
+                    pass
             # Warm the picks cache so /top-picks is fast
             _warm_picks_cache()
-            # Enhanced auto-exit with trailing stops (replaces basic auto_exit_check)
+            # Enhanced auto-exit with trailing stops
             exits = enhanced_auto_exit()
-            # Fallback to basic exit if enhanced fails
             if not exits:
                 exits = auto_exit_check()
         except Exception as e:
@@ -2648,7 +3342,7 @@ def _background_loop():
             _log_activity(f"Background error: {str(e)[:80]}", "error")
             print(f"[BG] Error in background loop: {e}")
             traceback.print_exc()
-        _time.sleep(30)  # scan every 30s
+        _time.sleep(BOT_CONFIG.get("scan_interval_seconds", 10))  # dynamic scan interval
 
 _bg_thread = None
 
@@ -3157,6 +3851,13 @@ def quant_status():
     stats = BOT_STATE.get("quant_stats", {})
     momentum = scan_momentum_opportunities()[:5]
     return jsonify({
+        "active_strategies": stats.get("strategies_active", []),
+        "ema_tracked": len(_price_averages),
+        "momentum_tracked": len(_price_history),
+        "mm_orders": len(_market_maker_orders),
+        "volatility_tracked": len(_volatility_scores),
+        "orderbooks_cached": len(_orderbook_cache),
+        "settlements_known": len(_known_settled),
         "strategies": {
             "kelly_criterion": {
                 "status": "active",
@@ -3174,7 +3875,7 @@ def quant_status():
                 "signals": stats.get("momentum_signals", 0),
                 "tracked_tickers": len(_price_history),
                 "top_movers": momentum,
-                "description": "Rides strong price trends — buys into confirmed moves",
+                "description": "Rides strong price trends",
             },
             "market_making": {
                 "status": "active" if _market_maker_orders else "scanning",
@@ -3187,17 +3888,92 @@ def quant_status():
                 "signals": stats.get("news_signals", 0),
                 "description": "Trades on breaking news catalysts",
             },
+            "orderbook_depth": {
+                "status": "active" if _orderbook_cache else "scanning",
+                "cached_books": len(_orderbook_cache),
+                "description": "Confirms trades with bid/ask imbalance analysis",
+            },
+            "correlation_filter": {
+                "status": "active",
+                "max_per_category": BOT_CONFIG.get("max_category_exposure", 10),
+                "description": "Limits category exposure for diversification",
+            },
+            "volatility_scoring": {
+                "status": "active" if _volatility_scores else "scanning",
+                "tracked_tickers": len(_volatility_scores),
+                "description": "Prioritizes high-movement markets for bigger profits",
+            },
+            "economic_data": {
+                "status": "active" if FRED_API_KEY else "needs_api_key",
+                "signals": stats.get("econ_signals", 0),
+                "description": "Trades on government data releases (CPI, GDP, jobs)",
+            },
+            "settlement_reinvest": {
+                "status": "active",
+                "known_settled": len(_known_settled),
+                "description": "Auto-redeploys freed capital when positions settle",
+            },
             "live_sniper": {
                 "status": "active" if BOT_STATE.get("snipe_trades_today") else "scanning",
                 "trades_today": len(BOT_STATE.get("snipe_trades_today", [])),
                 "spent_today": BOT_STATE.get("snipe_daily_spent", 0),
-                "description": "Buys 93-98c positions on live games for guaranteed profit",
+                "description": "Buys 93-98c live game positions for guaranteed profit",
+            },
+            "twitter_sentiment": {
+                "status": "active" if _twitter_cache else "scanning",
+                "cached_queries": len(_twitter_cache),
+                "description": "Scans social media trends for early market signals",
+            },
+            "parallel_execution": {
+                "status": "active",
+                "description": "Places multiple orders simultaneously for speed",
             },
         },
-        "active_strategies": stats.get("strategies_active", []),
-        "ema_tracked": len(_price_averages),
-        "momentum_tracked": len(_price_history),
-        "mm_orders": len(_market_maker_orders),
+    })
+
+
+@app.route("/orderbook/<ticker>")
+def orderbook_view(ticker):
+    """View order book depth for a specific market."""
+    ob = fetch_orderbook(ticker)
+    if not ob:
+        return jsonify({"error": "Could not fetch orderbook", "ticker": ticker})
+    analysis = analyze_orderbook(ticker)
+    return jsonify({
+        "ticker": ticker,
+        "orderbook": {
+            "yes_bids": ob.get("yes_bids", [])[:10],
+            "yes_asks": ob.get("yes_asks", [])[:10],
+            "spread": ob.get("spread", 0),
+            "bid_depth": ob.get("bid_depth", 0),
+            "ask_depth": ob.get("ask_depth", 0),
+        },
+        "analysis": analysis,
+    })
+
+
+@app.route("/category-exposure")
+def category_exposure():
+    """View current category exposure for correlation management."""
+    positions = check_position_prices()
+    exposure = get_category_exposure(positions)
+    max_per_cat = BOT_CONFIG.get("max_category_exposure", 10)
+    return jsonify({
+        "exposure": exposure,
+        "max_per_category": max_per_cat,
+        "total_positions": len(positions),
+        "categories_at_limit": [cat for cat, count in exposure.items() if count >= max_per_cat],
+    })
+
+
+@app.route("/volatility")
+def volatility_view():
+    """View volatility scores for tracked markets."""
+    scored = [(t, s["score"]) for t, s in _volatility_scores.items() if s["score"] > 0]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return jsonify({
+        "tracked": len(_volatility_scores),
+        "high_volatility": [{"ticker": t, "score": s} for t, s in scored[:20]],
     })
 
 
