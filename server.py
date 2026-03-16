@@ -3348,7 +3348,7 @@ async function loadSettled() {
     var tableEl = document.getElementById('settled-table');
     var settled = data.settled || [];
     if (settled.length === 0) {
-      tableEl.innerHTML = '<div style="color:#555;font-size:10px;padding:8px">No settled positions yet. Place some bets and we\'ll track every result here.</div>';
+      tableEl.innerHTML = '<div style="color:#555;font-size:10px;padding:8px">No settled positions yet. Place some bets and we will track every result here.</div>';
     } else {
       var tbl = '<table style="width:100%;border-collapse:collapse;font-size:9px">';
       tbl += '<tr style="color:#888;border-bottom:1px solid #333;text-align:left">';
