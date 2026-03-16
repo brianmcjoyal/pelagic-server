@@ -3688,12 +3688,34 @@ async function loadPortfolio() {
       var bPnl = Math.abs(b.pnl_pct || 0);
       return bPnl - aPnl;
     });
-    var html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">';
-    html += '<span class="pos-count">' + positions.length + ' open positions</span>';
+    // Expiry breakdown
+    var now = Date.now();
+    var settlingNow = 0, today24h = 0, thisWeek = 0, thisMonth = 0, later = 0;
+    positions.forEach(function(p) {
+      if (!p.close_time) { later++; return; }
+      var close = new Date(p.close_time).getTime();
+      var daysLeft = (close - now) / 86400000;
+      if (daysLeft <= 0) settlingNow++;
+      else if (daysLeft <= 1) today24h++;
+      else if (daysLeft <= 7) thisWeek++;
+      else if (daysLeft <= 30) thisMonth++;
+      else later++;
+    });
+
     var totalUp = positions.filter(function(p) { return (p.pnl_pct || 0) > 0; }).length;
     var totalDown = positions.filter(function(p) { return (p.pnl_pct || 0) < 0; }).length;
     var totalFlat = positions.length - totalUp - totalDown;
+
+    var html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px">';
+    html += '<span class="pos-count" style="font-size:10px;color:#ccc;font-weight:700">' + positions.length + ' open positions</span>';
     html += '<span class="pos-count"><span style="color:#00ff88">' + totalUp + ' up</span> · <span style="color:#ff4444">' + totalDown + ' down</span> · <span style="color:#555">' + totalFlat + ' flat</span></span>';
+    html += '</div>';
+    html += '<div style="display:flex;gap:8px;margin-bottom:6px;flex-wrap:wrap">';
+    if (settlingNow > 0) html += '<span style="font-size:8px;padding:2px 6px;background:#1a1a1a;border:1px solid #ff8c00;border-radius:3px;color:#ff8c00">' + settlingNow + ' settling now</span>';
+    if (today24h > 0) html += '<span style="font-size:8px;padding:2px 6px;background:#1a1a1a;border:1px solid #ffcc00;border-radius:3px;color:#ffcc00">' + today24h + ' within 24h</span>';
+    if (thisWeek > 0) html += '<span style="font-size:8px;padding:2px 6px;background:#1a1a1a;border:1px solid #00bfff;border-radius:3px;color:#00bfff">' + thisWeek + ' this week</span>';
+    if (thisMonth > 0) html += '<span style="font-size:8px;padding:2px 6px;background:#1a1a1a;border:1px solid #888;border-radius:3px;color:#888">' + thisMonth + ' this month</span>';
+    if (later > 0) html += '<span style="font-size:8px;padding:2px 6px;background:#1a1a1a;border:1px solid #444;border-radius:3px;color:#555">' + later + ' later</span>';
     html += '</div>';
     html += '<div class="pos-scroll"><table class="pos-table-compact"><thead><tr><th>Market</th><th>Side</th><th>Qty</th><th>Entry</th><th>Now</th><th>P&L</th><th>Exp</th><th></th></tr></thead><tbody>';
     positions.forEach(function(p) {
