@@ -52,6 +52,10 @@ STOP_WORDS = {
 TIMEOUT = 8
 
 # ---------------------------------------------------------------------------
+# Bot version — tags every trade so we can separate old vs new performance
+BOT_VERSION = "v3.0-quant"  # v1=yolo, v2=disciplined, v3=quant engine
+BOT_VERSION_DATE = "2026-03-15"
+
 # Bot configuration and state
 # ---------------------------------------------------------------------------
 BOT_CONFIG = {
@@ -196,6 +200,7 @@ def _hydrate_from_kalshi():
                 "cost_usd": round(cost_usd, 2),
                 "order_id": order_id,
                 "source": "kalshi_fill",
+                "bot_version": "v1-legacy" if created and created[:10] < BOT_VERSION_DATE else BOT_VERSION,
             }
             all_trades_rebuilt.append(trade_rec)
 
@@ -1652,6 +1657,8 @@ def run_bot_scan():
                 "matching_platforms": opp["matching_platforms"],
                 "result": result,
                 "success": "error" not in result,
+                "bot_version": BOT_VERSION,
+                "strategy": "consensus_mispricing",
             }
 
             BOT_STATE["trades_today"].append(trade_record)
@@ -1859,6 +1866,8 @@ def live_game_snipe():
                             "price": price, "count": filled, "cost": actual_cost,
                             "potential_profit": potential,
                             "time": datetime.datetime.utcnow().isoformat(),
+                            "bot_version": BOT_VERSION,
+                            "strategy": "live_sniper",
                         })
                         _log_activity(
                             f"🎯 SNIPED! {side.upper()} {ticker} @ {price}c x{filled} "
@@ -2641,6 +2650,7 @@ def run_quant_strategies(all_markets):
             "confidence": confidence,
             "result": result,
             "success": success,
+            "bot_version": BOT_VERSION,
         }
 
         BOT_STATE["all_trades"].append(trade_record)
@@ -3678,11 +3688,18 @@ def settled_positions():
                 breakeven += 1
                 won = None
 
-            # Check if this was a pick we recommended
+            # Check if this was a pick we recommended + find bot version
             pick_type = "unknown"
+            trade_version = "v1-legacy"  # default: old trade
+            trade_strategy = "unknown"
             for ph in BOT_STATE.get("pick_history", []):
                 if ph.get("ticker") == ticker:
                     pick_type = ph.get("type", "unknown")
+                    break
+            for t in BOT_STATE.get("all_trades", []):
+                if t.get("ticker") == ticker:
+                    trade_version = t.get("bot_version", "v1-legacy")
+                    trade_strategy = t.get("strategy", "unknown")
                     break
 
             settled.append({
@@ -3690,13 +3707,25 @@ def settled_positions():
                 "title": title,
                 "pnl_usd": round(pnl, 2),
                 "won": won,
-                "total_traded": traded,
+                "total_traded": round(traded_cents / 100, 2),
                 "fees_paid": round(fees, 2),
                 "pick_type": pick_type,
+                "bot_version": trade_version,
+                "strategy": trade_strategy,
             })
 
         total_bets = wins + losses + breakeven
         roi = round(total_pnl / max(0.01, total_wagered) * 100, 1) if total_wagered > 0 else 0
+
+        # Split stats by version — legacy vs v3
+        v3_settled = [s for s in settled if s.get("bot_version", "").startswith("v3")]
+        legacy_settled = [s for s in settled if not s.get("bot_version", "").startswith("v3")]
+        v3_wins = sum(1 for s in v3_settled if s["won"] is True)
+        v3_losses = sum(1 for s in v3_settled if s["won"] is False)
+        v3_pnl = sum(s["pnl_usd"] for s in v3_settled)
+        legacy_wins = sum(1 for s in legacy_settled if s["won"] is True)
+        legacy_losses = sum(1 for s in legacy_settled if s["won"] is False)
+        legacy_pnl = sum(s["pnl_usd"] for s in legacy_settled)
 
         return jsonify({
             "settled": settled,
@@ -3712,6 +3741,22 @@ def settled_positions():
             "streak": streak,
             "streak_type": current_streak_type or "none",
             "total_bets": total_bets,
+            "by_version": {
+                "v3_quant": {
+                    "wins": v3_wins,
+                    "losses": v3_losses,
+                    "win_rate": round(v3_wins / max(1, v3_wins + v3_losses) * 100, 1),
+                    "pnl_usd": round(v3_pnl, 2),
+                    "total_bets": len(v3_settled),
+                },
+                "legacy": {
+                    "wins": legacy_wins,
+                    "losses": legacy_losses,
+                    "win_rate": round(legacy_wins / max(1, legacy_wins + legacy_losses) * 100, 1),
+                    "pnl_usd": round(legacy_pnl, 2),
+                    "total_bets": len(legacy_settled),
+                },
+            },
         })
     except Exception as e:
         return jsonify({"settled": [], "error": str(e)})
@@ -4661,6 +4706,25 @@ def today_picks():
     return jsonify({"picks": today_markets[:20], "total": len(today_markets)})
 
 
+@app.route("/scan", methods=["POST"])
+def manual_scan():
+    """Trigger an immediate bot scan + quant strategy run."""
+    import threading
+    def _do_scan():
+        try:
+            _log_activity("🔍 Manual scan triggered from dashboard")
+            run_bot_scan()
+            all_mkts = fetch_all_markets()
+            if all_mkts:
+                run_quant_strategies(all_mkts)
+            _log_activity("✅ Manual scan completed")
+        except Exception as e:
+            _log_activity(f"❌ Manual scan error: {e}")
+    t = threading.Thread(target=_do_scan, daemon=True)
+    t.start()
+    return jsonify({"status": "scan_started", "message": "Manual scan triggered — check /trades for results"})
+
+
 @app.route("/config", methods=["POST"])
 def config():
     data = request.get_json(force=True)
@@ -4949,6 +5013,9 @@ a:hover { color: #7da5f5; }
   .tab { padding: 10px 16px; font-size: 13px; }
   .header { padding: 12px 16px; }
 }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+#scan-btn:hover:not(:disabled) { background: #00dc5a !important; color: #000 !important; }
+#scan-btn:disabled { cursor: wait; }
 </style>
 </head>
 <body>
@@ -4969,6 +5036,10 @@ a:hover { color: #7da5f5; }
     <h1><span>Trade</span>Shark</h1>
   </div>
   <div style="display:flex;align-items:center;gap:12px">
+    <button id="scan-btn" onclick="triggerScan()" style="background:none;border:1px solid #00dc5a;color:#00dc5a;padding:6px 16px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;font-family:inherit;transition:all 0.2s;display:flex;align-items:center;gap:6px">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      Scan Now
+    </button>
     <span class="toggle-label" id="toggle-label">Auto-Trade</span>
     <label class="switch">
       <input type="checkbox" id="auto-trade-toggle" onchange="toggleAutoTrade()">
@@ -5251,6 +5322,32 @@ async function toggleBot() {
   const enable = !window._botEnabled;
   await fetch(API + '/config', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({enabled: enable}) });
   loadStatus();
+}
+
+async function triggerScan() {
+  var btn = document.getElementById('scan-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="animation:spin 1s linear infinite"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Scanning...';
+  btn.style.borderColor = '#555';
+  btn.style.color = '#888';
+  try {
+    await fetch(API + '/scan', { method: 'POST' });
+    showToast('Scan started — finding opportunities...', 'success');
+    // Wait a bit then refresh data
+    setTimeout(() => {
+      loadAll();
+      btn.disabled = false;
+      btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Scan Now';
+      btn.style.borderColor = '#00dc5a';
+      btn.style.color = '#00dc5a';
+    }, 15000);
+  } catch(e) {
+    showToast('Scan failed: ' + e.message, 'error');
+    btn.disabled = false;
+    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Scan Now';
+    btn.style.borderColor = '#00dc5a';
+    btn.style.color = '#00dc5a';
+  }
 }
 
 async function toggleAutoTrade() {
