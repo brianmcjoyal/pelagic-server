@@ -68,7 +68,7 @@ BOT_CONFIG = {
     "min_deviation": 0.15,        # 15% mispricing vs consensus required
     "min_platforms": 2,           # must appear on 2+ platforms
     "min_volume": 100,            # minimum market volume (liquidity check)
-    "scan_interval_seconds": 10,  # 10s scan interval (faster for live markets)
+    "scan_interval_seconds": 60,  # 60s scan interval (balanced speed vs server load)
     "max_category_exposure": 10,  # max 10 positions per category (correlation limit)
 }
 
