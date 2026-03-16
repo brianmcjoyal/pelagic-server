@@ -2266,7 +2266,22 @@ def _generate_picks():
             return 9999
 
     # ── Filter ALL picks to 90-day max settlement ──
-    picks = [p for p in picks if _days_to_settle(p) <= MAX_SETTLE_DAYS]
+    # Filter: must settle in the future AND within MAX_SETTLE_DAYS
+    picks = [p for p in picks if 0 < _days_to_settle(p) <= MAX_SETTLE_DAYS]
+    # Filter: skip terrible risk/reward globally (not just hero)
+    picks = [p for p in picks if 5 <= p.get("price_cents", 50) <= 90]
+    # Deduplicate: only 1 pick per base event question
+    seen_base_q = set()
+    deduped_picks = []
+    for p in picks:
+        import re as _re
+        base = _re.sub(r'\s*(q[1-4]\s*20\d{2}|before\s+20\d{2}|by\s+20\d{2})$', '', p.get("kalshi_question", "").lower().strip())[:60]
+        event_prefix = p.get("kalshi_ticker", "")[:10]
+        key = base + "|" + event_prefix
+        if key not in seen_base_q:
+            seen_base_q.add(key)
+            deduped_picks.append(p)
+    picks = deduped_picks
 
     # ── Split into sports & non-sports, return exactly 10 each ──
     sports_picks = sorted([p for p in picks if p.get("is_sports")], key=lambda x: x["score"], reverse=True)[:10]
