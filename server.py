@@ -1646,10 +1646,10 @@ LIVE_GAME_SERIES = [
 ]
 
 # Sniper settings
-SNIPE_MIN_PRICE = 92   # cents — only buy if price >= 92c (very likely to win)
+SNIPE_MIN_PRICE = 90   # cents — only buy if price >= 90c (very likely to win)
 SNIPE_MAX_PRICE = 98   # cents — don't buy at 99c (1c profit not worth it)
 SNIPE_BET_USD = 5.0    # dollars per snipe trade
-SNIPE_MAX_DAILY = 25.0 # max daily spend on snipes
+SNIPE_MAX_DAILY = 100.0 # max daily spend on snipes
 
 BOT_STATE["snipe_trades_today"] = []
 BOT_STATE["snipe_daily_spent"] = 0.0
@@ -1658,9 +1658,9 @@ BOT_STATE["snipe_losses"] = 0
 BOT_STATE["snipe_profit_usd"] = 0.0
 
 def live_game_snipe():
-    """Scan live sports games for near-certain outcomes and buy them.
-    Strategy: buy YES at 92-98c on games that are essentially over.
-    Profit: 2-8c per contract on settlement."""
+    """Scan ALL Kalshi markets for near-certain outcomes (90-98c) and buy them.
+    Strategy: anything with 90%+ probability — sports, weather, politics, economics.
+    Profit: 2-10c per contract on settlement."""
     if not BOT_CONFIG.get("enabled"):
         return []
 
@@ -1686,27 +1686,49 @@ def live_game_snipe():
     except Exception:
         return []
 
-    # Get existing position tickers to avoid doubling down
+    # Get existing position tickers and events to avoid doubling down
     existing_tickers = set()
+    existing_events = set()
     try:
         positions = check_position_prices()
         for p in positions:
             existing_tickers.add(p.get("ticker", ""))
+            parts = p.get("ticker", "").split("-")
+            if parts:
+                existing_events.add(parts[0])
     except Exception:
         pass
 
     snipes = []
 
+    # Scan sports series AND broad market pages for high-probability opportunities
+    scan_sources = []
+
+    # 1. Sports series (live games)
     for series in LIVE_GAME_SERIES:
+        scan_sources.append({"series_ticker": series})
+
+    # 2. Broad market scan — markets closing soon (next 7 days) are most likely to be near-certain
+    now_ts = int(datetime.datetime.utcnow().timestamp())
+    week_ts = now_ts + (7 * 86400)
+    scan_sources.append({"min_close_ts": now_ts, "max_close_ts": week_ts})
+
+    # 3. Markets closing today (most likely to be decided already)
+    day_ts = now_ts + 86400
+    scan_sources.append({"min_close_ts": now_ts, "max_close_ts": day_ts})
+
+    for source_params in scan_sources:
         if BOT_STATE["snipe_daily_spent"] >= SNIPE_MAX_DAILY:
             break
 
         try:
             mh = signed_headers("GET", "/markets")
+            params = {"limit": 200, "status": "open"}
+            params.update(source_params)
             resp = requests.get(
                 KALSHI_BASE_URL + KALSHI_API_PREFIX + "/markets",
                 headers=mh,
-                params={"limit": 100, "series_ticker": series, "status": "open"},
+                params=params,
                 timeout=8,
             )
             if not resp.ok:
@@ -1718,8 +1740,11 @@ def live_game_snipe():
                 ticker = mkt.get("ticker", "")
                 title = mkt.get("title", "")
 
-                # Skip if we already hold this
+                # Skip if we already hold this ticker or event
                 if ticker in existing_tickers:
+                    continue
+                event_key = ticker.split("-")[0] if ticker else ""
+                if event_key in existing_events:
                     continue
 
                 # Parse prices
@@ -1798,6 +1823,7 @@ def live_game_snipe():
                         )
                         snipes.append({"ticker": ticker, "filled": filled, "cost": actual_cost, "potential": potential})
                         existing_tickers.add(ticker)
+                        existing_events.add(event_key)
                     else:
                         _log_activity(f"🎯 Snipe missed: {ticker} — 0 filled at {price}c", "error")
                 else:
@@ -1805,7 +1831,7 @@ def live_game_snipe():
                     _log_activity(f"🎯 Snipe failed: {ticker} — {err}", "error")
 
         except Exception as e:
-            print(f"[SNIPER] Error scanning {series}: {e}")
+            print(f"[SNIPER] Error scanning source: {e}")
             continue
 
     if snipes:
