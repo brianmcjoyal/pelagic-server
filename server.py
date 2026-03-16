@@ -3291,11 +3291,14 @@ import time as _time
 
 def _background_loop():
     """Simple background loop that runs scans, warms cache, monitors positions."""
-    _time.sleep(10)  # wait for server to fully start
+    _time.sleep(30)  # wait 30s for server to fully start before scanning
     print("[BG] Background loop started")
-    _log_activity("Background engine started — v2 TURBO")
+    _log_activity("Background engine started — v3 QUANT")
     # Hydrate trade history from Kalshi on startup
-    _hydrate_from_kalshi()
+    try:
+        _hydrate_from_kalshi()
+    except Exception as e:
+        print(f"[BG] Hydrate error (non-fatal): {e}")
     _log_activity(f"Loaded {len(BOT_STATE['all_trades'])} trades from Kalshi (${BOT_STATE['daily_spent_usd']:.2f} spent today)")
 
     # Initialize known settled positions on startup
@@ -3320,8 +3323,10 @@ def _background_loop():
             cycle += 1
             # Run bot scan with correlation + volatility (updates BOT_STATE)
             run_bot_scan()
+            _time.sleep(2)  # yield to web requests
             # Live game sniper — buy near-certain live sports outcomes
             live_game_snipe()
+            _time.sleep(2)  # yield to web requests
             # QUANT ENGINE — run all strategies (every 3rd cycle)
             if cycle % 3 == 0:
                 try:
