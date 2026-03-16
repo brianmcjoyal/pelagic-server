@@ -1633,6 +1633,190 @@ def run_bot_scan():
         print(f"[BOT] Scan error: {e}")
 
 # ---------------------------------------------------------------------------
+# LIVE GAME SNIPER — buy near-certain outcomes in live sports
+# ---------------------------------------------------------------------------
+
+# Sports series to scan for live games
+LIVE_GAME_SERIES = [
+    "KXMLBGAME",    # MLB game winners
+    "KXNBAGAME",    # NBA game winners
+    "KXNHLGAME",    # NHL game winners
+    "KXNFLGAME",    # NFL game winners
+    "KXSOCCERGAME", # Soccer game winners
+]
+
+# Sniper settings
+SNIPE_MIN_PRICE = 92   # cents — only buy if price >= 92c (very likely to win)
+SNIPE_MAX_PRICE = 98   # cents — don't buy at 99c (1c profit not worth it)
+SNIPE_BET_USD = 5.0    # dollars per snipe trade
+SNIPE_MAX_DAILY = 25.0 # max daily spend on snipes
+
+BOT_STATE["snipe_trades_today"] = []
+BOT_STATE["snipe_daily_spent"] = 0.0
+BOT_STATE["snipe_wins"] = 0
+BOT_STATE["snipe_losses"] = 0
+BOT_STATE["snipe_profit_usd"] = 0.0
+
+def live_game_snipe():
+    """Scan live sports games for near-certain outcomes and buy them.
+    Strategy: buy YES at 92-98c on games that are essentially over.
+    Profit: 2-8c per contract on settlement."""
+    if not BOT_CONFIG.get("enabled"):
+        return []
+
+    # Daily reset check
+    today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+    if BOT_STATE.get("snipe_date") != today:
+        BOT_STATE["snipe_date"] = today
+        BOT_STATE["snipe_trades_today"] = []
+        BOT_STATE["snipe_daily_spent"] = 0.0
+
+    if BOT_STATE["snipe_daily_spent"] >= SNIPE_MAX_DAILY:
+        return []
+
+    # Check balance
+    try:
+        bal_h = signed_headers("GET", "/portfolio/balance")
+        bal_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
+                             headers=bal_h, timeout=TIMEOUT)
+        if bal_r.ok:
+            bal = bal_r.json().get("balance", 0) / 100
+            if bal < BOT_CONFIG.get("min_balance_usd", 200):
+                return []
+    except Exception:
+        return []
+
+    # Get existing position tickers to avoid doubling down
+    existing_tickers = set()
+    try:
+        positions = check_position_prices()
+        for p in positions:
+            existing_tickers.add(p.get("ticker", ""))
+    except Exception:
+        pass
+
+    snipes = []
+
+    for series in LIVE_GAME_SERIES:
+        if BOT_STATE["snipe_daily_spent"] >= SNIPE_MAX_DAILY:
+            break
+
+        try:
+            mh = signed_headers("GET", "/markets")
+            resp = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + "/markets",
+                headers=mh,
+                params={"limit": 100, "series_ticker": series, "status": "open"},
+                timeout=8,
+            )
+            if not resp.ok:
+                continue
+
+            markets = resp.json().get("markets", [])
+
+            for mkt in markets:
+                ticker = mkt.get("ticker", "")
+                title = mkt.get("title", "")
+
+                # Skip if we already hold this
+                if ticker in existing_tickers:
+                    continue
+
+                # Parse prices
+                yes_ask = None
+                no_ask = None
+                try:
+                    ya = mkt.get("yes_ask_dollars") or mkt.get("yes_ask")
+                    if ya:
+                        yes_ask = int(round(float(str(ya)) * 100))
+                    na = mkt.get("no_ask_dollars") or mkt.get("no_ask")
+                    if na:
+                        no_ask = int(round(float(str(na)) * 100))
+                except Exception:
+                    continue
+
+                # Find the near-certain side
+                side = None
+                price = None
+                if yes_ask and SNIPE_MIN_PRICE <= yes_ask <= SNIPE_MAX_PRICE:
+                    side = "yes"
+                    price = yes_ask
+                elif no_ask and SNIPE_MIN_PRICE <= no_ask <= SNIPE_MAX_PRICE:
+                    side = "no"
+                    price = no_ask
+
+                if not side:
+                    continue
+
+                # Check daily limit
+                if BOT_STATE["snipe_daily_spent"] >= SNIPE_MAX_DAILY:
+                    break
+
+                # Calculate quantity — target SNIPE_BET_USD
+                count = max(1, min(20, int(SNIPE_BET_USD * 100 / price)))
+                cost_usd = (price * count) / 100.0
+
+                if BOT_STATE["snipe_daily_spent"] + cost_usd > SNIPE_MAX_DAILY:
+                    continue
+
+                # Check expected profit
+                profit_per = 100 - price  # cents profit per contract if we win
+                expected_profit = profit_per * count / 100.0
+
+                _log_activity(
+                    f"🎯 SNIPE: {side.upper()} {ticker} @ {price}c x{count} "
+                    f"(${cost_usd:.2f}) — potential +${expected_profit:.2f} profit | {title[:50]}",
+                    "info"
+                )
+
+                result = place_kalshi_order(ticker, side, price, count=count)
+                success = "error" not in result
+
+                if success:
+                    # Check fill
+                    order_data = result.get("order", {})
+                    filled = 0
+                    try:
+                        filled = int(float(str(order_data.get("filled_count_fp") or order_data.get("filled_count") or 0)))
+                    except Exception:
+                        pass
+
+                    if filled > 0:
+                        actual_cost = (price * filled) / 100.0
+                        potential = (100 - price) * filled / 100.0
+                        BOT_STATE["snipe_daily_spent"] += actual_cost
+                        BOT_STATE["snipe_trades_today"].append({
+                            "ticker": ticker, "title": title, "side": side,
+                            "price": price, "count": filled, "cost": actual_cost,
+                            "potential_profit": potential,
+                            "time": datetime.datetime.utcnow().isoformat(),
+                        })
+                        _log_activity(
+                            f"🎯 SNIPED! {side.upper()} {ticker} @ {price}c x{filled} "
+                            f"= ${actual_cost:.2f} (potential +${potential:.2f}) | {title[:40]}",
+                            "success"
+                        )
+                        snipes.append({"ticker": ticker, "filled": filled, "cost": actual_cost, "potential": potential})
+                        existing_tickers.add(ticker)
+                    else:
+                        _log_activity(f"🎯 Snipe missed: {ticker} — 0 filled at {price}c", "error")
+                else:
+                    err = result.get("error", "")[:60]
+                    _log_activity(f"🎯 Snipe failed: {ticker} — {err}", "error")
+
+        except Exception as e:
+            print(f"[SNIPER] Error scanning {series}: {e}")
+            continue
+
+    if snipes:
+        total_cost = sum(s["cost"] for s in snipes)
+        total_potential = sum(s["potential"] for s in snipes)
+        _log_activity(f"🎯 Sniper round: {len(snipes)} trades, ${total_cost:.2f} invested, potential +${total_potential:.2f}", "success")
+
+    return snipes
+
+
+# ---------------------------------------------------------------------------
 # Scheduler
 # ---------------------------------------------------------------------------
 
@@ -1665,6 +1849,8 @@ def _background_loop():
             cycle += 1
             # Run bot scan (updates BOT_STATE for status endpoint)
             run_bot_scan()
+            # Live game sniper — buy near-certain live sports outcomes
+            live_game_snipe()
             # Warm the picks cache so /top-picks is fast
             _warm_picks_cache()
             # Check positions for auto-exit every cycle
@@ -2155,6 +2341,8 @@ def status():
         "total_trades_all_time": len(BOT_STATE["all_trades"]),
         "recent_errors": BOT_STATE["errors"][-5:],
         "scheduler_running": scheduler.running,
+        "sniper_trades_today": len(BOT_STATE.get("snipe_trades_today", [])),
+        "sniper_daily_spent": BOT_STATE.get("snipe_daily_spent", 0),
     })
 
 
