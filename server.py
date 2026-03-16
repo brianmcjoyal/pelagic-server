@@ -57,17 +57,18 @@ BOT_VERSION_DATE = "2026-03-15"
 # Bot configuration and state
 # ---------------------------------------------------------------------------
 BOT_CONFIG = {
-    "enabled": True,  # default ON — safety floor at $200 will auto-disable if needed
-    "max_bet_usd": 15.0,          # max $15 per single trade (Kelly sizes dynamically)
-    "max_daily_usd": 150.0,       # max $150/day total (bot + sniper combined) — conservative
+    "enabled": True,  # default ON — safety floor will auto-disable if needed
+    "max_bet_usd": 5.0,           # max $5 per single trade — small, precise bets
+    "max_daily_usd": 50.0,        # max $50/day total — capital preservation mode
     "min_balance_usd": 50.0,      # stop all trading if cash below $50
-    "min_cash_reserve_pct": 0.40, # keep 40% of portfolio in cash
-    "max_open_positions": 30,     # max 30 positions
-    "min_deviation": 0.20,        # 20% mispricing vs consensus required (was 15% — tighter edge)
-    "min_platforms": 2,           # must appear on 2+ platforms
-    "min_volume": 500,            # minimum market volume — higher = more liquid (was 100)
+    "min_cash_reserve_pct": 0.50, # keep 50% of portfolio in cash
+    "max_open_positions": 10,     # max 10 positions — concentrated, high-conviction
+    "min_deviation": 0.25,        # 25% mispricing vs consensus required — only big edges
+    "min_platforms": 3,           # must appear on 3+ platforms — stronger validation
+    "min_volume": 1000,           # minimum market volume — liquid markets only
     "scan_interval_seconds": 60,  # 60s scan interval
-    "max_category_exposure": 5,   # max 5 positions per category (was 10)
+    "max_category_exposure": 3,   # max 3 positions per category — diversified
+    "blocked_categories": ["weather"],  # categories to never trade
 }
 
 BOT_STATE = {
@@ -118,11 +119,21 @@ def _load_state():
         with open(_STATE_FILE, "r") as f:
             data = _json.load(f)
         BOT_STATE["all_trades"] = data.get("all_trades", [])
-        BOT_STATE["trades_today"] = data.get("trades_today", [])
-        BOT_STATE["daily_spent_usd"] = data.get("daily_spent_usd", 0.0)
-        BOT_STATE["trade_date"] = data.get("trade_date", None)
         BOT_STATE["pick_history"] = data.get("pick_history", [])
-        print(f"[STATE] Restored {len(BOT_STATE['all_trades'])} trades from disk")
+        # Only restore today's spending if it's still the same day
+        saved_date = data.get("trade_date", None)
+        today_str = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+        if saved_date == today_str:
+            BOT_STATE["trades_today"] = data.get("trades_today", [])
+            # Reset daily_spent to 0 on redeploy — only count NEW trades this session
+            # Old trades are already placed, don't let them block the new strategy
+            BOT_STATE["daily_spent_usd"] = 0.0
+            BOT_STATE["trade_date"] = today_str
+        else:
+            BOT_STATE["trades_today"] = []
+            BOT_STATE["daily_spent_usd"] = 0.0
+            BOT_STATE["trade_date"] = today_str
+        print(f"[STATE] Restored {len(BOT_STATE['all_trades'])} trades from disk, daily_spent reset to $0 for new session")
     except FileNotFoundError:
         pass
     except Exception as e:
@@ -1604,12 +1615,14 @@ def run_bot_scan():
                 continue  # Already traded this event — skip other outcomes
             traded_events.add(event_key)
 
-            # BLOCK WEATHER: these markets are illiquid penny traps
-            market_cat = classify_market_category(
-                opp.get("kalshi_question", ""), opp["kalshi_ticker"]
-            )
-            if market_cat == "weather":
-                continue
+            # Block banned categories (weather etc — illiquid penny traps)
+            blocked = BOT_CONFIG.get("blocked_categories", [])
+            if blocked:
+                market_cat = classify_market_category(
+                    opp.get("kalshi_question", ""), opp["kalshi_ticker"]
+                )
+                if market_cat in blocked:
+                    continue
 
             # CORRELATION CHECK: don't over-concentrate in one category
             cat_allowed, cat_name, cat_count = check_category_limit(
@@ -1803,6 +1816,13 @@ def live_game_snipe():
                 event_key = ticker.split("-")[0] if ticker else ""
                 if event_key in existing_events:
                     continue
+
+                # Block banned categories (weather etc)
+                blocked = BOT_CONFIG.get("blocked_categories", [])
+                if blocked:
+                    mcat = classify_market_category(title, ticker)
+                    if mcat in blocked:
+                        continue
 
                 # Parse prices
                 yes_ask = None
@@ -2607,6 +2627,13 @@ def run_quant_strategies(all_markets):
         event_key = ticker.split("-")[0] if ticker else ""
         if event_key in existing_events:
             continue
+
+        # Block banned categories (weather etc)
+        blocked = BOT_CONFIG.get("blocked_categories", [])
+        if blocked:
+            qcat = classify_market_category(sig.get("question", ""), ticker)
+            if qcat in blocked:
+                continue
 
         # CORRELATION CHECK — don't over-concentrate
         cat_allowed, cat_name, cat_count = check_category_limit(
