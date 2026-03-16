@@ -3370,8 +3370,8 @@ def _ensure_bg_thread():
     _bg_thread.start()
     print("[STARTUP] Background thread started")
 
-# Try to start now, but also start on first request
-_ensure_bg_thread()
+# Background thread starts on first request via before_request hook
+# (not at import time, to avoid issues with gunicorn --preload)
 
 # Keep scheduler object for status endpoint compatibility
 class _FakeScheduler:
@@ -3384,7 +3384,10 @@ scheduler = _FakeScheduler()
 
 @app.before_request
 def _ensure_bg_on_request():
-    """Ensure background thread is running on first HTTP request."""
+    """Ensure background thread is running on first HTTP request (skip health checks)."""
+    from flask import request as _req
+    if _req.path == "/health":
+        return
     _ensure_bg_thread()
 
 # ---------------------------------------------------------------------------
@@ -3406,8 +3409,7 @@ def debug_scheduler():
 
 @app.route("/health")
 def health():
-    k = load_private_key()
-    return jsonify({"status": "ok", "private_key_loaded": k is not None, "bot_enabled": BOT_CONFIG["enabled"]})
+    return jsonify({"status": "ok"})
 
 
 @app.route("/test-fetch")
