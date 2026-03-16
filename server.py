@@ -1182,6 +1182,39 @@ def sell_kalshi_position(ticker, side, price_cents, count=1):
         return {"error": str(e)}
 
 
+def _parse_kalshi_dollars(val):
+    """Parse Kalshi v2 dollar string fields (e.g. '19.5500') to cents int."""
+    if val is None:
+        return 0
+    try:
+        if isinstance(val, str):
+            return int(round(float(val) * 100))
+        elif isinstance(val, (int, float)):
+            return int(val) if val > 1 else int(round(val * 100))
+    except Exception:
+        pass
+    return 0
+
+
+def _parse_kalshi_position(pos):
+    """Extract position count from Kalshi v2 fields. Returns (count, side).
+    Positive count = YES, negative = NO (for v1). In v2, position_fp is always positive and represents YES contracts."""
+    # v2: position_fp is a string like "23.00"
+    pos_fp = pos.get("position_fp")
+    if pos_fp is not None:
+        try:
+            count = int(round(float(pos_fp)))
+            if count != 0:
+                return abs(count), "yes" if count > 0 else "no"
+        except Exception:
+            pass
+    # v1 fallback
+    position = pos.get("position", 0)
+    if position != 0:
+        return abs(position), "yes" if position > 0 else "no"
+    return 0, "yes"
+
+
 def check_position_prices():
     """Check current market prices for all open positions.
     Returns list of positions with current price, entry price, P&L."""
@@ -1201,8 +1234,8 @@ def check_position_prices():
         enriched = []
         for pos in positions_list:
             ticker = pos.get("ticker", "")
-            position_count = pos.get("position", 0)
-            if position_count == 0:
+            abs_count, side = _parse_kalshi_position(pos)
+            if abs_count == 0:
                 continue  # no active position
 
             # Get current market price
@@ -1221,7 +1254,6 @@ def check_position_prices():
                     mkt = mkt_resp.json().get("market", {})
                     title = mkt.get("title", ticker)
                     close_time = mkt.get("expected_expiration_time") or mkt.get("close_time")
-                    # Get current ask prices
                     yes_ask = mkt.get("yes_ask_dollars") or mkt.get("yes_ask")
                     no_ask = mkt.get("no_ask_dollars") or mkt.get("no_ask")
                     if yes_ask:
@@ -1237,17 +1269,17 @@ def check_position_prices():
             except Exception:
                 pass
 
-            # Determine our side and calculate P&L
-            # position > 0 means we hold YES, position < 0 means we hold NO
-            side = "yes" if position_count > 0 else "no"
-            abs_count = abs(position_count)
-
             # Find our entry price from trade history
             entry_price = None
             for t in BOT_STATE.get("all_trades", []):
                 if t.get("ticker") == ticker:
                     entry_price = t.get("price_cents")
                     break
+            # Fallback: estimate from market_exposure / count
+            if entry_price is None and abs_count > 0:
+                exposure = _parse_kalshi_dollars(pos.get("market_exposure_dollars") or pos.get("market_exposure"))
+                if exposure > 0:
+                    entry_price = int(round(exposure / abs_count))
 
             current_price = current_yes_price if side == "yes" else current_no_price
             unrealized_pnl = None
@@ -1268,10 +1300,13 @@ def check_position_prices():
                 "unrealized_pnl_cents": unrealized_pnl,
                 "pnl_pct": pnl_pct,
                 "close_time": close_time,
+                "market_exposure_cents": _parse_kalshi_dollars(pos.get("market_exposure_dollars")),
             })
         return enriched
     except Exception as e:
         print(f"[MONITOR] Error: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 
@@ -1694,15 +1729,11 @@ def positions():
         raw = resp.json()
         positions_list = raw.get("market_positions", [])
 
-        # Debug: log raw field names from first position
-        if positions_list:
-            print(f"[POSITIONS] Raw fields: {list(positions_list[0].keys())}")
-            print(f"[POSITIONS] Sample: {positions_list[0]}")
-
         # Enrich with market details (title, close time)
         enriched = []
         for pos in positions_list:
             ticker = pos.get("ticker", "")
+            abs_count, side = _parse_kalshi_position(pos)
             market_path = f"/markets/{ticker}"
             mkt_headers = signed_headers("GET", market_path)
             title = ticker
@@ -1722,19 +1753,18 @@ def positions():
             except Exception:
                 pass
 
-            # Use the position fields from Kalshi
             enriched.append({
                 "ticker": ticker,
                 "title": title,
-                "yes_contracts": pos.get("position", 0),
-                "market_exposure": pos.get("market_exposure", 0),
+                "side": side,
+                "count": abs_count,
+                "market_exposure_cents": _parse_kalshi_dollars(pos.get("market_exposure_dollars") or pos.get("market_exposure")),
                 "resting_orders_count": pos.get("resting_orders_count", 0),
-                "total_traded": pos.get("total_traded", 0),
-                "realized_pnl": pos.get("realized_pnl", 0),
+                "total_traded_cents": _parse_kalshi_dollars(pos.get("total_traded_dollars") or pos.get("total_traded")),
+                "realized_pnl_cents": _parse_kalshi_dollars(pos.get("realized_pnl_dollars") or pos.get("realized_pnl")),
                 "close_time": close_time,
                 "result": result,
-                "fees_paid": pos.get("fees_paid", 0),
-                "raw_fields": pos,  # include raw data for debugging
+                "fees_paid_cents": _parse_kalshi_dollars(pos.get("fees_paid_dollars") or pos.get("fees_paid")),
             })
         return jsonify({"positions": enriched})
     except Exception as e:
@@ -1769,12 +1799,13 @@ def settled_positions():
         settled = []
 
         for pos in positions_list:
-            pnl_cents = pos.get("realized_pnl", 0)
+            pnl_cents = _parse_kalshi_dollars(pos.get("realized_pnl_dollars") or pos.get("realized_pnl"))
             pnl = pnl_cents / 100
             total_pnl += pnl
-            fees = pos.get("fees_paid", 0) / 100
-            traded = pos.get("total_traded", 0)
-            total_wagered += traded * 0.01  # rough estimate
+            fees_cents = _parse_kalshi_dollars(pos.get("fees_paid_dollars") or pos.get("fees_paid"))
+            fees = fees_cents / 100
+            traded_cents = _parse_kalshi_dollars(pos.get("total_traded_dollars") or pos.get("total_traded"))
+            total_wagered += traded_cents / 100
 
             ticker = pos.get("ticker", "")
 
@@ -1852,6 +1883,77 @@ def settled_positions():
         })
     except Exception as e:
         return jsonify({"settled": [], "error": str(e)})
+
+
+@app.route("/portfolio-summary")
+def portfolio_summary():
+    """Combined portfolio view: open positions + settled record + balance."""
+    try:
+        # Balance
+        bal_path = "/portfolio/balance"
+        bal_h = signed_headers("GET", bal_path)
+        balance_usd = 0
+        try:
+            bal_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + bal_path, headers=bal_h, timeout=TIMEOUT)
+            if bal_r.ok:
+                balance_usd = bal_r.json().get("balance", 0) / 100
+        except Exception:
+            pass
+
+        # Open positions with P&L
+        open_positions = check_position_prices()
+        total_invested = sum(p.get("market_exposure_cents", 0) for p in open_positions) / 100
+        total_unrealized = sum((p.get("unrealized_pnl_cents") or 0) for p in open_positions) / 100
+
+        # Settled stats
+        settled_path = "/portfolio/positions"
+        settled_h = signed_headers("GET", settled_path)
+        wins = losses = breakeven = 0
+        total_realized = 0
+        settled_list = []
+        try:
+            sr = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + settled_path,
+                headers=settled_h,
+                params={"limit": 200, "settlement_status": "settled"},
+                timeout=TIMEOUT,
+            )
+            if sr.ok:
+                for pos in sr.json().get("market_positions", []):
+                    pnl_cents = _parse_kalshi_dollars(pos.get("realized_pnl_dollars") or pos.get("realized_pnl"))
+                    pnl_usd = pnl_cents / 100
+                    total_realized += pnl_usd
+                    ticker = pos.get("ticker", "")
+                    if pnl_usd > 0.005:
+                        wins += 1
+                        settled_list.append({"ticker": ticker, "pnl_usd": round(pnl_usd, 2), "won": True})
+                    elif pnl_usd < -0.005:
+                        losses += 1
+                        settled_list.append({"ticker": ticker, "pnl_usd": round(pnl_usd, 2), "won": False})
+                    else:
+                        breakeven += 1
+        except Exception:
+            pass
+
+        win_rate = round(wins / max(1, wins + losses) * 100, 1)
+        portfolio_value = balance_usd + total_invested
+
+        return jsonify({
+            "balance_usd": round(balance_usd, 2),
+            "portfolio_value_usd": round(portfolio_value, 2),
+            "open_positions": open_positions,
+            "open_count": len(open_positions),
+            "total_invested_usd": round(total_invested, 2),
+            "total_unrealized_usd": round(total_unrealized, 2),
+            "wins": wins,
+            "losses": losses,
+            "breakeven": breakeven,
+            "win_rate": win_rate,
+            "total_realized_usd": round(total_realized, 2),
+            "settled_history": settled_list[-20:],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 
 # ---------------------------------------------------------------------------
@@ -2756,6 +2858,20 @@ a:hover { text-decoration: underline; }
 .activity-header .label { color: #ff8c00; font-size: 8px; text-transform: uppercase; letter-spacing: 1.5px; font-weight: 700; }
 .activity-header .pulse { width: 6px; height: 6px; border-radius: 50%; background: #00ff88; animation: pulse 2s infinite; }
 @keyframes pulse { 0%, 100% { opacity: 1; box-shadow: 0 0 4px #00ff88; } 50% { opacity: 0.3; box-shadow: none; } }
+/* Portfolio tile */
+.portfolio-tile { background: #0a0a0a; border: 1px solid #333; padding: 12px; margin-bottom: 10px; }
+.portfolio-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.portfolio-header .title { font-size: 11px; color: #ff8c00; text-transform: uppercase; letter-spacing: 1.5px; font-weight: 700; }
+.portfolio-stats { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.portfolio-stats .pstat { background: #050505; border: 1px solid #222; padding: 6px 10px; flex: 1; min-width: 90px; text-align: center; }
+.portfolio-stats .pstat .plabel { font-size: 7px; color: #666; text-transform: uppercase; letter-spacing: 1px; }
+.portfolio-stats .pstat .pval { font-size: 16px; font-weight: 800; font-family: 'Courier New', monospace; margin-top: 1px; }
+.pos-table-compact { width: 100%; border-collapse: collapse; }
+.pos-table-compact th { text-align: left; padding: 4px 6px; font-size: 8px; color: #666; text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid #222; }
+.pos-table-compact td { padding: 5px 6px; font-size: 10px; color: #ccc; border-bottom: 1px solid #111; }
+.pos-table-compact tr:hover { background: #111; }
+.wr-bar { height: 4px; background: #1a1a1a; margin-top: 3px; border-radius: 2px; overflow: hidden; }
+.wr-bar .fill { height: 100%; border-radius: 2px; }
 /* Top Picks - compact grid */
 .top-picks { margin-bottom: 16px; }
 .picks-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
@@ -2885,6 +3001,27 @@ a:hover { text-decoration: underline; }
     <span class="pulse" id="activity-pulse"></span>
   </div>
   <div id="activity-lines"><div class="activity-line"><span class="time">--:--</span><span class="dot info"></span><span class="msg">Waiting for first scan...</span></div></div>
+</div>
+
+<div class="portfolio-tile" id="portfolio-tile">
+  <div class="portfolio-header">
+    <span class="title">My Portfolio</span>
+    <button class="refresh-btn" onclick="loadPortfolio()">Refresh</button>
+  </div>
+  <div class="portfolio-stats" id="portfolio-stats">
+    <div class="pstat"><div class="plabel">Portfolio Value</div><div class="pval" style="color:#00ff88" id="pf-value">--</div></div>
+    <div class="pstat"><div class="plabel">Cash</div><div class="pval" style="color:#4488ff" id="pf-cash">--</div></div>
+    <div class="pstat"><div class="plabel">Invested</div><div class="pval" style="color:#ff8c00" id="pf-invested">--</div></div>
+    <div class="pstat"><div class="plabel">Unrealized P&L</div><div class="pval" id="pf-unrealized">--</div></div>
+    <div class="pstat"><div class="plabel">Realized P&L</div><div class="pval" id="pf-realized">--</div></div>
+    <div class="pstat">
+      <div class="plabel">Win Rate</div>
+      <div class="pval" id="pf-winrate">--</div>
+      <div class="wr-bar"><div class="fill" id="pf-wrbar" style="width:0;background:#555"></div></div>
+    </div>
+    <div class="pstat"><div class="plabel">W / L</div><div class="pval" id="pf-wl">--</div></div>
+  </div>
+  <div id="portfolio-positions"><div class="loading">Loading positions...</div></div>
 </div>
 
 <div class="hero-section">
@@ -3095,6 +3232,79 @@ async function toggleAutoTrade() {
   }
   atBtn.style.opacity = '1';
   loadStatus();
+}
+
+async function loadPortfolio() {
+  try {
+    const data = await fetch(API + '/portfolio-summary').then(r => r.json());
+    if (data.error) { console.error(data.error); return; }
+
+    // Stats
+    document.getElementById('pf-value').textContent = '$' + (data.portfolio_value_usd || 0).toFixed(2);
+    document.getElementById('pf-cash').textContent = '$' + (data.balance_usd || 0).toFixed(2);
+    document.getElementById('pf-invested').textContent = '$' + (data.total_invested_usd || 0).toFixed(2);
+
+    var uPnl = data.total_unrealized_usd || 0;
+    var uEl = document.getElementById('pf-unrealized');
+    uEl.textContent = (uPnl >= 0 ? '+$' : '-$') + Math.abs(uPnl).toFixed(2);
+    uEl.style.color = uPnl >= 0 ? '#00ff88' : '#ff4444';
+
+    var rPnl = data.total_realized_usd || 0;
+    var rEl = document.getElementById('pf-realized');
+    rEl.textContent = (rPnl >= 0 ? '+$' : '-$') + Math.abs(rPnl).toFixed(2);
+    rEl.style.color = rPnl >= 0 ? '#00ff88' : '#ff4444';
+
+    var wr = data.win_rate || 0;
+    var wrEl = document.getElementById('pf-winrate');
+    wrEl.textContent = wr.toFixed(0) + '%';
+    wrEl.style.color = wr >= 60 ? '#00ff88' : wr >= 40 ? '#ff8c00' : '#ff4444';
+    var wrBar = document.getElementById('pf-wrbar');
+    wrBar.style.width = Math.max(2, wr) + '%';
+    wrBar.style.background = wr >= 60 ? '#00ff88' : wr >= 40 ? '#ff8c00' : '#ff4444';
+
+    var w = data.wins || 0, l = data.losses || 0;
+    var wlEl = document.getElementById('pf-wl');
+    wlEl.innerHTML = '<span style="color:#00ff88">' + w + 'W</span> / <span style="color:#ff4444">' + l + 'L</span>';
+
+    // Positions table
+    var positions = data.open_positions || [];
+    var posEl = document.getElementById('portfolio-positions');
+    if (positions.length === 0) {
+      posEl.innerHTML = '<div style="color:#555;font-size:10px;padding:6px">No open positions</div>';
+      return;
+    }
+    var html = '<table class="pos-table-compact"><tr><th>Market</th><th>Side</th><th>Qty</th><th>Entry</th><th>Now</th><th>P&L</th><th>Expires</th><th></th></tr>';
+    positions.forEach(function(p) {
+      var sideColor = p.side === 'yes' ? '#00ff88' : '#ff4444';
+      var pnlText = '--';
+      var pnlColor = '#555';
+      if (p.pnl_pct !== null && p.pnl_pct !== undefined) {
+        pnlColor = p.pnl_pct >= 0 ? '#00ff88' : '#ff4444';
+        var cents = p.unrealized_pnl_cents || 0;
+        pnlText = (p.pnl_pct >= 0 ? '+' : '') + p.pnl_pct + '% (' + (cents >= 0 ? '+' : '') + '$' + (Math.abs(cents) / 100).toFixed(2) + ')';
+      }
+      var timeLeft = formatSettleTime(p.close_time);
+      var sellPrice = p.current_price ? Math.max(1, p.current_price - 1) : 0;
+      html += '<tr>';
+      html += '<td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><a href="https://kalshi.com/markets/' + p.ticker + '" target="_blank" style="color:#ddd">' + (p.title || p.ticker) + '</a></td>';
+      html += '<td style="color:' + sideColor + ';font-weight:700">' + p.side.toUpperCase() + '</td>';
+      html += '<td>' + p.count + '</td>';
+      html += '<td>' + (p.entry_price || '?') + 'c</td>';
+      html += '<td style="font-weight:700">' + (p.current_price || '?') + 'c</td>';
+      html += '<td style="color:' + pnlColor + ';font-weight:700">' + pnlText + '</td>';
+      html += '<td style="color:#ff8c00;font-size:9px">' + timeLeft + '</td>';
+      if (sellPrice > 0) {
+        html += '<td><button class="hero-execute" style="font-size:8px;padding:2px 6px" onclick="sellPosition(&quot;' + p.ticker + '&quot;,&quot;' + p.side + '&quot;,' + sellPrice + ',' + p.count + ')">SELL</button></td>';
+      } else {
+        html += '<td></td>';
+      }
+      html += '</tr>';
+    });
+    html += '</table>';
+    posEl.innerHTML = html;
+  } catch(e) {
+    console.error('Portfolio load error:', e);
+  }
 }
 
 async function loadActivity() {
@@ -3815,15 +4025,16 @@ async function loadSettled() {
 // Load everything on page load
 loadStatus();
 loadActivity();
+loadPortfolio();
 loadTopPicks();
 loadTodayPicks();
 loadPositions();
 loadSettled();
 loadMispriced();
 loadTrades();
-// Auto-refresh: activity feed every 10s, everything else every 30s
+// Auto-refresh: activity feed every 10s, portfolio every 30s, rest every 30s
 setInterval(() => { loadActivity(); }, 10000);
-setInterval(() => { loadStatus(); loadTopPicks(); loadTodayPicks(); loadPositions(); loadSettled(); loadTrades(); }, 30000);
+setInterval(() => { loadStatus(); loadPortfolio(); loadTopPicks(); loadTodayPicks(); loadPositions(); loadSettled(); loadTrades(); }, 30000);
 </script>
 </body>
 </html>
