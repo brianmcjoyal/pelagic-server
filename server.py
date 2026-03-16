@@ -1266,8 +1266,8 @@ def check_position_prices():
 
 
 # Auto-exit thresholds
-TAKE_PROFIT_PCT = 20   # sell when up 20%+
-STOP_LOSS_PCT = -15     # sell when down 15%+
+TAKE_PROFIT_PCT = 15   # sell when up 15%
+STOP_LOSS_PCT = -10    # cut losses at 10%
 
 def auto_exit_check():
     """Check positions and auto-exit based on profit/loss thresholds."""
