@@ -21,8 +21,6 @@ from flask_cors import CORS
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
-from apscheduler.schedulers.background import BackgroundScheduler
-
 app = Flask(__name__)
 CORS(app)
 
