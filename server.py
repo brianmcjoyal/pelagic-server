@@ -1435,10 +1435,30 @@ def auto_exit_check():
             reason = f"Down {pnl_pct}% — cutting losses"
 
         if action and current:
-            # Sell at current bid (slightly below ask for instant fill)
-            sell_price = max(1, current - 1)
+            # Sell aggressively to ensure fill — drop price significantly
+            # For take profit: we're already up, accept slightly less to guarantee exit
+            # For stop loss: cut losses fast, sell at steep discount
+            entry = pos.get("entry_price") or current
+            if action == "take_profit":
+                # Sell at entry + small profit margin (guarantee we still profit)
+                min_profit_price = max(1, entry + 1)
+                sell_price = max(min_profit_price, current - 3)
+            else:
+                # Stop loss: sell at any price above 1c to get out ASAP
+                sell_price = max(1, current - 5)
+
             result = sell_kalshi_position(ticker, side, sell_price, count)
             success = "error" not in result
+
+            # Check if order actually filled (not just accepted)
+            order_data = result.get("order", {})
+            filled = 0
+            try:
+                filled = int(float(str(order_data.get("filled_count_fp") or order_data.get("filled_count") or 0)))
+            except Exception:
+                pass
+            remaining = count - filled
+
             exits.append({
                 "ticker": ticker,
                 "title": pos["title"],
@@ -1448,9 +1468,15 @@ def auto_exit_check():
                 "sell_price": sell_price,
                 "result": result,
                 "success": success,
+                "filled": filled,
             })
-            if success:
-                print(f"[AUTO-EXIT] {action}: {ticker} at {sell_price}c ({reason})")
+            if success and filled > 0:
+                pnl_usd = (sell_price - entry) * filled / 100
+                _log_activity(f"Auto-exit: {action} {ticker} (Up {pnl_pct}% — taking profit) SOLD {filled}x @ {sell_price}c = ${pnl_usd:+.2f}", "success" if pnl_usd >= 0 else "error")
+                print(f"[AUTO-EXIT] {action}: {ticker} FILLED {filled}/{count} at {sell_price}c (${pnl_usd:+.2f})")
+            elif success and filled == 0:
+                _log_activity(f"Auto-exit: {ticker} — order accepted but 0 filled at {sell_price}c (no buyer)", "error")
+                print(f"[AUTO-EXIT] {action}: {ticker} — 0 filled at {sell_price}c, no buyer at that price")
             else:
                 print(f"[AUTO-EXIT] FAILED {action}: {ticker} — {result.get('error', '')[:100]}")
                 _log_activity(f"Auto-exit FAILED: {ticker} — {result.get('error', '')[:80]}", "error")
