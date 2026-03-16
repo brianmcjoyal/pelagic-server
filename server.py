@@ -1236,14 +1236,21 @@ def place_kalshi_order(ticker, side, price_cents, count=1):
     except Exception as e:
         return {"error": str(e)}
 
-def sell_kalshi_position(ticker, side, price_cents, count=1):
+_resting_sells = set()  # tickers with resting sell orders, avoid duplicates
+
+def sell_kalshi_position(ticker, side, price_cents, count=1, resting=False):
     """Sell an existing position on Kalshi."""
     path = "/portfolio/orders"
     headers = signed_headers("POST", path)
     if not headers:
         return {"error": "No API key"}
 
+    # If resting and we already have a resting order for this ticker, skip
+    if resting and ticker in _resting_sells:
+        return {"error": "Resting sell already exists", "skipped": True}
+
     price_dollars = f"{price_cents / 100:.4f}"
+    tif = "gtc" if resting else "immediate_or_cancel"
     payload = {
         "ticker": ticker,
         "action": "sell",
@@ -1251,7 +1258,7 @@ def sell_kalshi_position(ticker, side, price_cents, count=1):
         "type": "limit",
         "count_fp": f"{int(count)}.00",
         "client_order_id": str(uuid.uuid4()),
-        "time_in_force": "immediate_or_cancel",
+        "time_in_force": tif,
     }
     if side == "yes":
         payload["yes_price_dollars"] = price_dollars
@@ -1475,8 +1482,17 @@ def auto_exit_check():
                 _log_activity(f"Auto-exit: {action} {ticker} (Up {pnl_pct}% — taking profit) SOLD {filled}x @ {sell_price}c = ${pnl_usd:+.2f}", "success" if pnl_usd >= 0 else "error")
                 print(f"[AUTO-EXIT] {action}: {ticker} FILLED {filled}/{count} at {sell_price}c (${pnl_usd:+.2f})")
             elif success and filled == 0:
-                _log_activity(f"Auto-exit: {ticker} — order accepted but 0 filled at {sell_price}c (no buyer)", "error")
-                print(f"[AUTO-EXIT] {action}: {ticker} — 0 filled at {sell_price}c, no buyer at that price")
+                # No instant fill — place a resting GTC order so it sits on the book
+                if ticker not in _resting_sells:
+                    resting_result = sell_kalshi_position(ticker, side, sell_price, count, resting=True)
+                    if "error" not in resting_result:
+                        _resting_sells.add(ticker)
+                        _log_activity(f"Auto-exit: {ticker} — placed resting sell at {sell_price}c (waiting for buyer)", "info")
+                        print(f"[AUTO-EXIT] {action}: {ticker} — resting sell placed at {sell_price}c")
+                    else:
+                        _log_activity(f"Auto-exit: {ticker} — no buyer at {sell_price}c, resting order failed", "error")
+                else:
+                    pass  # already have a resting order, skip silently
             else:
                 print(f"[AUTO-EXIT] FAILED {action}: {ticker} — {result.get('error', '')[:100]}")
                 _log_activity(f"Auto-exit FAILED: {ticker} — {result.get('error', '')[:80]}", "error")
@@ -1649,10 +1665,7 @@ def _background_loop():
             _warm_picks_cache()
             # Check positions for auto-exit every cycle
             exits = auto_exit_check()
-            if exits:
-                for ex in exits:
-                    _log_activity(f"Auto-exit: {ex['action']} {ex['ticker']} ({ex['reason']})", "success" if "profit" in ex.get("reason", "").lower() else "error")
-                    print(f"[BG] Auto-exit: {ex['action']} on {ex['ticker']} ({ex['reason']})")
+            # auto_exit_check() now handles its own logging with fill status
         except Exception as e:
             import traceback
             _log_activity(f"Background error: {str(e)[:80]}", "error")
