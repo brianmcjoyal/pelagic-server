@@ -55,7 +55,7 @@ TIMEOUT = 8
 BOT_CONFIG = {
     "enabled": True,  # default ON — safety floor at $200 will auto-disable if needed
     "max_bet_usd": 5.0,           # max $5 per single trade
-    "max_daily_usd": 50.0,        # max $50/day total (bot + sniper combined)
+    "max_daily_usd": 500.0,       # max $500/day total (bot + sniper combined)
     "min_balance_usd": 200.0,     # stop all trading if cash below $200
     "min_cash_reserve_pct": 0.50, # keep 50% of portfolio value in cash
     "max_open_positions": 20,     # never hold more than 20 positions
