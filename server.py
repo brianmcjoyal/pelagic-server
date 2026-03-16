@@ -3546,7 +3546,7 @@ async function loadPositions() {
       html += '<td style="color:' + pnlColor + ';font-weight:700">' + pnlText + '</td>';
       html += '<td style="color:#ff8c00">' + timeLeft + '</td>';
       if (sellPrice > 0) {
-        html += '<td><button class="hero-execute" style="font-size:9px;padding:3px 8px" onclick="sellPosition(\'' + p.ticker + '\',\'' + p.side + '\',' + sellPrice + ',' + p.count + ')">SELL ' + sellPrice + 'c</button></td>';
+        html += '<td><button class="hero-execute" style="font-size:9px;padding:3px 8px" onclick="sellPosition(&quot;' + p.ticker + '&quot;,&quot;' + p.side + '&quot;,' + sellPrice + ',' + p.count + ')">SELL ' + sellPrice + 'c</button></td>';
       } else {
         html += '<td style="color:#555">--</td>';
       }
