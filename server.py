@@ -1579,7 +1579,11 @@ def run_bot_scan():
             traded_events.add(event_key)
 
             pc = opp["price_cents"]
-            count = max(1, 500 // pc) if pc > 0 else 1  # target $5 per trade
+            # Skip penny markets (illiquid, can't sell)
+            if pc < 15:
+                continue
+            # Target ~$5 per trade, max 20 contracts to avoid huge positions
+            count = max(1, min(20, 500 // pc)) if pc > 0 else 1
             cost_usd = (pc * count) / 100.0
             if cost_usd > BOT_CONFIG["max_bet_usd"]:
                 count = max(1, int(BOT_CONFIG["max_bet_usd"] * 100 / pc))
@@ -2613,7 +2617,9 @@ def _generate_picks():
     # Filter: must settle in the future AND within MAX_SETTLE_DAYS
     picks = [p for p in picks if 0 < _days_to_settle(p) <= MAX_SETTLE_DAYS]
     # Filter: skip terrible risk/reward globally (not just hero)
-    picks = [p for p in picks if 5 <= p.get("price_cents", 50) <= 90]
+    # Min 15c: avoid illiquid penny markets that can't be sold
+    # Max 90c: avoid expensive low-upside markets
+    picks = [p for p in picks if 15 <= p.get("price_cents", 50) <= 90]
     # Deduplicate: only 1 pick per base event question
     seen_base_q = set()
     deduped_picks = []
