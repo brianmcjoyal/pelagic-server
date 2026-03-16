@@ -104,7 +104,8 @@ def _save_state():
         print(f"[STATE] Save error: {e}")
 
 def _load_state():
-    """Restore trade data from disk."""
+    """Restore trade data from disk, then hydrate from Kalshi fills API."""
+    # First try local cache
     try:
         with open(_STATE_FILE, "r") as f:
             data = _json.load(f)
@@ -118,6 +119,90 @@ def _load_state():
         pass
     except Exception as e:
         print(f"[STATE] Load error: {e}")
+
+def _hydrate_from_kalshi():
+    """Pull actual trade fills from Kalshi API to rebuild state after deploy."""
+    import requests as _req
+    try:
+        path = "/portfolio/fills"
+        headers = signed_headers("GET", path)
+        if not headers:
+            print("[HYDRATE] No API key — skipping")
+            return
+        resp = _req.get(
+            KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
+            headers=headers,
+            params={"limit": 200},
+            timeout=15,
+        )
+        if not resp.ok:
+            print(f"[HYDRATE] Fills API returned {resp.status_code}")
+            return
+        fills = resp.json().get("fills", [])
+        if not fills:
+            print("[HYDRATE] No fills found")
+            return
+
+        today_str = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+        existing_ids = {t.get("order_id") for t in BOT_STATE["all_trades"] if t.get("order_id")}
+
+        new_count = 0
+        today_count = 0
+        today_spent = 0.0
+        all_trades_rebuilt = []
+
+        for fill in fills:
+            order_id = fill.get("order_id", "")
+            ticker = fill.get("ticker", "")
+            side = fill.get("side", "")
+            action = fill.get("action", "buy")
+            count = fill.get("count", 0)
+            price_cents = 0
+            try:
+                yes_price = fill.get("yes_price_dollars") or fill.get("yes_price")
+                no_price = fill.get("no_price_dollars") or fill.get("no_price")
+                if side == "yes" and yes_price:
+                    price_cents = int(round(float(yes_price) * 100)) if isinstance(yes_price, str) else int(yes_price * 100 if yes_price < 1 else yes_price)
+                elif side == "no" and no_price:
+                    price_cents = int(round(float(no_price) * 100)) if isinstance(no_price, str) else int(no_price * 100 if no_price < 1 else no_price)
+            except Exception:
+                pass
+
+            created = fill.get("created_time", "")
+            cost_usd = (price_cents * count) / 100
+            trade_rec = {
+                "timestamp": created,
+                "ticker": ticker,
+                "side": side,
+                "action": action,
+                "price_cents": price_cents,
+                "count": count,
+                "cost_usd": round(cost_usd, 2),
+                "order_id": order_id,
+                "source": "kalshi_fill",
+            }
+            all_trades_rebuilt.append(trade_rec)
+
+            # Count today's trades
+            if created and created[:10] == today_str and action == "buy":
+                today_count += 1
+                today_spent += cost_usd
+
+            if order_id not in existing_ids:
+                new_count += 1
+
+        # Rebuild state from Kalshi truth
+        BOT_STATE["all_trades"] = all_trades_rebuilt
+        BOT_STATE["trade_date"] = today_str
+        today_trades = [t for t in all_trades_rebuilt if (t.get("timestamp") or "")[:10] == today_str and t.get("action") == "buy"]
+        BOT_STATE["trades_today"] = today_trades
+        BOT_STATE["daily_spent_usd"] = round(today_spent, 2)
+        _save_state()
+        print(f"[HYDRATE] Rebuilt {len(all_trades_rebuilt)} trades from Kalshi ({new_count} new), today: {today_count} trades, ${today_spent:.2f} spent")
+    except Exception as e:
+        print(f"[HYDRATE] Error: {e}")
+        import traceback
+        traceback.print_exc()
 
 _load_state()
 
@@ -1509,6 +1594,9 @@ def _background_loop():
     _time.sleep(10)  # wait for server to fully start
     print("[BG] Background loop started")
     _log_activity("Background engine started")
+    # Hydrate trade history from Kalshi on startup
+    _hydrate_from_kalshi()
+    _log_activity(f"Loaded {len(BOT_STATE['all_trades'])} trades from Kalshi (${BOT_STATE['daily_spent_usd']:.2f} spent today)")
     cycle = 0
     while True:
         try:
