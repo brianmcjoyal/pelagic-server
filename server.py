@@ -5,6 +5,7 @@ Pelagic — Cross-Platform Prediction Market Trading Bot
 import os
 import re
 import uuid
+import math
 import atexit
 import base64
 import datetime
@@ -13,6 +14,7 @@ import xml.etree.ElementTree as ET
 from html import unescape as html_unescape
 from urllib.parse import quote_plus
 from difflib import SequenceMatcher
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -54,7 +56,7 @@ TIMEOUT = 8
 # ---------------------------------------------------------------------------
 BOT_CONFIG = {
     "enabled": True,  # default ON — safety floor at $200 will auto-disable if needed
-    "max_bet_usd": 5.0,           # max $5 per single trade
+    "max_bet_usd": 25.0,          # max $25 per single trade (Kelly sizes dynamically)
     "max_daily_usd": 500.0,       # max $500/day total (bot + sniper combined)
     "min_balance_usd": 200.0,     # stop all trading if cash below $200
     "min_cash_reserve_pct": 0.50, # keep 50% of portfolio value in cash
@@ -1613,8 +1615,9 @@ def run_bot_scan():
             # Skip penny markets (illiquid, can't sell)
             if pc < 20:
                 continue
-            # Target ~$5 per trade, max 20 contracts to avoid huge positions
-            count = max(1, min(20, 500 // pc)) if pc > 0 else 1
+            # KELLY CRITERION sizing — scales bets with bankroll + edge
+            consensus = opp.get("consensus_yes_price", 0.5)
+            count = kelly_count(current_balance, pc, consensus)
             cost_usd = (pc * count) / 100.0
             if cost_usd > BOT_CONFIG["max_bet_usd"]:
                 count = max(1, int(BOT_CONFIG["max_bet_usd"] * 100 / pc))
@@ -1888,6 +1891,723 @@ def _warm_picks_cache():
         print(f"[CACHE] Warm error: {e}")
         traceback.print_exc()
 
+# ===========================================================================
+# QUANT ENGINE — Professional trading strategies adapted for prediction markets
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 1. KELLY CRITERION — Optimal bet sizing based on bankroll + edge
+# ---------------------------------------------------------------------------
+# f* = (bp - q) / b  where b=odds, p=win_prob, q=1-p
+# We use half-Kelly for safety (less volatile)
+
+def kelly_bet_size(bankroll, win_prob, odds_decimal):
+    """Calculate optimal Kelly Criterion bet size.
+
+    Args:
+        bankroll: total available cash in dollars
+        win_prob: estimated probability of winning (0-1)
+        odds_decimal: decimal odds (e.g., buy at 60c = payout 100c, odds = 100/60 - 1 = 0.667)
+
+    Returns:
+        Optimal bet in dollars (half-Kelly for safety)
+    """
+    if win_prob <= 0 or win_prob >= 1 or odds_decimal <= 0:
+        return 0
+    q = 1 - win_prob
+    b = odds_decimal
+    kelly_fraction = (b * win_prob - q) / b
+    if kelly_fraction <= 0:
+        return 0  # negative edge — don't bet
+    # Half-Kelly for safety — reduces variance while keeping ~75% of growth rate
+    half_kelly = kelly_fraction / 2
+    # Cap at 5% of bankroll per trade (risk management)
+    capped = min(half_kelly, 0.05)
+    bet = bankroll * capped
+    # Floor and ceiling
+    return max(1.0, min(bet, BOT_CONFIG["max_bet_usd"]))
+
+
+def kelly_count(bankroll, price_cents, consensus_price):
+    """Calculate contract count using Kelly Criterion.
+
+    Args:
+        bankroll: cash in dollars
+        price_cents: what we'd pay per contract
+        consensus_price: what we think true probability is (0-1)
+    """
+    if price_cents <= 0 or price_cents >= 100:
+        return 1
+    our_cost = price_cents / 100.0  # what we pay
+    win_prob = consensus_price       # estimated true probability
+    # If buying YES at 60c, payout is 100c, so profit = 40c, odds = 40/60
+    profit_if_win = (100 - price_cents) / 100.0
+    odds = profit_if_win / our_cost
+    bet_usd = kelly_bet_size(bankroll, win_prob, odds)
+    count = max(1, int(bet_usd * 100 / price_cents))
+    # Cap at 50 contracts for any single trade
+    return min(count, 50)
+
+
+# ---------------------------------------------------------------------------
+# 2. MOMENTUM TRACKER — Detect price trends on Kalshi markets
+# ---------------------------------------------------------------------------
+# Track price snapshots over time. If price is consistently moving in one
+# direction, ride the momentum (trend following).
+
+_price_history = {}  # ticker -> deque of (timestamp, yes_price_cents)
+_MOMENTUM_WINDOW = 6  # number of snapshots to track (at 30s intervals = 3 min window)
+_MOMENTUM_THRESHOLD = 5  # cents — price must move 5c+ in window to signal
+
+def record_price_snapshot(ticker, yes_price_cents):
+    """Record a price datapoint for momentum analysis."""
+    now = datetime.datetime.utcnow()
+    if ticker not in _price_history:
+        _price_history[ticker] = deque(maxlen=_MOMENTUM_WINDOW)
+    _price_history[ticker].append((now, yes_price_cents))
+
+
+def get_momentum(ticker):
+    """Calculate momentum score for a ticker.
+
+    Returns:
+        dict with 'direction' ('up', 'down', 'flat'), 'magnitude' (cents),
+        'velocity' (cents per minute), 'snapshots' count
+    """
+    history = _price_history.get(ticker)
+    if not history or len(history) < 3:
+        return {"direction": "flat", "magnitude": 0, "velocity": 0, "snapshots": 0}
+
+    prices = [p for _, p in history]
+    first_price = prices[0]
+    last_price = prices[-1]
+    magnitude = last_price - first_price
+
+    # Time span in minutes
+    first_time = history[0][0]
+    last_time = history[-1][0]
+    span_min = max(0.5, (last_time - first_time).total_seconds() / 60)
+    velocity = magnitude / span_min  # cents per minute
+
+    # Check consistency — is the trend monotonic?
+    ups = sum(1 for i in range(1, len(prices)) if prices[i] > prices[i-1])
+    downs = sum(1 for i in range(1, len(prices)) if prices[i] < prices[i-1])
+    total_moves = ups + downs
+
+    # Strong trend = 70%+ moves in same direction
+    if total_moves == 0:
+        direction = "flat"
+    elif ups / total_moves >= 0.7 and magnitude >= _MOMENTUM_THRESHOLD:
+        direction = "up"
+    elif downs / total_moves >= 0.7 and magnitude <= -_MOMENTUM_THRESHOLD:
+        direction = "down"
+    else:
+        direction = "flat"
+
+    return {
+        "direction": direction,
+        "magnitude": magnitude,
+        "velocity": round(velocity, 2),
+        "snapshots": len(history),
+        "consistency": round(max(ups, downs) / max(1, total_moves), 2),
+    }
+
+
+def scan_momentum_opportunities():
+    """Find markets with strong momentum — potential trend-following trades.
+
+    Strategy: If a market's YES price is rising steadily AND is still below
+    our consensus estimate, the momentum confirms our edge. Buy with more
+    confidence (and larger Kelly size).
+    """
+    opportunities = []
+    for ticker, history in _price_history.items():
+        if len(history) < 3:
+            continue
+        mom = get_momentum(ticker)
+        if mom["direction"] == "flat":
+            continue
+        # Only report significant moves
+        if abs(mom["magnitude"]) >= _MOMENTUM_THRESHOLD:
+            opportunities.append({
+                "ticker": ticker,
+                "momentum": mom,
+                "current_price": history[-1][1],
+            })
+    opportunities.sort(key=lambda x: abs(x["momentum"]["magnitude"]), reverse=True)
+    return opportunities
+
+
+# ---------------------------------------------------------------------------
+# 3. MEAN REVERSION — Bet against extreme price moves
+# ---------------------------------------------------------------------------
+# If a market spikes sharply (panic buying/selling), bet it reverts to the mean.
+# Works best on liquid markets where temporary supply/demand imbalances resolve.
+
+_price_averages = {}  # ticker -> {"ema": float, "snapshots": int}
+_EMA_ALPHA = 0.15  # exponential moving average smoothing factor
+
+def update_ema(ticker, price_cents):
+    """Update exponential moving average for a ticker."""
+    if ticker not in _price_averages:
+        _price_averages[ticker] = {"ema": float(price_cents), "snapshots": 1}
+        return
+    state = _price_averages[ticker]
+    state["ema"] = _EMA_ALPHA * price_cents + (1 - _EMA_ALPHA) * state["ema"]
+    state["snapshots"] += 1
+
+
+def find_mean_reversion_signals(all_markets):
+    """Find markets where current price deviates significantly from its EMA.
+
+    Strategy: If price jumped 10+ cents above EMA → overreaction, buy NO.
+    If price dropped 10+ cents below EMA → panic sell, buy YES.
+    Only on liquid markets (volume 500+).
+    """
+    _REVERSION_THRESHOLD = 8  # cents deviation from EMA
+    signals = []
+
+    for m in all_markets:
+        if m["platform"] != "kalshi":
+            continue
+        ticker = m["id"]
+        yes_cents = int(m["yes"] * 100)
+        vol = m.get("volume", 0) or 0
+
+        # Update EMA with current price
+        update_ema(ticker, yes_cents)
+        # Also record for momentum tracker
+        record_price_snapshot(ticker, yes_cents)
+
+        state = _price_averages.get(ticker)
+        if not state or state["snapshots"] < 5:
+            continue  # need enough data
+
+        ema = state["ema"]
+        deviation = yes_cents - ema
+
+        if abs(deviation) < _REVERSION_THRESHOLD:
+            continue
+        if vol < 500:  # only liquid markets
+            continue
+        # Skip extreme prices (already at 95c or 5c — limited room to revert)
+        if yes_cents < 10 or yes_cents > 90:
+            continue
+
+        if deviation > 0:
+            # Price spiked UP above average — expect reversion DOWN
+            signal = "buy_no"
+            price_cents = 100 - yes_cents  # NO price
+        else:
+            # Price dropped below average — expect reversion UP
+            signal = "buy_yes"
+            price_cents = yes_cents
+
+        signals.append({
+            "ticker": ticker,
+            "question": m["question"],
+            "signal": signal,
+            "price_cents": price_cents,
+            "current_yes": yes_cents,
+            "ema": round(ema, 1),
+            "deviation_cents": round(deviation, 1),
+            "volume": vol,
+            "strategy": "mean_reversion",
+            "url": m.get("url", ""),
+        })
+
+    signals.sort(key=lambda x: abs(x["deviation_cents"]), reverse=True)
+    return signals[:10]  # top 10 signals
+
+
+# ---------------------------------------------------------------------------
+# 4. MARKET MAKING — Capture bid-ask spread on liquid markets
+# ---------------------------------------------------------------------------
+# Place both a buy and a sell order around the current price.
+# If both fill, we profit the spread. Low-risk, high-frequency strategy.
+
+_market_maker_orders = {}  # ticker -> {"buy_id": str, "sell_id": str, "time": datetime}
+_MM_SPREAD_CENTS = 4  # we try to capture 4c spread (2c each side)
+_MM_MAX_POSITIONS = 5  # max 5 active market-making positions
+
+def market_make_opportunity(ticker, current_yes_cents, volume):
+    """Evaluate if a market is suitable for market making.
+
+    Good MM targets:
+    - High volume (1000+)
+    - Mid-range prices (30c-70c) — widest natural spread
+    - Not already being market-made by us
+    """
+    if ticker in _market_maker_orders:
+        return None
+    if len(_market_maker_orders) >= _MM_MAX_POSITIONS:
+        return None
+    if volume < 1000:
+        return None
+    if current_yes_cents < 30 or current_yes_cents > 70:
+        return None
+
+    # Place buy 2c below current, sell 2c above
+    buy_price = current_yes_cents - (_MM_SPREAD_CENTS // 2)
+    sell_price = current_yes_cents + (_MM_SPREAD_CENTS // 2)
+
+    if buy_price < 5 or sell_price > 95:
+        return None
+
+    return {
+        "ticker": ticker,
+        "buy_yes_price": buy_price,
+        "sell_yes_price": sell_price,
+        "spread_cents": sell_price - buy_price,
+        "potential_profit_cents": sell_price - buy_price,
+    }
+
+
+def run_market_maker(all_markets):
+    """Scan for market making opportunities and place spread orders."""
+    if not BOT_CONFIG.get("enabled"):
+        return []
+
+    # Check balance
+    try:
+        bal_h = signed_headers("GET", "/portfolio/balance")
+        bal_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
+                             headers=bal_h, timeout=TIMEOUT)
+        if bal_r.ok:
+            bal = bal_r.json().get("balance", 0) / 100
+            if bal < BOT_CONFIG.get("min_balance_usd", 200):
+                return []
+    except Exception:
+        return []
+
+    fills = []
+    for m in all_markets:
+        if m["platform"] != "kalshi":
+            continue
+        ticker = m["id"]
+        yes_cents = int(m["yes"] * 100)
+        vol = m.get("volume", 0) or 0
+
+        opp = market_make_opportunity(ticker, yes_cents, vol)
+        if not opp:
+            continue
+
+        # Place buy order (resting limit)
+        buy_result = place_kalshi_order(ticker, "yes", opp["buy_yes_price"], count=5)
+        if "error" not in buy_result:
+            _market_maker_orders[ticker] = {
+                "buy_price": opp["buy_yes_price"],
+                "sell_price": opp["sell_yes_price"],
+                "time": datetime.datetime.utcnow(),
+            }
+            _log_activity(
+                f"📊 MM: {ticker} — BUY@{opp['buy_yes_price']}c / target SELL@{opp['sell_yes_price']}c "
+                f"(spread: {opp['spread_cents']}c)",
+                "info"
+            )
+            fills.append(opp)
+
+        if len(fills) >= 2:  # max 2 new MM positions per cycle
+            break
+
+    # Clean up old MM orders (> 10 min)
+    now = datetime.datetime.utcnow()
+    expired = [t for t, o in _market_maker_orders.items()
+               if (now - o["time"]).total_seconds() > 600]
+    for t in expired:
+        del _market_maker_orders[t]
+
+    return fills
+
+
+# ---------------------------------------------------------------------------
+# 5. NEWS SENTIMENT TRADING — Trade on breaking news catalysts
+# ---------------------------------------------------------------------------
+# Already have news fetching (fetch_news_headlines + research_market).
+# This layer automatically trades when strong sentiment aligns with edge.
+
+def news_driven_scan(all_markets):
+    """Scan high-value markets for news catalysts that create trading opportunities.
+
+    Strategy: If news is strongly bullish AND Kalshi price is below consensus,
+    the news confirms our edge → trade with higher confidence.
+    """
+    if not BOT_CONFIG.get("enabled"):
+        return []
+
+    signals = []
+    kalshi_markets = [m for m in all_markets if m["platform"] == "kalshi"]
+
+    # Only check markets with decent volume (news matters less on illiquid markets)
+    liquid = [m for m in kalshi_markets if (m.get("volume", 0) or 0) >= 200]
+    # Sample top 10 by volume to avoid hammering news API
+    liquid.sort(key=lambda x: x.get("volume", 0), reverse=True)
+
+    for m in liquid[:10]:
+        question = m["question"]
+        research = research_market(question)
+
+        if research["news_count"] == 0:
+            continue
+
+        sentiment = research["sentiment"]
+        yes_cents = int(m["yes"] * 100)
+
+        # Strong bullish news + low YES price → buy YES
+        if sentiment == "bullish" and research["bull_signals"] >= 3 and yes_cents < 60:
+            signals.append({
+                "ticker": m["id"],
+                "question": question,
+                "signal": "buy_yes",
+                "price_cents": yes_cents,
+                "news_sentiment": sentiment,
+                "bull_signals": research["bull_signals"],
+                "bear_signals": research["bear_signals"],
+                "headline_count": research["news_count"],
+                "top_headline": research["headlines"][0]["title"] if research["headlines"] else "",
+                "strategy": "news_sentiment",
+                "volume": m.get("volume", 0),
+                "url": m.get("url", ""),
+            })
+        # Strong bearish news + high YES price → buy NO
+        elif sentiment == "bearish" and research["bear_signals"] >= 3 and yes_cents > 40:
+            signals.append({
+                "ticker": m["id"],
+                "question": question,
+                "signal": "buy_no",
+                "price_cents": 100 - yes_cents,
+                "news_sentiment": sentiment,
+                "bull_signals": research["bull_signals"],
+                "bear_signals": research["bear_signals"],
+                "headline_count": research["news_count"],
+                "top_headline": research["headlines"][0]["title"] if research["headlines"] else "",
+                "strategy": "news_sentiment",
+                "volume": m.get("volume", 0),
+                "url": m.get("url", ""),
+            })
+
+    return signals
+
+
+# ---------------------------------------------------------------------------
+# 6. ENHANCED AUTO-EXIT — Trailing stop + time-based exit
+# ---------------------------------------------------------------------------
+
+TRAILING_STOP_PCT = 5    # lock in profit — if we were up 20% and drop 5%, sell
+TAKE_PROFIT_TIERS = [    # graduated take-profit tiers
+    (30, 0.50),   # sell 50% at +30% profit
+    (50, 0.75),   # sell 75% at +50% profit
+    (80, 1.00),   # sell 100% at +80% profit
+]
+TIME_EXIT_HOURS = 72     # force exit after 72 hours if no movement
+
+_position_high_water = {}  # ticker -> highest pnl_pct seen
+
+def enhanced_auto_exit():
+    """Advanced exit strategy with trailing stops and time-based exits."""
+    if not BOT_CONFIG.get("enabled"):
+        return []
+
+    positions = check_position_prices()
+    exits = []
+    now = datetime.datetime.utcnow()
+
+    for pos in positions:
+        pnl_pct = pos.get("pnl_pct")
+        ticker = pos["ticker"]
+
+        if pnl_pct is None:
+            continue
+
+        # Update high water mark
+        if ticker not in _position_high_water:
+            _position_high_water[ticker] = pnl_pct
+        else:
+            _position_high_water[ticker] = max(_position_high_water[ticker], pnl_pct)
+
+        high_water = _position_high_water[ticker]
+        side = pos["side"]
+        count = pos["count"]
+        current = pos.get("current_price")
+        entry = pos.get("entry_price") or current
+
+        if not current:
+            continue
+
+        action = None
+        reason = None
+        sell_count = count
+
+        # TRAILING STOP: if we were up 15%+ and dropped 5% from peak, sell
+        if high_water >= 15 and pnl_pct < high_water - TRAILING_STOP_PCT:
+            action = "trailing_stop"
+            reason = f"Trailing stop: peak +{high_water}%, now +{pnl_pct}%"
+
+        # GRADUATED TAKE PROFIT
+        elif pnl_pct >= TAKE_PROFIT_TIERS[0][0]:
+            for threshold, sell_pct in TAKE_PROFIT_TIERS:
+                if pnl_pct >= threshold:
+                    action = "take_profit"
+                    reason = f"Take profit tier: +{pnl_pct}% (threshold {threshold}%)"
+                    sell_count = max(1, int(count * sell_pct))
+
+        # STOP LOSS (from original)
+        elif pnl_pct <= STOP_LOSS_PCT:
+            action = "stop_loss"
+            reason = f"Stop loss: {pnl_pct}%"
+
+        # TIME-BASED EXIT: positions stuck for 72+ hours with < 5% gain
+        if not action and abs(pnl_pct) < 5:
+            # Check trade timestamp
+            for t in BOT_STATE.get("all_trades", []):
+                if t.get("ticker") == ticker and t.get("timestamp"):
+                    try:
+                        trade_time = datetime.datetime.fromisoformat(t["timestamp"].replace("Z", ""))
+                        hours_held = (now - trade_time).total_seconds() / 3600
+                        if hours_held >= TIME_EXIT_HOURS:
+                            action = "time_exit"
+                            reason = f"Time exit: held {int(hours_held)}h with only +{pnl_pct}%"
+                    except Exception:
+                        pass
+                    break
+
+        if action and current:
+            # Price to sell at — aggressive for stop loss, patient for take profit
+            if action == "stop_loss":
+                sell_price = max(1, current - 5)
+            elif action == "time_exit":
+                sell_price = max(1, current - 3)
+            else:
+                sell_price = max(1, entry + 1) if entry else max(1, current - 3)
+
+            result = sell_kalshi_position(ticker, side, sell_price, sell_count)
+            success = "error" not in result
+
+            filled = 0
+            try:
+                order_data = result.get("order", {})
+                filled = int(float(str(order_data.get("filled_count_fp") or order_data.get("filled_count") or 0)))
+            except Exception:
+                pass
+
+            if success and filled > 0:
+                pnl_usd = (sell_price - (entry or current)) * filled / 100
+                _log_activity(
+                    f"🔄 {action.upper()}: {ticker} SOLD {filled}x @ {sell_price}c "
+                    f"(${pnl_usd:+.2f}) — {reason}",
+                    "success" if pnl_usd >= 0 else "error"
+                )
+                exits.append({"ticker": ticker, "action": action, "filled": filled, "pnl_usd": pnl_usd})
+                # Clean up tracking
+                if filled >= count and ticker in _position_high_water:
+                    del _position_high_water[ticker]
+            elif success and filled == 0:
+                # Place resting order
+                if ticker not in _resting_sells:
+                    resting = sell_kalshi_position(ticker, side, sell_price, sell_count, resting=True)
+                    if "error" not in resting:
+                        _resting_sells.add(ticker)
+                        _log_activity(f"🔄 {action}: {ticker} — resting sell at {sell_price}c", "info")
+
+    return exits
+
+
+# ---------------------------------------------------------------------------
+# 7. QUANT STRATEGY ORCHESTRATOR — Combine all signals
+# ---------------------------------------------------------------------------
+# Each strategy produces signals. The orchestrator scores them, deduplicates,
+# and executes the best ones with Kelly-sized bets.
+
+BOT_STATE["quant_stats"] = {
+    "momentum_signals": 0,
+    "mean_reversion_signals": 0,
+    "news_signals": 0,
+    "mm_fills": 0,
+    "kelly_avg_size": 0,
+    "strategies_active": [],
+}
+
+def run_quant_strategies(all_markets):
+    """Master orchestrator — runs all quant strategies and executes best signals."""
+    if not BOT_CONFIG.get("enabled"):
+        return
+
+    # Get current bankroll for Kelly sizing
+    bankroll = 0
+    try:
+        bal_h = signed_headers("GET", "/portfolio/balance")
+        bal_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
+                             headers=bal_h, timeout=TIMEOUT)
+        if bal_r.ok:
+            bankroll = bal_r.json().get("balance", 0) / 100
+            if bankroll < BOT_CONFIG.get("min_balance_usd", 200):
+                return
+    except Exception:
+        return
+
+    # Check daily limit
+    total_daily = BOT_STATE["daily_spent_usd"] + BOT_STATE.get("snipe_daily_spent", 0)
+    if total_daily >= BOT_CONFIG["max_daily_usd"]:
+        return
+
+    # Get existing positions/events for dedup
+    existing_tickers = set()
+    existing_events = set()
+    try:
+        positions = check_position_prices()
+        for p in positions:
+            existing_tickers.add(p.get("ticker", ""))
+            parts = p.get("ticker", "").split("-")
+            if parts:
+                existing_events.add(parts[0])
+        # Position limit check
+        if len(positions) >= BOT_CONFIG.get("max_open_positions", 20):
+            return
+    except Exception:
+        pass
+
+    # Collect signals from all strategies
+    all_signals = []
+    active_strategies = []
+
+    # Mean reversion signals
+    try:
+        mr_signals = find_mean_reversion_signals(all_markets)
+        BOT_STATE["quant_stats"]["mean_reversion_signals"] = len(mr_signals)
+        if mr_signals:
+            active_strategies.append("mean_reversion")
+        for sig in mr_signals:
+            sig["confidence"] = min(0.9, 0.5 + abs(sig["deviation_cents"]) / 30)
+            sig["strategy"] = "mean_reversion"
+            all_signals.append(sig)
+    except Exception as e:
+        print(f"[QUANT] Mean reversion error: {e}")
+
+    # News sentiment signals (only every 5th cycle to avoid rate limiting)
+    try:
+        cycle = BOT_STATE.get("_quant_cycle", 0)
+        if cycle % 5 == 0:
+            news_signals = news_driven_scan(all_markets)
+            BOT_STATE["quant_stats"]["news_signals"] = len(news_signals)
+            if news_signals:
+                active_strategies.append("news_sentiment")
+            for sig in news_signals:
+                sig["confidence"] = min(0.85, 0.4 + sig.get("bull_signals", 0) * 0.1)
+                all_signals.append(sig)
+    except Exception as e:
+        print(f"[QUANT] News scan error: {e}")
+
+    # Momentum — boost confidence of existing consensus signals
+    momentum_opps = scan_momentum_opportunities()
+    BOT_STATE["quant_stats"]["momentum_signals"] = len(momentum_opps)
+    if momentum_opps:
+        active_strategies.append("momentum")
+
+    BOT_STATE["quant_stats"]["strategies_active"] = active_strategies
+    BOT_STATE["_quant_cycle"] = BOT_STATE.get("_quant_cycle", 0) + 1
+
+    # Score and sort all signals
+    all_signals.sort(key=lambda x: x.get("confidence", 0), reverse=True)
+
+    # Execute top signals with Kelly sizing
+    trades_this_round = 0
+    kelly_sizes = []
+
+    for sig in all_signals[:5]:  # max 5 quant trades per cycle
+        ticker = sig.get("ticker", "")
+        if ticker in existing_tickers:
+            continue
+        event_key = ticker.split("-")[0] if ticker else ""
+        if event_key in existing_events:
+            continue
+
+        # Daily limit re-check
+        total_daily = BOT_STATE["daily_spent_usd"] + BOT_STATE.get("snipe_daily_spent", 0)
+        if total_daily >= BOT_CONFIG["max_daily_usd"]:
+            break
+
+        price_cents = sig.get("price_cents", 0)
+        if price_cents < 5 or price_cents > 95:
+            continue
+
+        # Kelly sizing
+        confidence = sig.get("confidence", 0.5)
+        count = kelly_count(bankroll, price_cents, confidence)
+        cost_usd = (price_cents * count) / 100.0
+
+        # Cap cost to remaining daily budget
+        remaining = BOT_CONFIG["max_daily_usd"] - total_daily
+        if cost_usd > remaining:
+            count = max(1, int(remaining * 100 / price_cents))
+            cost_usd = (price_cents * count) / 100.0
+
+        if cost_usd > BOT_CONFIG["max_bet_usd"]:
+            count = max(1, int(BOT_CONFIG["max_bet_usd"] * 100 / price_cents))
+            cost_usd = (price_cents * count) / 100.0
+
+        side = sig["signal"].replace("buy_", "")
+        strategy = sig.get("strategy", "unknown")
+
+        _log_activity(
+            f"🧠 QUANT [{strategy}]: {side.upper()} {ticker} @ {price_cents}c x{count} "
+            f"(${cost_usd:.2f}, conf={confidence:.0%}) — {sig.get('question', '')[:40]}",
+            "info"
+        )
+
+        result = place_kalshi_order(ticker, side, price_cents, count=count)
+        success = "error" not in result
+
+        trade_record = {
+            "timestamp": datetime.datetime.utcnow().isoformat(),
+            "ticker": ticker,
+            "question": sig.get("question", ""),
+            "side": side,
+            "price_cents": price_cents,
+            "count": count,
+            "cost_usd": cost_usd,
+            "strategy": strategy,
+            "confidence": confidence,
+            "result": result,
+            "success": success,
+        }
+
+        BOT_STATE["all_trades"].append(trade_record)
+        if success:
+            BOT_STATE["daily_spent_usd"] += cost_usd
+            BOT_STATE["trades_today"].append(trade_record)
+            trades_this_round += 1
+            kelly_sizes.append(cost_usd)
+            existing_tickers.add(ticker)
+            existing_events.add(event_key)
+            _log_activity(
+                f"🧠 FILLED [{strategy}]: {side.upper()} {ticker} @ {price_cents}c x{count} = ${cost_usd:.2f}",
+                "success"
+            )
+        else:
+            err = result.get("error", "")[:60]
+            _log_activity(f"🧠 FAILED [{strategy}]: {ticker} — {err}", "error")
+
+        _save_state()
+
+    if kelly_sizes:
+        BOT_STATE["quant_stats"]["kelly_avg_size"] = round(sum(kelly_sizes) / len(kelly_sizes), 2)
+
+    # Run market maker (separate from directional trades)
+    try:
+        mm_fills = run_market_maker(all_markets)
+        BOT_STATE["quant_stats"]["mm_fills"] = len(mm_fills)
+        if mm_fills:
+            active_strategies.append("market_making")
+    except Exception as e:
+        print(f"[QUANT] Market maker error: {e}")
+
+    if trades_this_round > 0:
+        _log_activity(
+            f"🧠 Quant round: {trades_this_round} trades via {active_strategies}",
+            "success"
+        )
+
+
 # Use a simple background thread instead of APScheduler
 # APScheduler's threadpool doesn't reliably work with gunicorn
 import threading
@@ -1909,11 +2629,20 @@ def _background_loop():
             run_bot_scan()
             # Live game sniper — buy near-certain live sports outcomes
             live_game_snipe()
+            # QUANT ENGINE — run all quant strategies (every 3rd cycle to stagger)
+            if cycle % 3 == 0:
+                try:
+                    all_mkts = fetch_all_markets()
+                    run_quant_strategies(all_mkts)
+                except Exception as qe:
+                    print(f"[QUANT] Engine error: {qe}")
             # Warm the picks cache so /top-picks is fast
             _warm_picks_cache()
-            # Check positions for auto-exit every cycle
-            exits = auto_exit_check()
-            # auto_exit_check() now handles its own logging with fill status
+            # Enhanced auto-exit with trailing stops (replaces basic auto_exit_check)
+            exits = enhanced_auto_exit()
+            # Fallback to basic exit if enhanced fails
+            if not exits:
+                exits = auto_exit_check()
         except Exception as e:
             import traceback
             _log_activity(f"Background error: {str(e)[:80]}", "error")
@@ -2388,6 +3117,7 @@ def portfolio_summary():
 def status():
     markets = BOT_STATE["last_scan_markets"]
     mispriced = BOT_STATE["last_scan_mispriced"]
+    quant = BOT_STATE.get("quant_stats", {})
     return jsonify({
         "bot_enabled": BOT_CONFIG["enabled"],
         "config": BOT_CONFIG,
@@ -2401,6 +3131,16 @@ def status():
         "scheduler_running": scheduler.running,
         "sniper_trades_today": len(BOT_STATE.get("snipe_trades_today", [])),
         "sniper_daily_spent": BOT_STATE.get("snipe_daily_spent", 0),
+        "quant_engine": {
+            "strategies_active": quant.get("strategies_active", []),
+            "momentum_signals": quant.get("momentum_signals", 0),
+            "mean_reversion_signals": quant.get("mean_reversion_signals", 0),
+            "news_signals": quant.get("news_signals", 0),
+            "mm_positions": len(_market_maker_orders),
+            "kelly_avg_size": quant.get("kelly_avg_size", 0),
+            "ema_tracked": len(_price_averages),
+            "momentum_tracked": len(_price_history),
+        },
     })
 
 
@@ -2408,6 +3148,56 @@ def status():
 def bot_activity():
     return jsonify({
         "activity": BOT_STATE.get("activity_log", [])[-20:],
+    })
+
+
+@app.route("/quant-status")
+def quant_status():
+    """Real-time quant engine dashboard — shows all strategy performance."""
+    stats = BOT_STATE.get("quant_stats", {})
+    momentum = scan_momentum_opportunities()[:5]
+    return jsonify({
+        "strategies": {
+            "kelly_criterion": {
+                "status": "active",
+                "avg_bet_size": stats.get("kelly_avg_size", 0),
+                "description": "Half-Kelly sizing — bets scale with bankroll + edge",
+            },
+            "mean_reversion": {
+                "status": "active" if stats.get("mean_reversion_signals", 0) > 0 else "scanning",
+                "signals": stats.get("mean_reversion_signals", 0),
+                "tracked_tickers": len(_price_averages),
+                "description": "Bets against extreme price spikes — reverts to mean",
+            },
+            "momentum": {
+                "status": "active" if stats.get("momentum_signals", 0) > 0 else "scanning",
+                "signals": stats.get("momentum_signals", 0),
+                "tracked_tickers": len(_price_history),
+                "top_movers": momentum,
+                "description": "Rides strong price trends — buys into confirmed moves",
+            },
+            "market_making": {
+                "status": "active" if _market_maker_orders else "scanning",
+                "active_positions": len(_market_maker_orders),
+                "fills": stats.get("mm_fills", 0),
+                "description": "Captures bid-ask spread on liquid markets",
+            },
+            "news_sentiment": {
+                "status": "active" if stats.get("news_signals", 0) > 0 else "scanning",
+                "signals": stats.get("news_signals", 0),
+                "description": "Trades on breaking news catalysts",
+            },
+            "live_sniper": {
+                "status": "active" if BOT_STATE.get("snipe_trades_today") else "scanning",
+                "trades_today": len(BOT_STATE.get("snipe_trades_today", [])),
+                "spent_today": BOT_STATE.get("snipe_daily_spent", 0),
+                "description": "Buys 93-98c positions on live games for guaranteed profit",
+            },
+        },
+        "active_strategies": stats.get("strategies_active", []),
+        "ema_tracked": len(_price_averages),
+        "momentum_tracked": len(_price_history),
+        "mm_orders": len(_market_maker_orders),
     })
 
 
@@ -3098,7 +3888,9 @@ def today_picks():
 @app.route("/config", methods=["POST"])
 def config():
     data = request.get_json(force=True)
-    allowed = {"enabled", "max_bet_usd", "max_daily_usd", "min_balance_usd", "min_deviation", "min_platforms"}
+    allowed = {"enabled", "max_bet_usd", "max_daily_usd", "min_balance_usd", "min_deviation",
+                "min_platforms", "min_volume", "min_cash_reserve_pct", "max_open_positions",
+                "scan_interval_seconds"}
     updated = {}
     for key in allowed:
         if key in data:
