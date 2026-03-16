@@ -215,7 +215,9 @@ def _hydrate_from_kalshi():
         BOT_STATE["trade_date"] = today_str
         today_trades = [t for t in all_trades_rebuilt if (t.get("timestamp") or "")[:10] == today_str and t.get("action") == "buy"]
         BOT_STATE["trades_today"] = today_trades
-        BOT_STATE["daily_spent_usd"] = round(today_spent, 2)
+        # DON'T override daily_spent — only count what the bot spends THIS session
+        # Hydrated trades are historical and shouldn't block new trades
+        BOT_STATE["hydrated_today_spent"] = round(today_spent, 2)
         _save_state()
         print(f"[HYDRATE] Rebuilt {len(all_trades_rebuilt)} trades from Kalshi ({new_count} new), today: {today_count} trades, ${today_spent:.2f} spent")
     except Exception as e:
