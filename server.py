@@ -71,7 +71,17 @@ BOT_STATE = {
     "all_trades": [],
     "errors": [],
     "pick_history": [],  # every pick we recommend, timestamped
+    "activity_log": [],  # live feed of bot actions (last 50)
 }
+
+def _log_activity(msg, level="info"):
+    """Add a timestamped message to the activity log."""
+    BOT_STATE["activity_log"].append({
+        "time": datetime.datetime.utcnow().isoformat(),
+        "msg": msg,
+        "level": level,
+    })
+    BOT_STATE["activity_log"] = BOT_STATE["activity_log"][-50:]
 
 import json as _json
 
@@ -1323,22 +1333,54 @@ def run_bot_scan():
         BOT_STATE["trade_date"] = today
         BOT_STATE["trades_today"] = []
         BOT_STATE["daily_spent_usd"] = 0.0
+        _log_activity("Daily reset — new trading day started")
 
     BOT_STATE["last_scan"] = now.isoformat()
 
     try:
+        _log_activity("Scanning all platforms...")
         all_markets = fetch_all_markets()
         BOT_STATE["last_scan_markets"] = len(all_markets)
 
         mispricings = find_consensus_mispricings(all_markets)
         BOT_STATE["last_scan_mispriced"] = len(mispricings)
+        _log_activity(f"Scan complete: {len(all_markets)} markets, {len(mispricings)} mispriced")
 
         if not BOT_CONFIG["enabled"]:
+            _log_activity("Auto-trade OFF — skipping trades")
             return
 
+        if BOT_STATE["daily_spent_usd"] >= BOT_CONFIG["max_daily_usd"]:
+            _log_activity(f"Daily limit reached (${BOT_STATE['daily_spent_usd']:.2f}/{BOT_CONFIG['max_daily_usd']:.2f})")
+            return
+
+        # EVENT-LEVEL DEDUPLICATION: only trade 1 outcome per event
+        # e.g. "Who will win PGA Major" has many golfers — pick only the BEST one
+        traded_events = set()
+        # Also check existing positions to avoid doubling down on same event
+        try:
+            existing_positions = check_position_prices()
+            for pos in existing_positions:
+                # Extract event ticker from position ticker (e.g. KXPGAMAJORWIN-26-WZAL -> KXPGAMAJORWIN)
+                parts = pos.get("ticker", "").split("-")
+                if parts:
+                    traded_events.add(parts[0])
+        except Exception:
+            pass
+
+        trades_this_cycle = 0
         for opp in mispricings:
             if BOT_STATE["daily_spent_usd"] >= BOT_CONFIG["max_daily_usd"]:
+                _log_activity("Daily spending limit hit — stopping trades")
                 break
+
+            # Extract event from ticker (e.g. KXPGAMAJORWIN-26-WZAL -> KXPGAMAJORWIN)
+            ticker_parts = opp["kalshi_ticker"].split("-")
+            event_key = ticker_parts[0] if ticker_parts else opp["kalshi_ticker"]
+
+            if event_key in traded_events:
+                continue  # Already traded this event — skip other outcomes
+            traded_events.add(event_key)
 
             pc = opp["price_cents"]
             count = max(1, 500 // pc) if pc > 0 else 1  # target $5 per trade
@@ -1350,6 +1392,7 @@ def run_bot_scan():
                 continue
 
             side = opp["signal"].replace("buy_", "")
+            _log_activity(f"Placing order: {side.upper()} {opp['kalshi_ticker']} @ {pc}c x{count} (${cost_usd:.2f})")
             result = place_kalshi_order(opp["kalshi_ticker"], side, pc, count=count)
 
             trade_record = {
@@ -1372,12 +1415,21 @@ def run_bot_scan():
             BOT_STATE["all_trades"].append(trade_record)
             if trade_record["success"]:
                 BOT_STATE["daily_spent_usd"] += cost_usd
+                _log_activity(f"FILLED: {side.upper()} {opp['kalshi_ticker']} @ {pc}c x{count}", "success")
+                trades_this_cycle += 1
+            else:
+                err_msg = result.get("error", result.get("response_body", "Unknown"))
+                _log_activity(f"FAILED: {opp['kalshi_ticker']} — {str(err_msg)[:80]}", "error")
             print(f"[BOT] Trade: {side} {opp['kalshi_ticker']} @ {opp['price_cents']}c | success={trade_record['success']}")
             _save_state()
+
+        if trades_this_cycle > 0:
+            _log_activity(f"Cycle done: {trades_this_cycle} new trades, ${BOT_STATE['daily_spent_usd']:.2f} spent today")
 
     except Exception as e:
         BOT_STATE["errors"].append({"time": now.isoformat(), "error": str(e)})
         BOT_STATE["errors"] = BOT_STATE["errors"][-50:]
+        _log_activity(f"Scan error: {str(e)[:100]}", "error")
         print(f"[BOT] Scan error: {e}")
 
 # ---------------------------------------------------------------------------
@@ -1403,6 +1455,7 @@ def _background_loop():
     """Simple background loop that runs scans, warms cache, monitors positions."""
     _time.sleep(10)  # wait for server to fully start
     print("[BG] Background loop started")
+    _log_activity("Background engine started")
     cycle = 0
     while True:
         try:
@@ -1415,9 +1468,11 @@ def _background_loop():
             exits = auto_exit_check()
             if exits:
                 for ex in exits:
+                    _log_activity(f"Auto-exit: {ex['action']} {ex['ticker']} ({ex['reason']})", "success" if "profit" in ex.get("reason", "").lower() else "error")
                     print(f"[BG] Auto-exit: {ex['action']} on {ex['ticker']} ({ex['reason']})")
         except Exception as e:
             import traceback
+            _log_activity(f"Background error: {str(e)[:80]}", "error")
             print(f"[BG] Error in background loop: {e}")
             traceback.print_exc()
         _time.sleep(30)  # scan every 30s
@@ -1814,6 +1869,13 @@ def status():
         "total_trades_all_time": len(BOT_STATE["all_trades"]),
         "recent_errors": BOT_STATE["errors"][-5:],
         "scheduler_running": scheduler.running,
+    })
+
+
+@app.route("/bot-activity")
+def bot_activity():
+    return jsonify({
+        "activity": BOT_STATE.get("activity_log", [])[-20:],
     })
 
 
@@ -2673,6 +2735,23 @@ a:hover { text-decoration: underline; }
 .ticker-bar span { margin-right: 24px; }
 .ticker-bar .up { color: #00ff88; }
 .ticker-bar .down { color: #ff4444; }
+/* Live activity feed */
+.activity-bar { background: #050505; border: 1px solid #1a1a1a; padding: 8px 12px; margin-bottom: 10px; font-size: 10px; font-family: 'Courier New', monospace; max-height: 120px; overflow-y: auto; }
+.activity-bar::-webkit-scrollbar { width: 4px; }
+.activity-bar::-webkit-scrollbar-thumb { background: #333; }
+.activity-line { display: flex; gap: 8px; padding: 2px 0; border-bottom: 1px solid #0a0a0a; align-items: baseline; }
+.activity-line .time { color: #444; font-size: 9px; min-width: 52px; flex-shrink: 0; }
+.activity-line .dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; margin-top: 3px; }
+.activity-line .dot.info { background: #ff8c00; }
+.activity-line .dot.success { background: #00ff88; box-shadow: 0 0 4px #00ff88; }
+.activity-line .dot.error { background: #ff4444; }
+.activity-line .msg { color: #888; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity-line .msg.success { color: #00ff88; }
+.activity-line .msg.error { color: #ff4444; }
+.activity-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.activity-header .label { color: #ff8c00; font-size: 8px; text-transform: uppercase; letter-spacing: 1.5px; font-weight: 700; }
+.activity-header .pulse { width: 6px; height: 6px; border-radius: 50%; background: #00ff88; animation: pulse 2s infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; box-shadow: 0 0 4px #00ff88; } 50% { opacity: 0.3; box-shadow: none; } }
 /* Top Picks - compact grid */
 .top-picks { margin-bottom: 16px; }
 .picks-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
@@ -2794,6 +2873,14 @@ a:hover { text-decoration: underline; }
   <div class="stat-card"><div class="stat-label">Mispriced Found</div><div class="stat-value yellow" id="mispriced-count">--</div></div>
   <div class="stat-card"><div class="stat-label">Trades Today</div><div class="stat-value" id="trades-today">--</div></div>
   <div class="stat-card"><div class="stat-label">Daily Spent</div><div class="stat-value red" id="daily-spent">--</div></div>
+</div>
+
+<div class="activity-bar" id="activity-feed">
+  <div class="activity-header">
+    <span class="label">Live Activity Feed</span>
+    <span class="pulse" id="activity-pulse"></span>
+  </div>
+  <div id="activity-lines"><div class="activity-line"><span class="time">--:--</span><span class="dot info"></span><span class="msg">Waiting for first scan...</span></div></div>
 </div>
 
 <div class="hero-section">
@@ -3004,6 +3091,30 @@ async function toggleAutoTrade() {
   }
   atBtn.style.opacity = '1';
   loadStatus();
+}
+
+async function loadActivity() {
+  try {
+    const data = await fetch(API + '/bot-activity').then(r => r.json());
+    const items = data.activity || [];
+    if (items.length === 0) return;
+    const el = document.getElementById('activity-lines');
+    let html = '';
+    items.slice().reverse().forEach(a => {
+      var t = '--:--';
+      try {
+        var d = new Date(a.time + 'Z');
+        t = d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+      } catch(e) {}
+      var lvl = a.level || 'info';
+      html += '<div class="activity-line">';
+      html += '<span class="time">' + t + '</span>';
+      html += '<span class="dot ' + lvl + '"></span>';
+      html += '<span class="msg ' + lvl + '">' + a.msg + '</span>';
+      html += '</div>';
+    });
+    el.innerHTML = html;
+  } catch(e) {}
 }
 
 let _mispricedFirstLoad = true;
@@ -3699,13 +3810,15 @@ async function loadSettled() {
 
 // Load everything on page load
 loadStatus();
+loadActivity();
 loadTopPicks();
 loadTodayPicks();
 loadPositions();
 loadSettled();
 loadMispriced();
 loadTrades();
-// Auto-refresh every 30 seconds
+// Auto-refresh: activity feed every 10s, everything else every 30s
+setInterval(() => { loadActivity(); }, 10000);
 setInterval(() => { loadStatus(); loadTopPicks(); loadTodayPicks(); loadPositions(); loadSettled(); loadTrades(); }, 30000);
 </script>
 </body>
