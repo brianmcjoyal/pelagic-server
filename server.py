@@ -2073,6 +2073,14 @@ def top_picks():
         # Must have some edge — at least 5% deviation
         if p.get("deviation", 0) < 0.05:
             return False
+        # Filter out terrible risk/reward — if you pay 90¢+ to win $1,
+        # the profit is tiny but the loss is huge. Skip these.
+        price = p.get("price_cents", 50)
+        if price > 90:  # paying 90¢+ for $1 = max 10¢ profit
+            return False
+        # Also skip super cheap (<5¢) — usually longshots with no edge
+        if price < 5:
+            return False
         return True
 
     hero_candidates = [p for p in picks if _is_hero_worthy(p)]
