@@ -1754,11 +1754,14 @@ def live_game_snipe():
     if len(BOT_STATE.get("snipe_trades_today", [])) >= SNIPE_MAX_TRADES:
         return []
 
-    # ONLY scan LIVE sports games — no random weather/temperature bets
-    # These are games in progress where one team has a commanding lead
+    # Scan LIVE sports games + markets closing soon (the "Live" area)
     scan_sources = []
     for series in LIVE_GAME_SERIES:
         scan_sources.append({"series_ticker": series})
+    # Also scan markets closing within next 24h — these are the "live" ones
+    # One API call to get all near-expiry markets
+    close_cutoff = (datetime.datetime.utcnow() + datetime.timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    scan_sources.append({"close_time_max": close_cutoff, "status": "open"})
     for source_params in scan_sources:
         if BOT_STATE["snipe_daily_spent"] >= SNIPE_MAX_DAILY:
             break
