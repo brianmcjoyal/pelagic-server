@@ -54,11 +54,14 @@ TIMEOUT = 8
 # ---------------------------------------------------------------------------
 BOT_CONFIG = {
     "enabled": True,  # default ON — safety floor at $200 will auto-disable if needed
-    "max_bet_usd": 10.0,
-    "max_daily_usd": 500.0,
-    "min_balance_usd": 200.0,
-    "min_deviation": 0.15,
-    "min_platforms": 2,
+    "max_bet_usd": 5.0,           # max $5 per single trade
+    "max_daily_usd": 50.0,        # max $50/day total (bot + sniper combined)
+    "min_balance_usd": 200.0,     # stop all trading if cash below $200
+    "min_cash_reserve_pct": 0.50, # keep 50% of portfolio value in cash
+    "max_open_positions": 20,     # never hold more than 20 positions
+    "min_deviation": 0.15,        # 15% mispricing vs consensus required
+    "min_platforms": 2,           # must appear on 2+ platforms
+    "min_volume": 100,            # minimum market volume (liquidity check)
     "scan_interval_seconds": 15,
 }
 
@@ -1531,6 +1534,7 @@ def run_bot_scan():
 
         # SAFETY: check balance floor before trading
         min_balance = BOT_CONFIG.get("min_balance_usd", 200.0)
+        current_balance = 0
         try:
             bal_path = "/portfolio/balance"
             bal_h = signed_headers("GET", bal_path)
@@ -1546,27 +1550,41 @@ def run_bot_scan():
             _log_activity(f"Balance check failed: {e} — skipping trades for safety", "error")
             return
 
-        if BOT_STATE["daily_spent_usd"] >= BOT_CONFIG["max_daily_usd"]:
-            _log_activity(f"Daily limit reached (${BOT_STATE['daily_spent_usd']:.2f}/{BOT_CONFIG['max_daily_usd']:.2f})")
+        # DAILY LIMIT: combined bot + sniper spending
+        total_daily = BOT_STATE["daily_spent_usd"] + BOT_STATE.get("snipe_daily_spent", 0)
+        if total_daily >= BOT_CONFIG["max_daily_usd"]:
+            _log_activity(f"Daily limit reached (${total_daily:.2f}/{BOT_CONFIG['max_daily_usd']:.2f})")
             return
 
-        # EVENT-LEVEL DEDUPLICATION: only trade 1 outcome per event
-        # e.g. "Who will win PGA Major" has many golfers — pick only the BEST one
+        # POSITION LIMIT: don't overextend
+        existing_positions = []
         traded_events = set()
-        # Also check existing positions to avoid doubling down on same event
         try:
             existing_positions = check_position_prices()
             for pos in existing_positions:
-                # Extract event ticker from position ticker (e.g. KXPGAMAJORWIN-26-WZAL -> KXPGAMAJORWIN)
                 parts = pos.get("ticker", "").split("-")
                 if parts:
                     traded_events.add(parts[0])
         except Exception:
             pass
 
+        max_positions = BOT_CONFIG.get("max_open_positions", 20)
+        if len(existing_positions) >= max_positions:
+            _log_activity(f"Position limit: {len(existing_positions)}/{max_positions} — no new trades")
+            return
+
+        # CASH RESERVE: keep 50% of portfolio in cash
+        reserve_pct = BOT_CONFIG.get("min_cash_reserve_pct", 0.50)
+        total_invested = sum(p.get("market_exposure_cents", 0) for p in existing_positions) / 100
+        portfolio_total = current_balance + total_invested
+        if portfolio_total > 0 and current_balance / portfolio_total < reserve_pct:
+            _log_activity(f"Cash reserve: ${current_balance:.2f} is {current_balance/portfolio_total*100:.0f}% of portfolio (need {reserve_pct*100:.0f}%) — no new trades")
+            return
+
         trades_this_cycle = 0
         for opp in mispricings:
-            if BOT_STATE["daily_spent_usd"] >= BOT_CONFIG["max_daily_usd"]:
+            total_daily = BOT_STATE["daily_spent_usd"] + BOT_STATE.get("snipe_daily_spent", 0)
+            if total_daily >= BOT_CONFIG["max_daily_usd"]:
                 _log_activity("Daily spending limit hit — stopping trades")
                 break
 
@@ -1578,9 +1596,22 @@ def run_bot_scan():
                 continue  # Already traded this event — skip other outcomes
             traded_events.add(event_key)
 
+            # EDGE CHECK: must have real cross-platform validation
+            plat_count = opp.get("platform_count", 0) or len(opp.get("matching_platforms", []))
+            deviation = opp.get("deviation", 0)
+            if plat_count < BOT_CONFIG.get("min_platforms", 2):
+                continue  # Not enough platforms to confirm edge
+            if deviation < BOT_CONFIG.get("min_deviation", 0.15):
+                continue  # Edge too small
+
+            # VOLUME CHECK: skip illiquid markets we can't sell
+            volume = opp.get("volume", 0) or 0
+            if volume < BOT_CONFIG.get("min_volume", 100):
+                continue  # Too illiquid
+
             pc = opp["price_cents"]
             # Skip penny markets (illiquid, can't sell)
-            if pc < 15:
+            if pc < 20:
                 continue
             # Target ~$5 per trade, max 20 contracts to avoid huge positions
             count = max(1, min(20, 500 // pc)) if pc > 0 else 1
@@ -1646,10 +1677,11 @@ LIVE_GAME_SERIES = [
 ]
 
 # Sniper settings
-SNIPE_MIN_PRICE = 90   # cents — only buy if price >= 90c (very likely to win)
+SNIPE_MIN_PRICE = 93   # cents — only buy if price >= 93c (very high probability)
 SNIPE_MAX_PRICE = 98   # cents — don't buy at 99c (1c profit not worth it)
 SNIPE_BET_USD = 5.0    # dollars per snipe trade
-SNIPE_MAX_DAILY = 50.0 # max daily spend on snipes (shared with main bot limit)
+SNIPE_MAX_DAILY = 25.0 # max daily spend on snipes
+SNIPE_MAX_TRADES = 5   # max 5 snipes per day — quality over quantity
 
 BOT_STATE["snipe_trades_today"] = []
 BOT_STATE["snipe_daily_spent"] = 0.0
@@ -1701,22 +1733,15 @@ def live_game_snipe():
 
     snipes = []
 
-    # Scan sports series AND broad market pages for high-probability opportunities
-    scan_sources = []
+    # Max snipes per day
+    if len(BOT_STATE.get("snipe_trades_today", [])) >= SNIPE_MAX_TRADES:
+        return []
 
-    # 1. Sports series (live games)
+    # ONLY scan LIVE sports games — no random weather/temperature bets
+    # These are games in progress where one team has a commanding lead
+    scan_sources = []
     for series in LIVE_GAME_SERIES:
         scan_sources.append({"series_ticker": series})
-
-    # 2. Broad market scan — markets closing soon (next 7 days) are most likely to be near-certain
-    now_ts = int(datetime.datetime.utcnow().timestamp())
-    week_ts = now_ts + (7 * 86400)
-    scan_sources.append({"min_close_ts": now_ts, "max_close_ts": week_ts})
-
-    # 3. Markets closing today (most likely to be decided already)
-    day_ts = now_ts + 86400
-    scan_sources.append({"min_close_ts": now_ts, "max_close_ts": day_ts})
-
     for source_params in scan_sources:
         if BOT_STATE["snipe_daily_spent"] >= SNIPE_MAX_DAILY:
             break
