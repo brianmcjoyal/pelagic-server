@@ -58,16 +58,16 @@ BOT_VERSION_DATE = "2026-03-15"
 # ---------------------------------------------------------------------------
 BOT_CONFIG = {
     "enabled": True,  # default ON — safety floor at $200 will auto-disable if needed
-    "max_bet_usd": 25.0,          # max $25 per single trade (Kelly sizes dynamically)
-    "max_daily_usd": 500.0,       # max $500/day total (bot + sniper combined)
+    "max_bet_usd": 15.0,          # max $15 per single trade (Kelly sizes dynamically)
+    "max_daily_usd": 150.0,       # max $150/day total (bot + sniper combined) — conservative
     "min_balance_usd": 50.0,      # stop all trading if cash below $50
-    "min_cash_reserve_pct": 0.30, # keep 30% of portfolio in cash (more aggressive)
-    "max_open_positions": 50,     # allow up to 50 positions (was 20)
-    "min_deviation": 0.15,        # 15% mispricing vs consensus required
+    "min_cash_reserve_pct": 0.40, # keep 40% of portfolio in cash
+    "max_open_positions": 30,     # max 30 positions
+    "min_deviation": 0.20,        # 20% mispricing vs consensus required (was 15% — tighter edge)
     "min_platforms": 2,           # must appear on 2+ platforms
-    "min_volume": 100,            # minimum market volume (liquidity check)
-    "scan_interval_seconds": 60,  # 60s scan interval (balanced speed vs server load)
-    "max_category_exposure": 10,  # max 10 positions per category (correlation limit)
+    "min_volume": 500,            # minimum market volume — higher = more liquid (was 100)
+    "scan_interval_seconds": 60,  # 60s scan interval
+    "max_category_exposure": 5,   # max 5 positions per category (was 10)
 }
 
 BOT_STATE = {
@@ -1602,6 +1602,13 @@ def run_bot_scan():
                 continue  # Already traded this event — skip other outcomes
             traded_events.add(event_key)
 
+            # BLOCK WEATHER: these markets are illiquid penny traps
+            market_cat = classify_market_category(
+                opp.get("kalshi_question", ""), opp["kalshi_ticker"]
+            )
+            if market_cat == "weather":
+                continue
+
             # CORRELATION CHECK: don't over-concentrate in one category
             cat_allowed, cat_name, cat_count = check_category_limit(
                 opp.get("kalshi_question", ""), opp["kalshi_ticker"], existing_positions
@@ -1686,19 +1693,22 @@ def run_bot_scan():
 
 # Sports series to scan for live games
 LIVE_GAME_SERIES = [
-    "KXMLBGAME",    # MLB game winners
-    "KXNBAGAME",    # NBA game winners
-    "KXNHLGAME",    # NHL game winners
-    "KXNFLGAME",    # NFL game winners
-    "KXSOCCERGAME", # Soccer game winners
+    "KXMLBGAME",           # MLB game winners
+    "KXNBAGAME",           # NBA game winners
+    "KXNHLGAME",           # NHL game winners
+    "KXNFLGAME",           # NFL game winners
+    "KXSOCCERGAME",        # Soccer game winners
+    "KXATPMATCH",          # ATP tennis matches
+    "KXWTAMATCH",          # WTA tennis matches
+    "KXATPCHALLENGERMATCH", # ATP Challenger tennis
 ]
 
 # Sniper settings
-SNIPE_MIN_PRICE = 93   # cents — only buy if price >= 93c (very high probability)
-SNIPE_MAX_PRICE = 98   # cents — don't buy at 99c (1c profit not worth it)
-SNIPE_BET_USD = 5.0    # dollars per snipe trade
-SNIPE_MAX_DAILY = 25.0 # max daily spend on snipes
-SNIPE_MAX_TRADES = 5   # max 5 snipes per day — quality over quantity
+SNIPE_MIN_PRICE = 90   # cents — buy if price >= 90c (high probability)
+SNIPE_MAX_PRICE = 97   # cents — don't buy at 98-99c (too little profit)
+SNIPE_BET_USD = 10.0   # dollars per snipe trade
+SNIPE_MAX_DAILY = 100.0 # max daily spend on snipes
+SNIPE_MAX_TRADES = 20   # max 20 snipes per day — more opportunities in live sports
 
 BOT_STATE["snipe_trades_today"] = []
 BOT_STATE["snipe_daily_spent"] = 0.0
