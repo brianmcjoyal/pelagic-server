@@ -6297,6 +6297,15 @@ async function loadPortfolio() {
     const data = await fetch(API + '/portfolio-summary').then(r => r.json());
     if (data.error) { console.error(data.error); return; }
 
+    // Skip update if server cache not warmed yet (all zeros) — keep previous values
+    if ((data.portfolio_value_usd || 0) === 0 && (data.balance_usd || 0) === 0 && window._lastPortfolioData) {
+      return;
+    }
+    // Save last good data
+    if ((data.portfolio_value_usd || 0) > 0 || (data.balance_usd || 0) > 0) {
+      window._lastPortfolioData = data;
+    }
+
     // Big portfolio value at top
     var pfVal = data.portfolio_value_usd || 0;
     document.getElementById('pf-value').textContent = '$' + pfVal.toFixed(2);
