@@ -4569,6 +4569,171 @@ def seventy_fivers_stats():
     })
 
 
+# ---------------------------------------------------------------------------
+# QUANT TAB — Mispriced market trading (active quantitative approach)
+# ---------------------------------------------------------------------------
+_quant_cache = {"data": None, "ts": 0}
+_QUANT_CACHE_TTL = 60
+
+BOT_STATE["quant_wins"] = 0
+BOT_STATE["quant_losses"] = 0
+BOT_STATE["quant_profit"] = 0.0
+BOT_STATE["quant_bets"] = 0
+
+def _generate_quant_picks():
+    """Find top 10 mispriced markets with cross-platform edge."""
+    import time as _t
+    now = _t.time()
+    if _quant_cache["data"] and (now - _quant_cache["ts"]) < _QUANT_CACHE_TTL:
+        return _quant_cache["data"]
+
+    try:
+        all_markets = fetch_all_markets()
+        mispricings = find_consensus_mispricings(all_markets)
+    except Exception:
+        return _quant_cache["data"] or {"picks": [], "count": 0}
+
+    _BLOCKED = ["temperature", "weather", "highest temp", "lowest temp", "degrees",
+                "fahrenheit", "celsius", "rainfall", "snow", "hurricane", "tornado"]
+
+    candidates = []
+    for opp in mispricings:
+        title = opp.get("kalshi_question", "")
+        ticker = opp.get("kalshi_ticker", "")
+
+        # Skip blocked categories
+        if any(kw in title.lower() for kw in _BLOCKED):
+            continue
+        if _is_parlay_title(title):
+            continue
+
+        # Quality filters
+        plat_count = len(opp.get("matching_platforms", []))
+        if plat_count < 1:
+            continue
+        deviation = opp.get("deviation", 0)
+        if deviation < 0.10:
+            continue  # need 10%+ edge
+        pc = opp.get("price_cents", 0)
+        if pc < 20 or pc > 80:
+            continue  # no penny traps, no overpaying
+
+        volume = 0
+        # Try to get volume from the market data
+        for m in all_markets:
+            if m.get("id") == ticker and m.get("platform") == "kalshi":
+                volume = m.get("volume", 0) or 0
+                break
+        if volume < 50:
+            continue
+
+        side = opp.get("signal", "").replace("buy_", "")
+        consensus = opp.get("consensus_yes_price", 0.5)
+        kalshi_price = opp.get("kalshi_yes_price", 0.5)
+        edge_cents = int(round(deviation * 100))
+        bet_size = _smart_bet_size(pc)
+        count = max(1, int(bet_size * 100 / pc))
+        ev_dollars = round(edge_cents * count / 100, 2)
+        category = classify_market_category(title, ticker)
+        line = _get_line_movement(ticker, pc)
+
+        # Platform details
+        platforms_detail = []
+        for mp in opp.get("matching_platforms", [])[:3]:
+            platforms_detail.append({
+                "platform": mp.get("platform", ""),
+                "price": int(round(mp.get("yes", 0.5) * 100)),
+            })
+
+        candidates.append({
+            "ticker": ticker,
+            "title": title[:80],
+            "side": side,
+            "price_cents": pc,
+            "consensus_cents": int(round(consensus * 100)),
+            "kalshi_cents": int(round(kalshi_price * 100)),
+            "deviation_pct": round(deviation * 100, 1),
+            "edge_cents": edge_cents,
+            "volume": volume,
+            "platforms": platforms_detail,
+            "platform_count": plat_count + 1,
+            "bet_size": bet_size,
+            "count": count,
+            "ev_dollars": ev_dollars,
+            "category": category,
+            "url": opp.get("kalshi_url", f"https://kalshi.com/markets/{ticker}"),
+            "line_movement": line,
+            "is_dip": line.get("is_dip", False),
+        })
+
+    # Sort by deviation * platform_count * volume (best edge first)
+    candidates.sort(key=lambda x: -(x["deviation_pct"] * x["platform_count"] * min(x["volume"], 10000)))
+    top = candidates[:10]
+    result = {"picks": top, "count": len(candidates)}
+    _quant_cache["data"] = result
+    _quant_cache["ts"] = _t.time()
+    return result
+
+
+@app.route("/quant-picks")
+def quant_picks():
+    data = _generate_quant_picks()
+    return jsonify(data)
+
+
+@app.route("/quant-bet", methods=["POST"])
+def quant_bet():
+    """Place a quant trade from the Quant tab."""
+    body = request.get_json(force=True) or {}
+    ticker = body.get("ticker", "")
+    side = body.get("side", "yes")
+    price_cents = body.get("price_cents", 50)
+
+    if not ticker:
+        return jsonify({"success": False, "error": "Missing ticker"})
+
+    # Safety checks
+    try:
+        bal_h = signed_headers("GET", "/portfolio/balance")
+        bal_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
+                             headers=bal_h, timeout=TIMEOUT)
+        if bal_r.ok:
+            bal = bal_r.json().get("balance", 0) / 100
+            if bal < BOT_CONFIG.get("min_balance_usd", 10):
+                return jsonify({"success": False, "error": f"Balance too low: ${bal:.2f}"})
+        else:
+            bal = 500
+    except Exception:
+        bal = 500
+
+    bet_size = _smart_bet_size(price_cents, bankroll=bal)
+    count = max(1, int(bet_size * 100 / price_cents))
+    cost = (price_cents * count) / 100.0
+
+    result = place_kalshi_order(ticker, side, price_cents, count=count)
+    success = "error" not in result
+
+    if success:
+        BOT_STATE["quant_bets"] = BOT_STATE.get("quant_bets", 0) + 1
+        _log_activity(
+            f"QUANT: {side.upper()} {ticker} @ {price_cents}c x{count} (${cost:.2f})",
+            "success"
+        )
+
+    return jsonify({"success": success, "result": result, "cost": cost, "count": count})
+
+
+@app.route("/quant-stats")
+def quant_stats():
+    return jsonify({
+        "wins": BOT_STATE.get("quant_wins", 0),
+        "losses": BOT_STATE.get("quant_losses", 0),
+        "profit": round(BOT_STATE.get("quant_profit", 0), 2),
+        "total_bets": BOT_STATE.get("quant_bets", 0),
+        "win_rate": round(BOT_STATE.get("quant_wins", 0) / max(1, BOT_STATE.get("quant_wins", 0) + BOT_STATE.get("quant_losses", 0)) * 100, 1),
+    })
+
+
 def _generate_picks():
     """Heavy lifting — called by background thread only, never by HTTP."""
     now = datetime.datetime.utcnow()
@@ -5661,6 +5826,7 @@ a:hover { color: #7da5f5; }
   <button class="tab" onclick="switchTab('activity')">Activity</button>
   <button class="tab" onclick="switchTab('history')">History</button>
   <button class="tab" onclick="switchTab('seventyfivers')">75%'ers</button>
+  <button class="tab" onclick="switchTab('quant')">Quant</button>
 </div>
 
 <!-- Positions Tab -->
@@ -5755,7 +5921,25 @@ a:hover { color: #7da5f5; }
   </div>
 </div>
 
-<!-- Progress to $1M moved to below header -->
+<!-- Quant Tab -->
+<div class="tab-content" id="tab-quant">
+  <div class="section">
+    <div id="quant-stats-banner" style="display:flex;align-items:center;gap:16px;padding:10px 14px;background:#0d1a2e;border:1px solid #1a3050;border-radius:10px;margin-bottom:14px;flex-wrap:wrap">
+      <span style="font-size:14px;font-weight:700;color:#00d4ff" id="quant-banner-text">Mispriced Markets</span>
+      <span style="font-size:12px;color:#888" id="quant-winrate-text"></span>
+      <span style="font-size:12px;color:#888" id="quant-profit-text"></span>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+        <label style="font-size:11px;color:#888;cursor:pointer;display:flex;align-items:center;gap:4px">
+          <input type="checkbox" id="quant-strong-only" onchange="loadQuantPicks()" style="accent-color:#00d4ff"> Strong Only (25%+)
+        </label>
+        <button class="refresh-btn" onclick="loadQuantPicks()">Refresh</button>
+      </div>
+    </div>
+    <div id="quant-cards" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">
+      <div class="loading">Scanning for mispriced markets...</div>
+    </div>
+  </div>
+</div>
 
 </div><!-- end container -->
 
@@ -6929,6 +7113,128 @@ async function quickBet(ticker, side, priceCents) {
   }
 }
 
+// --- Quant Tab ---
+async function loadQuantPicks() {
+  try {
+    var data = await fetch(API + '/quant-picks').then(r => r.json());
+    var stats = await fetch(API + '/quant-stats').then(r => r.json());
+    var picks = data.picks || [];
+    var strongOnly = document.getElementById('quant-strong-only');
+    if (strongOnly && strongOnly.checked) {
+      picks = picks.filter(function(p) { return p.deviation_pct >= 25; });
+    }
+
+    // Update banner
+    var bannerEl = document.getElementById('quant-banner-text');
+    bannerEl.textContent = data.count + ' mispriced markets found';
+    var wrEl = document.getElementById('quant-winrate-text');
+    wrEl.textContent = stats.total_bets > 0 ? stats.win_rate + '% win rate (' + stats.wins + 'W/' + stats.losses + 'L)' : '';
+    var prEl = document.getElementById('quant-profit-text');
+    if (stats.total_bets > 0) {
+      var pc = stats.profit >= 0 ? '#00dc5a' : '#ff5000';
+      prEl.innerHTML = '<span style="color:' + pc + '">' + (stats.profit >= 0 ? '+' : '') + '$' + stats.profit.toFixed(2) + ' profit</span>';
+    }
+
+    var cardsEl = document.getElementById('quant-cards');
+    if (picks.length === 0) {
+      cardsEl.innerHTML = '<div style="color:#555;text-align:center;padding:40px;grid-column:1/-1">No strong mispricings right now. Check back soon.</div>';
+      return;
+    }
+
+    var html = '';
+    picks.forEach(function(p) {
+      var sideColor = p.side === 'yes' ? '#00dc5a' : '#ff5000';
+      var sideLabel = p.side.toUpperCase();
+      var catColors = {sports:'#00dc5a',politics:'#ff8c00',crypto:'#f7931a',economics:'#00d4ff',entertainment:'#e040fb',science:'#76ff03',finance:'#ffb400',other:'#888'};
+      var catColor = catColors[p.category] || '#888';
+      var catBadge = '<span style="background:' + catColor + '22;color:' + catColor + ';font-size:9px;padding:2px 6px;border-radius:4px;font-weight:600;text-transform:uppercase">' + p.category + '</span>';
+
+      // Line movement
+      var lineInfo = '';
+      if (p.line_movement && p.line_movement.direction !== 'new') {
+        var lc = p.line_movement.change;
+        if (lc !== 0) {
+          var lineColor = lc > 0 ? '#00dc5a' : '#ff5000';
+          var arrow = lc > 0 ? '&#x2191;' : '&#x2193;';
+          lineInfo = '<span style="color:' + lineColor + ';font-size:10px;font-weight:600"> ' + arrow + Math.abs(lc) + '&#162;</span>';
+        }
+      }
+
+      // Platform detail
+      var platHtml = '';
+      if (p.platforms && p.platforms.length > 0) {
+        p.platforms.forEach(function(pl) {
+          var pn = pl.platform.charAt(0).toUpperCase() + pl.platform.slice(1,3);
+          platHtml += '<span style="background:#1a1a2e;color:#aaa;font-size:9px;padding:2px 5px;border-radius:3px">' + pn + ' ' + pl.price + '&#162;</span> ';
+        });
+      }
+
+      var dipBadge = p.is_dip ? '<span style="background:#00d4ff;color:#000;font-size:9px;padding:2px 6px;border-radius:4px;font-weight:700">DIP</span>' : '';
+      var edgeStrength = p.deviation_pct >= 25 ? 'STRONG' : p.deviation_pct >= 18 ? 'GOOD' : 'MODERATE';
+      var edgeColor = p.deviation_pct >= 25 ? '#00d4ff' : p.deviation_pct >= 18 ? '#00dc5a' : '#ffb400';
+
+      html += '<div style="background:#0d1117;border:1px solid #1a3050;border-radius:12px;padding:16px;position:relative">';
+      // Title row
+      html += '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">';
+      html += '<div style="flex:1;min-width:0"><div style="font-size:12px;color:#ccc;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + p.title + '</div></div>';
+      html += '<div style="margin-left:8px;display:flex;gap:4px;align-items:center">' + catBadge + dipBadge + '</div>';
+      html += '</div>';
+      // Edge hero
+      html += '<div style="display:flex;align-items:baseline;gap:12px;margin-bottom:8px">';
+      html += '<span style="font-size:28px;font-weight:800;color:' + edgeColor + '">' + p.deviation_pct.toFixed(0) + '%</span>';
+      html += '<span style="font-size:11px;color:#888">edge</span>';
+      html += '<span style="background:' + edgeColor + '22;color:' + edgeColor + ';font-size:10px;padding:2px 6px;border-radius:4px;font-weight:600">' + edgeStrength + '</span>';
+      html += '</div>';
+      // Price comparison
+      html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px">';
+      html += '<span style="color:#888">Kalshi:</span><span style="color:#fff;font-weight:700">' + p.price_cents + '&#162;</span>';
+      html += lineInfo;
+      html += '<span style="color:#888;margin-left:8px">Consensus:</span><span style="color:#00d4ff;font-weight:700">' + p.consensus_cents + '&#162;</span>';
+      html += '<span style="background:' + sideColor + ';color:#000;font-size:10px;font-weight:700;padding:1px 6px;border-radius:3px;margin-left:4px">' + sideLabel + '</span>';
+      html += '</div>';
+      // Platforms + volume
+      html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
+      html += '<div style="display:flex;gap:4px;flex-wrap:wrap">' + platHtml + '</div>';
+      html += '</div>';
+      html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">';
+      html += '<div style="font-size:11px;color:#666">Vol: ' + (p.volume >= 1000 ? (p.volume/1000).toFixed(1) + 'K' : p.volume) + ' &#x2022; ' + p.platform_count + ' platforms</div>';
+      html += '<div style="font-size:12px;color:#00dc5a;font-weight:600">EV: +$' + p.ev_dollars.toFixed(2) + '</div>';
+      html += '</div>';
+      // Action buttons
+      html += '<div style="display:flex;gap:8px">';
+      html += '<button onclick="quantBet(&quot;' + p.ticker + '&quot;,&quot;' + p.side + '&quot;,' + p.price_cents + ')" style="flex:1;background:#00d4ff;color:#000;border:none;padding:10px;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer">Trade $' + p.bet_size.toFixed(0) + '</button>';
+      html += '<a href="' + p.url + '" target="_blank" style="display:flex;align-items:center;padding:10px 12px;background:#1a2030;border-radius:8px;color:#888;text-decoration:none;font-size:11px">&#x2197;</a>';
+      html += '</div>';
+      html += '</div>';
+    });
+    cardsEl.innerHTML = html;
+  } catch(e) {
+    console.error('Quant error', e);
+    document.getElementById('quant-cards').innerHTML = '<div style="color:#ff5000;text-align:center;padding:40px;grid-column:1/-1">Error loading quant picks</div>';
+  }
+}
+
+async function quantBet(ticker, side, priceCents) {
+  if (!confirm('Place QUANT trade: ' + side.toUpperCase() + ' ' + ticker + ' @ ' + priceCents + 'c?')) return;
+  try {
+    var resp = await fetch(API + '/quant-bet', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ticker: ticker, side: side, price_cents: priceCents})
+    });
+    var data = await resp.json();
+    if (data.success) {
+      showToast('Quant trade placed! ' + side.toUpperCase() + ' ' + ticker + ' @ ' + priceCents + 'c x' + data.count + ' ($' + data.cost.toFixed(2) + ')', 'success');
+      loadQuantPicks();
+      loadPortfolio();
+    } else {
+      showToast('Trade failed: ' + (data.error || JSON.stringify(data.result).substring(0, 80)), 'error');
+    }
+  } catch(e) {
+    showToast('Trade error: ' + e.message, 'error');
+  }
+}
+
 // --- Ticker bar: live prices via server proxy ---
 async function loadTicker() {
   try {
@@ -6956,7 +7262,9 @@ function setTicker(sym, price, changePct) {
 // Load everything on page load
 loadTicker();
 loadSeventyFivers();
+loadQuantPicks();
 setInterval(loadSeventyFivers, 60000);
+setInterval(loadQuantPicks, 60000);
 loadStatus();
 loadActivity();
 loadPortfolio();
