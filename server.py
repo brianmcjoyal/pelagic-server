@@ -6217,8 +6217,8 @@ async function loadPortfolio() {
     var wlEl = document.getElementById('pf-wl');
     wlEl.innerHTML = '<span style="color:#00dc5a">' + w + 'W</span> / <span style="color:#ff5000">' + l + 'L</span>';
 
-    // Positions table
-    var positions = data.open_positions || [];
+    // Positions table (filter out old penny positions)
+    var positions = (data.open_positions || []).filter(function(p) { return (p.entry_price || 0) >= 15; });
     var posEl = document.getElementById('portfolio-positions');
     if (positions.length === 0) {
       posEl.innerHTML = '<div style="color:#555;font-size:10px;padding:6px">No open positions</div>';
@@ -6861,7 +6861,10 @@ async function loadPositions() {
   try {
     // Use position-monitor for enriched data with current prices
     const data = await fetch(API + '/position-monitor').then(r => r.json());
-    const positions = data.positions || [];
+    const allPositions = data.positions || [];
+    // Filter out old penny bot trades (entry < 15c) — illiquid dead weight
+    const positions = allPositions.filter(p => (p.entry_price || 0) >= 15);
+    var hiddenCount = allPositions.length - positions.length;
     document.getElementById('pos-badge').textContent = positions.length;
     if (positions.length === 0) {
       document.getElementById('pos-table').innerHTML = '<div class="empty">No open positions. Place a trade to get started.</div>';
@@ -6900,6 +6903,9 @@ async function loadPositions() {
       html += '<div style="margin-top:6px;font-size:8px;color:#00dc5a">Auto-exit active: sell at +' + data.take_profit_pct + '% / stop at ' + data.stop_loss_pct + '%</div>';
     } else {
       html += '<div style="margin-top:6px;font-size:8px;color:#666">Auto-exit OFF (enable auto-trade to activate)</div>';
+    }
+    if (hiddenCount > 0) {
+      html += '<div style="margin-top:6px;font-size:9px;color:#555">' + hiddenCount + ' old penny positions hidden (entry &lt;15&#162;, will settle naturally)</div>';
     }
     document.getElementById('pos-table').innerHTML = html;
   } catch(e) {
