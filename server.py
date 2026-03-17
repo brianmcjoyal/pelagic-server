@@ -5251,7 +5251,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans
 .header-left { display: flex; align-items: center; gap: 10px; }
 .logo { width: 32px; height: 32px; filter: drop-shadow(0 0 4px rgba(200,200,200,0.3)); }
 h1 { font-size: 20px; color: #fff; font-weight: 700; letter-spacing: -0.3px; margin: 0; }
-h1 span { background: linear-gradient(135deg, #c0c0c0, #e8e8e8, #a8a8a8, #d4d4d4); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+h1 span { background: linear-gradient(135deg, #8b5e28, #c9963a, #dab060, #a87530); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
 .subtitle { display: none; }
 /* Toggle switch */
 .switch { position: relative; width: 48px; height: 26px; flex-shrink: 0; }
@@ -5444,26 +5444,34 @@ a:hover { color: #7da5f5; }
 
 <div class="header">
   <div class="header-left">
-    <svg class="logo" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+    <svg class="logo" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" style="filter:drop-shadow(0 2px 6px rgba(180,130,60,0.35))">
       <defs>
         <linearGradient id="sharkG" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" style="stop-color:#d4d4d4"/>
-          <stop offset="25%" style="stop-color:#e8e8e8"/>
-          <stop offset="50%" style="stop-color:#a0a0a0"/>
-          <stop offset="75%" style="stop-color:#e0e0e0"/>
-          <stop offset="100%" style="stop-color:#b8b8b8"/>
+          <stop offset="0%" style="stop-color:#5a3a1a"/>
+          <stop offset="18%" style="stop-color:#c9963a"/>
+          <stop offset="35%" style="stop-color:#a87530"/>
+          <stop offset="50%" style="stop-color:#dab060"/>
+          <stop offset="65%" style="stop-color:#8b5e28"/>
+          <stop offset="80%" style="stop-color:#c9963a"/>
+          <stop offset="100%" style="stop-color:#4a2e14"/>
         </linearGradient>
         <linearGradient id="sharkFin" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" style="stop-color:#b0b0b0"/>
-          <stop offset="100%" style="stop-color:#888"/>
+          <stop offset="0%" style="stop-color:#8b5e28"/>
+          <stop offset="50%" style="stop-color:#c9963a"/>
+          <stop offset="100%" style="stop-color:#5a3a1a"/>
+        </linearGradient>
+        <linearGradient id="sharkHL" x1="0%" y1="0%" x2="50%" y2="100%">
+          <stop offset="0%" style="stop-color:#dab060" stop-opacity="0.6"/>
+          <stop offset="100%" style="stop-color:#8b5e28" stop-opacity="0"/>
         </linearGradient>
       </defs>
-      <path d="M8 38c0 0 4-18 20-22c2-6 8-12 14-14c-2 6-1 10 0 14c6 3 12 8 14 16c1 4 0 8-2 11l-6 3l2-6l-4 5l-8 2l3-4l-6 3c-4 1-10 1-14-1l4-3l-7 1c-4-1-7-3-9-6" fill="url(#sharkG)"/>
-      <circle cx="44" cy="28" r="2" fill="#0d0d0d"/>
-      <circle cx="44.5" cy="27.3" r="0.7" fill="#fff" opacity="0.9"/>
-      <path d="M28 40l-4 10l6-8l5 12l4-11l6 8l-2-11" fill="url(#sharkFin)" opacity="0.8"/>
+      <path d="M8 38c0 0 4-18 20-22c2-6 8-12 14-14c-2 6-1 10 0 14c6 3 12 8 14 16c1 4 0 8-2 11l-6 3l2-6l-4 5l-8 2l3-4l-6 3c-4 1-10 1-14-1l4-3l-7 1c-4-1-7-3-9-6" fill="url(#sharkG)" stroke="#3d2510" stroke-width="0.5"/>
+      <path d="M8 38c0 0 4-18 20-22c2-6 8-12 14-14c-2 6-1 10 0 14c6 3 12 8 14 16" fill="url(#sharkHL)"/>
+      <circle cx="44" cy="28" r="2" fill="#1a0e05"/>
+      <circle cx="44.5" cy="27.3" r="0.7" fill="#dab060" opacity="0.8"/>
+      <path d="M28 40l-4 10l6-8l5 12l4-11l6 8l-2-11" fill="url(#sharkFin)" stroke="#3d2510" stroke-width="0.3" opacity="0.85"/>
     </svg>
-    <h1><span>Trade</span><span style="background:linear-gradient(135deg,#e8e8e8,#fff,#c0c0c0);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text">Shark</span></h1>
+    <h1><span>Trade</span><span style="background:linear-gradient(135deg,#c9963a,#dab060,#8b5e28,#c9963a);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text">Shark</span></h1>
   </div>
   <div style="display:flex;align-items:center;gap:12px">
     <button id="scan-btn" onclick="triggerScan()" style="background:none;border:1px solid #00dc5a;color:#00dc5a;padding:6px 16px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;font-family:inherit;transition:all 0.2s;display:flex;align-items:center;gap:6px">
