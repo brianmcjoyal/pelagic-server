@@ -6709,7 +6709,7 @@ async function loadSeventyFivers() {
       html += '</div>';
       html += '</div>';
       html += '<div style="display:flex;gap:8px">';
-      html += '<button onclick="quickBet(\'' + p.ticker + '\',\'' + p.side + '\',' + p.price_cents + ')" style="flex:1;background:#00dc5a;color:#000;border:none;padding:10px;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer">Bet $' + p.bet_size.toFixed(0) + '</button>';
+      html += '<button onclick="quickBet(&quot;' + p.ticker + '&quot;,&quot;' + p.side + '&quot;,' + p.price_cents + ')" style="flex:1;background:#00dc5a;color:#000;border:none;padding:10px;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer">Bet $' + p.bet_size.toFixed(0) + '</button>';
       html += '<a href="' + p.url + '" target="_blank" style="display:flex;align-items:center;padding:10px 12px;background:#222;border-radius:8px;color:#888;text-decoration:none;font-size:11px">&#x2197;</a>';
       html += '</div>';
       html += '</div>';
@@ -6740,18 +6740,6 @@ async function quickBet(ticker, side, priceCents) {
   } catch(e) {
     showToast('Bet error: ' + e.message, 'error');
   }
-}
-
-function showToast(msg, type) {
-  var container = document.getElementById('toast-container');
-  if (!container) return;
-  var toast = document.createElement('div');
-  toast.style.cssText = 'padding:12px 20px;border-radius:8px;margin-bottom:8px;font-size:13px;font-weight:600;animation:fadeIn 0.3s;max-width:400px;';
-  toast.style.background = type === 'success' ? '#00dc5a' : '#ff5000';
-  toast.style.color = type === 'success' ? '#000' : '#fff';
-  toast.textContent = msg;
-  container.appendChild(toast);
-  setTimeout(function() { toast.remove(); }, 5000);
 }
 
 // --- Ticker bar: live prices via server proxy ---
