@@ -59,7 +59,7 @@ BOT_VERSION_DATE = "2026-03-15"
 BOT_CONFIG = {
     "enabled": True,  # default ON — safety floor will auto-disable if needed
     "max_bet_usd": 5.0,           # max $5 per single trade — small, precise bets
-    "max_daily_usd": 50.0,        # max $50/day total — capital preservation mode
+    "max_daily_usd": 75.0,        # max $75/day — scales with bankroll via smart sizing
     "min_balance_usd": 10.0,      # stop all trading if cash below $10
     "min_cash_reserve_pct": 0.05, # keep 5% of portfolio in cash — legacy positions skew ratio
     "max_open_positions": 150,    # high limit — legacy positions settling, bot uses daily trade cap instead
@@ -1569,6 +1569,10 @@ def run_bot_scan():
             _log_activity("Auto-trade OFF — skipping trades")
             return
 
+        # CONSENSUS TRADING DISABLED — these strategies lost money (11% win rate)
+        # Live Game Sniper + 75%'ers handle all trading now
+        return
+
         # SAFETY: check balance floor before trading
         min_balance = BOT_CONFIG.get("min_balance_usd", 200.0)
         current_balance = 0
@@ -1739,8 +1743,8 @@ LIVE_GAME_SERIES = [
 # Sniper settings
 SNIPE_MIN_PRICE = 70   # cents — buy if price >= 70c (Brian's winning range)
 SNIPE_MAX_PRICE = 90   # cents — don't buy above 90c (too little profit margin)
-SNIPE_BET_USD = 15.0   # dollars per snipe trade — match Brian's $10-20 style
-SNIPE_MAX_DAILY = 50.0  # max daily spend on snipes
+SNIPE_BET_USD = 15.0   # fallback — now uses _smart_bet_size() for bankroll scaling
+SNIPE_MAX_DAILY = 75.0  # max daily spend on snipes (scales naturally via bet sizing)
 SNIPE_MAX_TRADES = 10   # max 10 snipes per day — quality over quantity
 
 BOT_STATE["snipe_trades_today"] = []
@@ -1882,8 +1886,9 @@ def live_game_snipe():
                 if total_daily >= BOT_CONFIG["max_daily_usd"]:
                     break
 
-                # Calculate quantity — target SNIPE_BET_USD (up to 25 contracts)
-                count = max(1, min(25, int(SNIPE_BET_USD * 100 / price)))
+                # Calculate quantity — bankroll-scaled sizing for compound growth
+                bet_usd = _smart_bet_size(price, bankroll=bal if bal > 0 else None)
+                count = max(1, min(50, int(bet_usd * 100 / price)))
                 cost_usd = (price * count) / 100.0
 
                 if BOT_STATE["snipe_daily_spent"] + cost_usd > SNIPE_MAX_DAILY:
@@ -1924,6 +1929,7 @@ def live_game_snipe():
                             "time": datetime.datetime.utcnow().isoformat(),
                             "bot_version": BOT_VERSION,
                             "strategy": "live_sniper",
+                            "category": classify_market_category(title, ticker),
                         })
                         _log_activity(
                             f"🎯 SNIPED! {side.upper()} {ticker} @ {price}c x{filled} "
@@ -3419,29 +3425,30 @@ def _background_loop():
     while True:
         try:
             cycle += 1
-            # Run bot scan with correlation + volatility (updates BOT_STATE)
+            # Run bot scan — data only, no trades from consensus/quant strategies
+            # (These strategies produced 16 losses at 11% win rate — disabled)
             run_bot_scan()
             _time.sleep(2)  # yield to web requests
-            # Live game sniper — buy near-certain live sports outcomes
+            # Live game sniper — THE winning strategy (70%+ live markets)
             live_game_snipe()
             _time.sleep(2)  # yield to web requests
-            # QUANT ENGINE — run all strategies (every 3rd cycle)
+            # QUANT ENGINE DISABLED — mean reversion + market making lost money
+            # Keep volatility tracking for data, but don't place trades
             if cycle % 3 == 0:
                 try:
                     all_mkts = fetch_all_markets()
-                    # Update volatility scores for all Kalshi markets
                     for m in all_mkts:
                         if m["platform"] == "kalshi":
                             update_volatility(m["id"], int(m["yes"] * 100))
-                    run_quant_strategies(all_mkts)
+                    # run_quant_strategies(all_mkts)  # DISABLED — losing strategy
                 except Exception as qe:
-                    print(f"[QUANT] Engine error: {qe}")
-            # Check for new settlements — reinvest freed capital
+                    print(f"[QUANT] Data error: {qe}")
+            # Check for new settlements — recycle capital fast
             settlements = check_settlements_and_reinvest()
             if settlements:
-                # Trigger immediate extra scan to deploy freed capital
+                # Reinvest via sniper (the winning strategy)
                 try:
-                    run_bot_scan()
+                    live_game_snipe()
                 except Exception:
                     pass
             # Warm the picks cache so /top-picks is fast
@@ -3877,6 +3884,7 @@ def settled_positions():
                     trade_strategy = t.get("strategy", "unknown")
                     break
 
+            category = classify_market_category(title, ticker)
             settled.append({
                 "ticker": ticker,
                 "title": title,
@@ -3887,6 +3895,7 @@ def settled_positions():
                 "pick_type": pick_type,
                 "bot_version": trade_version,
                 "strategy": trade_strategy,
+                "category": category,
             })
 
         total_bets = wins + losses + breakeven
@@ -3902,6 +3911,23 @@ def settled_positions():
         legacy_losses = sum(1 for s in legacy_settled if s["won"] is False)
         legacy_pnl = sum(s["pnl_usd"] for s in legacy_settled)
 
+        # Category breakdown — know where the edge is
+        by_category = {}
+        for s in settled:
+            cat = s.get("category", "other")
+            if cat not in by_category:
+                by_category[cat] = {"wins": 0, "losses": 0, "pnl_usd": 0, "bets": 0}
+            by_category[cat]["bets"] += 1
+            by_category[cat]["pnl_usd"] += s["pnl_usd"]
+            if s["won"] is True:
+                by_category[cat]["wins"] += 1
+            elif s["won"] is False:
+                by_category[cat]["losses"] += 1
+        for cat in by_category:
+            c = by_category[cat]
+            c["win_rate"] = round(c["wins"] / max(1, c["wins"] + c["losses"]) * 100, 1)
+            c["pnl_usd"] = round(c["pnl_usd"], 2)
+
         return jsonify({
             "settled": settled,
             "wins": wins,
@@ -3916,6 +3942,7 @@ def settled_positions():
             "streak": streak,
             "streak_type": current_streak_type or "none",
             "total_bets": total_bets,
+            "by_category": by_category,
             "by_version": {
                 "v3_quant": {
                     "wins": v3_wins,
@@ -4215,16 +4242,81 @@ BOT_STATE["sf_best_streak"] = 0
 BOT_STATE["sf_profit"] = 0.0
 BOT_STATE["sf_bets"] = 0
 
+# Line movement tracker — detect price drops for buy-the-dip opportunities
+_line_history = {}  # ticker -> list of (timestamp, price_cents)
 
-def _smart_bet_size(price_cents):
-    """Scale bet size with confidence: higher price = more confident = bigger bet."""
+def _track_line(ticker, price_cents):
+    """Record a price point for line movement tracking."""
+    import time as _t
+    now = _t.time()
+    if ticker not in _line_history:
+        _line_history[ticker] = []
+    _line_history[ticker].append((now, price_cents))
+    # Keep last 30 minutes of data
+    _line_history[ticker] = [(t, p) for t, p in _line_history[ticker] if now - t < 1800]
+
+def _get_line_movement(ticker, price_cents):
+    """Get line movement info for a ticker. Returns (direction, drop_cents, trend)."""
+    import time as _t
+    now = _t.time()
+    _track_line(ticker, price_cents)
+    history = _line_history.get(ticker, [])
+    if len(history) < 2:
+        return {"direction": "new", "change": 0, "is_dip": False}
+    # Compare to highest price in last 15 min
+    recent = [(t, p) for t, p in history if now - t < 900]
+    if not recent:
+        return {"direction": "stable", "change": 0, "is_dip": False}
+    high = max(p for _, p in recent)
+    low = min(p for _, p in recent)
+    change = price_cents - recent[0][1]  # vs first reading
+    # A "dip" is when price dropped 3+ cents from recent high (buying opportunity)
+    is_dip = (high - price_cents) >= 3 and price_cents >= 70
+    return {
+        "direction": "up" if change > 0 else "down" if change < 0 else "stable",
+        "change": change,
+        "high": high,
+        "low": low,
+        "is_dip": is_dip,
+        "dip_size": high - price_cents if is_dip else 0,
+    }
+
+
+def _smart_bet_size(price_cents, bankroll=None):
+    """Scale bet size with bankroll + confidence for compound growth.
+
+    Uses 2-3% of bankroll per trade (scales up as we grow):
+    - 70-74c (lower confidence): 2% of bankroll
+    - 75-79c: 2.5% of bankroll
+    - 80-84c: 3% of bankroll
+    - 85c+  (highest confidence): 3.5% of bankroll
+
+    Floor: $5 min, Cap: $100 max per trade.
+    At $720 bankroll: $14-25 per trade
+    At $5,000: $100-175 -> capped at $100
+    At $50,000: would be $1,000+ but capped at $100 until we raise it
+    """
+    if bankroll is None:
+        # Try to get current bankroll from cache
+        try:
+            bankroll = (_PORTFOLIO_CACHE.get("data") or {}).get("portfolio_value_usd", 0)
+        except Exception:
+            bankroll = 0
+    if bankroll <= 0:
+        bankroll = 500  # fallback
+
     if price_cents >= 85:
-        return 20.0
+        pct = 0.035
     elif price_cents >= 80:
-        return 15.0
+        pct = 0.03
     elif price_cents >= 75:
-        return 12.0
-    return 10.0
+        pct = 0.025
+    else:
+        pct = 0.02
+
+    bet = bankroll * pct
+    bet = max(5.0, min(100.0, bet))  # $5 floor, $100 cap
+    return round(bet, 2)
 
 
 def _generate_seventy_fivers():
@@ -4358,6 +4450,20 @@ def _generate_seventy_fivers():
         count = max(1, int(bet_size * 100 / price))
         confidence = len(matching_platforms) + 1  # 1 for Kalshi itself
 
+        # Line movement tracking
+        line = _get_line_movement(ticker, price)
+
+        # Closing time edge — markets in last 30 min rarely flip
+        closing_soon = False
+        if close_time:
+            try:
+                close_dt2 = datetime.datetime.fromisoformat(close_time.replace("Z", "+00:00")).replace(tzinfo=None)
+                mins_left = (close_dt2 - now_dt).total_seconds() / 60
+                if 0 < mins_left <= 30:
+                    closing_soon = True
+            except Exception:
+                pass
+
         candidates.append({
             "ticker": ticker,
             "title": title[:80],
@@ -4374,11 +4480,16 @@ def _generate_seventy_fivers():
             "count": count,
             "url": m.get("url", f"https://kalshi.com/markets/{ticker}"),
             "confidence": confidence,
+            "line_movement": line,
+            "closing_soon": closing_soon,
+            "is_dip": line.get("is_dip", False),
         })
 
-    # Sort: live first, then by (platform_count * profit_cents * volume)
+    # Sort: closing soon first (huge edge), then live, then dips, then by score
     candidates.sort(key=lambda x: (
+        -int(x.get("closing_soon", False)),
         -int(x["is_live"]),
+        -int(x.get("is_dip", False)),
         -(x["platform_count"] * x["profit_cents"] * min(x["volume"], 10000)),
     ))
 
@@ -6658,6 +6769,29 @@ async function loadSettled() {
     if (progLabel) progLabel.textContent = progressLabel;
     if (progBalance) progBalance.textContent = '$' + balance.toFixed(2);
 
+    // Category breakdown — where is the edge?
+    var cats = data.by_category || {};
+    var catKeys = Object.keys(cats).sort(function(a,b){ return (cats[b].pnl_usd || 0) - (cats[a].pnl_usd || 0); });
+    if (catKeys.length > 0) {
+      var catHtml = '<div style="margin:12px 0 8px;padding:12px;background:#141414;border:1px solid #1f1f1f;border-radius:10px">';
+      catHtml += '<div style="color:#999;font-size:11px;font-weight:600;margin-bottom:8px">Win Rate by Category</div>';
+      catHtml += '<div style="display:flex;flex-wrap:wrap;gap:6px">';
+      catKeys.forEach(function(cat) {
+        var c = cats[cat];
+        var cwr = c.win_rate || 0;
+        var cc = cwr >= 60 ? '#00dc5a' : cwr >= 40 ? '#ffb400' : '#ff5000';
+        var pnlC = c.pnl_usd >= 0 ? '#00dc5a' : '#ff5000';
+        catHtml += '<div style="background:#0d0d0d;border:1px solid #222;border-radius:8px;padding:8px 12px;min-width:100px;text-align:center">';
+        catHtml += '<div style="font-size:10px;color:#888;text-transform:capitalize">' + cat + '</div>';
+        catHtml += '<div style="font-size:16px;font-weight:700;color:' + cc + '">' + cwr.toFixed(0) + '%</div>';
+        catHtml += '<div style="font-size:9px;color:#666">' + c.wins + 'W/' + c.losses + 'L</div>';
+        catHtml += '<div style="font-size:9px;color:' + pnlC + '">' + (c.pnl_usd >= 0 ? '+' : '') + '$' + c.pnl_usd.toFixed(2) + '</div>';
+        catHtml += '</div>';
+      });
+      catHtml += '</div></div>';
+      el.innerHTML += catHtml;
+    }
+
     // Settled positions table
     var tableEl = document.getElementById('settled-table');
     var settled = data.settled || [];
@@ -6726,29 +6860,43 @@ async function loadSeventyFivers() {
       var sideColor = p.side === 'yes' ? '#00dc5a' : '#ff5000';
       var sideLabel = p.side.toUpperCase();
       var liveBadge = p.is_live ? '<span style="background:#ff0040;color:#fff;font-size:9px;padding:2px 6px;border-radius:4px;font-weight:700;animation:pulse 2s infinite">&#x25CF; LIVE</span>' : '';
+      var closingSoonBadge = p.closing_soon ? '<span style="background:#ff8c00;color:#fff;font-size:9px;padding:2px 6px;border-radius:4px;font-weight:700">CLOSING SOON</span>' : '';
+      var dipBadge = p.is_dip ? '<span style="background:#00d4ff;color:#000;font-size:9px;padding:2px 6px;border-radius:4px;font-weight:700">DIP -' + (p.line_movement ? p.line_movement.dip_size : 0) + '&#162;</span>' : '';
       var platforms = '';
       if (p.platforms && p.platforms.length > 0) {
         platforms = '<span style="font-size:10px;color:#888;margin-left:4px">' + (p.platform_count) + ' platforms agree</span>';
       }
-      html += '<div style="background:#111;border:1px solid #222;border-radius:12px;padding:16px;position:relative">';
+      // Line movement indicator
+      var lineInfo = '';
+      if (p.line_movement && p.line_movement.direction !== 'new') {
+        var lc = p.line_movement.change;
+        if (lc !== 0) {
+          var lineColor = lc > 0 ? '#00dc5a' : '#ff5000';
+          var arrow = lc > 0 ? '&#x2191;' : '&#x2193;';
+          lineInfo = '<span style="color:' + lineColor + ';font-size:10px;font-weight:600"> ' + arrow + Math.abs(lc) + '&#162;</span>';
+        }
+      }
+      var cardBorder = p.closing_soon ? '#ff8c00' : (p.is_dip ? '#00d4ff' : '#222');
+      html += '<div style="background:#111;border:1px solid ' + cardBorder + ';border-radius:12px;padding:16px;position:relative">';
       html += '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">';
       html += '<div style="flex:1;min-width:0"><div style="font-size:12px;color:#ccc;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + p.title + '</div></div>';
-      html += '<div style="margin-left:8px;display:flex;gap:6px;align-items:center">' + liveBadge + '</div>';
+      html += '<div style="margin-left:8px;display:flex;gap:4px;align-items:center;flex-wrap:wrap">' + closingSoonBadge + liveBadge + dipBadge + '</div>';
       html += '</div>';
       html += '<div style="display:flex;align-items:baseline;gap:12px;margin-bottom:8px">';
       html += '<span style="font-size:28px;font-weight:800;color:#fff">' + p.price_cents + '&#162;</span>';
+      html += lineInfo;
       html += '<span style="background:' + sideColor + ';color:#000;font-size:11px;font-weight:700;padding:2px 8px;border-radius:4px">' + sideLabel + '</span>';
       html += '<span style="color:#00dc5a;font-size:13px;font-weight:600">+' + p.profit_cents + '&#162;</span>';
       html += '</div>';
       html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">';
       html += '<div style="font-size:11px;color:#666">';
       html += 'Vol: ' + (p.volume >= 1000 ? (p.volume/1000).toFixed(1) + 'K' : p.volume);
-      html += ' &#x2022;' + (p.time_left || 'TBD');
+      html += ' &#x2022; ' + (p.time_left || 'TBD');
       html += platforms;
       html += '</div>';
       html += '</div>';
       html += '<div style="display:flex;gap:8px">';
-      html += '<button onclick="quickBet(&quot;' + p.ticker + '&quot;,&quot;' + p.side + '&quot;,' + p.price_cents + ')" style="flex:1;background:#00dc5a;color:#000;border:none;padding:10px;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer">Bet $' + p.bet_size.toFixed(0) + '</button>';
+      html += '<button onclick="quickBet(&quot;' + p.ticker + '&quot;,&quot;' + p.side + '&quot;,' + p.price_cents + ')" style="flex:1;background:' + (p.closing_soon ? '#ff8c00' : '#00dc5a') + ';color:#000;border:none;padding:10px;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer">' + (p.closing_soon ? 'LOCK IN $' : 'Bet $') + p.bet_size.toFixed(0) + '</button>';
       html += '<a href="' + p.url + '" target="_blank" style="display:flex;align-items:center;padding:10px 12px;background:#222;border-radius:8px;color:#888;text-decoration:none;font-size:11px">&#x2197;</a>';
       html += '</div>';
       html += '</div>';
