@@ -2965,6 +2965,11 @@ _CATEGORY_KEYWORDS = {
              "microsoft", "meta", "tesla", "spacex", "tech"],
     "entertainment": ["oscar", "grammy", "emmy", "movie", "film", "box office",
                       "netflix", "disney", "streaming"],
+    "tennis": ["tennis", "atp", "wta", " vs ", "wimbledon", "us open",
+               "french open", "australian open", "grand slam", "challenger",
+               "roland garros", "miami open"],
+    "mma": ["ufc", "mma", "bellator", "fight night", "ppv", "octagon"],
+    "golf": ["pga", "golf", "masters", "open championship", "ryder cup"],
 }
 
 
@@ -5998,10 +6003,13 @@ a:hover { color: #7da5f5; }
 <div class="tab-content" id="tab-history">
   <div class="section">
     <div class="section-title">Scorecard <button class="refresh-btn" onclick="loadSettled()">Refresh</button></div>
-    <div id="settled-stats" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:8px;margin-bottom:16px">
-      <span style="color:#666">Loading...</span>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start">
+      <div id="settled-stats" style="flex:1;min-width:300px;display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
+        <span style="color:#666">Loading...</span>
+      </div>
+      <div id="settled-categories" style="flex:1;min-width:250px"></div>
     </div>
-    <div id="settled-table"></div>
+    <div id="settled-table" style="margin-top:12px"></div>
   </div>
   <div class="section">
     <div class="section-title">Trade Log <span class="badge" id="trade-badge">0</span><button class="refresh-btn" onclick="loadTrades()">Refresh</button></div>
@@ -6295,15 +6303,16 @@ async function loadPortfolio() {
     var pfValEl = document.getElementById('pf-value');
     pfValEl.style.color = '#fff';
 
-    // Update progress bar to $1M
-    var prog = Math.min(100, (pfVal / 1000000) * 100);
+    // Update progress bar to $1M — use total (cash + invested)
+    var totalVal = (data.balance_usd || 0) + pfVal;
+    var prog = Math.min(100, (totalVal / 1000000) * 100);
     var progLbl = prog < 0.01 ? '<0.01%' : prog.toFixed(3) + '%';
     var progFill = document.getElementById('progress-fill');
     var progLabel = document.getElementById('progress-label');
     var progBalance = document.getElementById('progress-balance');
     if (progFill) progFill.style.width = Math.max(0.3, prog) + '%';
     if (progLabel) progLabel.textContent = progLbl;
-    if (progBalance) progBalance.textContent = '$' + pfVal.toFixed(2);
+    if (progBalance) progBalance.textContent = '$' + totalVal.toFixed(2);
 
     // Daily P&L change
     var totalPnl = (data.total_unrealized_usd || 0) + (data.total_realized_usd || 0);
@@ -7139,19 +7148,20 @@ async function loadSettled() {
     if (progLabel) progLabel.textContent = progressLabel;
     if (progBalance) progBalance.textContent = '$' + balance.toFixed(2);
 
-    // Category breakdown — where is the edge?
+    // Category breakdown — render in side panel
+    var catEl = document.getElementById('settled-categories');
     var cats = data.by_category || {};
     var catKeys = Object.keys(cats).sort(function(a,b){ return (cats[b].pnl_usd || 0) - (cats[a].pnl_usd || 0); });
-    if (catKeys.length > 0) {
-      var catHtml = '<div style="margin:12px 0 8px;padding:12px;background:#141414;border:1px solid #1f1f1f;border-radius:10px">';
+    if (catKeys.length > 0 && catEl) {
+      var catHtml = '<div style="padding:12px;background:#141414;border:1px solid #1f1f1f;border-radius:10px;height:100%">';
       catHtml += '<div style="color:#999;font-size:11px;font-weight:600;margin-bottom:8px">Win Rate by Category</div>';
-      catHtml += '<div style="display:flex;flex-wrap:wrap;gap:6px">';
+      catHtml += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:6px">';
       catKeys.forEach(function(cat) {
         var c = cats[cat];
         var cwr = c.win_rate || 0;
         var cc = cwr >= 60 ? '#00dc5a' : cwr >= 40 ? '#ffb400' : '#ff5000';
         var pnlC = c.pnl_usd >= 0 ? '#00dc5a' : '#ff5000';
-        catHtml += '<div style="background:#0d0d0d;border:1px solid #222;border-radius:8px;padding:8px 12px;min-width:100px;text-align:center">';
+        catHtml += '<div style="background:#0d0d0d;border:1px solid #222;border-radius:8px;padding:8px 10px;text-align:center">';
         catHtml += '<div style="font-size:10px;color:#888;text-transform:capitalize">' + cat + '</div>';
         catHtml += '<div style="font-size:16px;font-weight:700;color:' + cc + '">' + cwr.toFixed(0) + '%</div>';
         catHtml += '<div style="font-size:9px;color:#666">' + c.wins + 'W/' + c.losses + 'L</div>';
@@ -7159,7 +7169,9 @@ async function loadSettled() {
         catHtml += '</div>';
       });
       catHtml += '</div></div>';
-      el.innerHTML += catHtml;
+      catEl.innerHTML = catHtml;
+    } else if (catEl) {
+      catEl.innerHTML = '<div style="padding:12px;background:#141414;border:1px solid #1f1f1f;border-radius:10px;color:#555;font-size:11px">No category data yet</div>';
     }
 
     // Settled positions table
