@@ -1845,6 +1845,18 @@ def live_game_snipe():
 
             markets = resp.json().get("markets", [])
 
+            # Sort so closing-soon markets get priority (before we hit daily cap)
+            def _close_sort(m):
+                ct = m.get("close_time", "")
+                if not ct:
+                    return 99999
+                try:
+                    cd = datetime.datetime.fromisoformat(ct.replace("Z", "+00:00")).replace(tzinfo=None)
+                    return max(0, (cd - datetime.datetime.utcnow()).total_seconds() / 60)
+                except Exception:
+                    return 99999
+            markets.sort(key=_close_sort)
+
             for mkt in markets:
                 ticker = mkt.get("ticker", "")
                 title = mkt.get("title", "")
@@ -1903,8 +1915,24 @@ def live_game_snipe():
                 if total_daily >= BOT_CONFIG["max_daily_usd"]:
                     break
 
+                # Closing time edge — markets closing in <30min at 70%+ rarely flip
+                closing_boost = 1.0
+                close_time = mkt.get("close_time", "")
+                if close_time:
+                    try:
+                        close_dt = datetime.datetime.fromisoformat(close_time.replace("Z", "+00:00")).replace(tzinfo=None)
+                        mins_left = (close_dt - datetime.datetime.utcnow()).total_seconds() / 60
+                        if 0 < mins_left <= 30:
+                            closing_boost = 1.5  # 50% bigger bet on closing markets
+                            _log_activity(
+                                f"CLOSING EDGE: {ticker} closes in {int(mins_left)}m @ {price}c — boosting bet 50%",
+                                "info"
+                            )
+                    except Exception:
+                        pass
+
                 # Calculate quantity — bankroll-scaled sizing for compound growth
-                bet_usd = _smart_bet_size(price, bankroll=bal if bal > 0 else None)
+                bet_usd = _smart_bet_size(price, bankroll=bal if bal > 0 else None) * closing_boost
                 count = max(1, min(50, int(bet_usd * 100 / price)))
                 cost_usd = (price * count) / 100.0
 
@@ -3473,6 +3501,11 @@ def _background_loop():
                     live_game_snipe()
                 except Exception:
                     pass
+            # Warm the 75%'ers cache every cycle
+            try:
+                _generate_seventy_fivers()
+            except Exception:
+                pass
             # Warm the picks cache so /top-picks is fast
             _warm_picks_cache()
             # Refresh portfolio cache so dashboard always has data
