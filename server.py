@@ -5979,7 +5979,7 @@ a:hover { color: #7da5f5; }
 <div class="tab-content active" id="tab-positions">
   <div id="portfolio-positions"><div class="loading">Loading positions...</div></div>
   <div class="section" style="margin-top:20px">
-    <div class="section-title">All Positions <span class="badge" id="pos-badge">0</span><button class="refresh-btn" onclick="loadPositions()">Refresh</button></div>
+    <div class="section-title">All Positions <span class="badge" id="pos-badge">0</span><label style="margin-left:12px;font-size:10px;color:#888;cursor:pointer;font-weight:400"><input type="checkbox" id="hide-bot-trades" checked onchange="loadPositions()" style="margin-right:4px">Hide old bot trades</label><button class="refresh-btn" onclick="loadPositions()">Refresh</button></div>
     <div id="pos-table"><div class="loading">Loading positions...</div></div>
   </div>
   <div class="section">
@@ -6024,10 +6024,18 @@ a:hover { color: #7da5f5; }
 
 <!-- Activity Tab -->
 <div class="tab-content" id="tab-activity">
-  <div class="section">
-    <div class="section-title">Live Feed <span style="width:8px;height:8px;border-radius:50%;background:#00dc5a;display:inline-block;animation:pulse 2s infinite" id="activity-pulse"></span></div>
-    <div class="activity-bar" id="activity-feed">
-      <div id="activity-lines"><div class="activity-line"><span class="time">--:--</span><span class="dot info"></span><span class="msg">Waiting for first scan...</span></div></div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+    <div class="section">
+      <div class="section-title">Live Feed <span style="width:8px;height:8px;border-radius:50%;background:#00dc5a;display:inline-block;animation:pulse 2s infinite" id="activity-pulse"></span></div>
+      <div class="activity-bar" id="activity-feed">
+        <div id="activity-lines"><div class="activity-line"><span class="time">--:--</span><span class="dot info"></span><span class="msg">Waiting for first scan...</span></div></div>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">Bets Placed <span style="width:8px;height:8px;border-radius:50%;background:#ffb400;display:inline-block" id="bets-pulse"></span></div>
+      <div class="activity-bar" id="bets-feed" style="max-height:400px;overflow-y:auto">
+        <div id="bets-lines"><div class="activity-line"><span class="time">--:--</span><span class="dot info"></span><span class="msg">Loading trade history...</span></div></div>
+      </div>
     </div>
   </div>
 </div>
@@ -6509,6 +6517,50 @@ async function loadActivity() {
       html += '</div>';
     });
     el.innerHTML = html;
+  } catch(e) {}
+}
+
+async function loadBetsFeed() {
+  try {
+    var data = await fetch(API + '/trades-today').then(r => r.json());
+    var trades = data.trades || [];
+    var el = document.getElementById('bets-lines');
+    if (!el) return;
+    if (trades.length === 0) {
+      el.innerHTML = '<div class="activity-line"><span class="time">--:--</span><span class="dot info"></span><span class="msg" style="color:#666">No bets placed today</span></div>';
+      return;
+    }
+    var h = '';
+    trades.forEach(function(t) {
+      var timeStr = '--:--';
+      if (t.time) {
+        try {
+          var ts = t.time;
+          if (ts.indexOf('Z') < 0) ts += 'Z';
+          var d = new Date(ts);
+          timeStr = d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+        } catch(e) {}
+      }
+      var sideC = t.side === 'yes' ? '#00dc5a' : '#ff5000';
+      var stratColors = {sniper:'#ffb400', quant:'#00d4ff', bot:'#888'};
+      var stratLabels = {sniper:'SNIPER', quant:'QUANT', bot:'BOT'};
+      var sc = stratColors[t.strategy] || '#888';
+      var sl = stratLabels[t.strategy] || t.strategy.toUpperCase();
+      var title = (t.title || t.ticker || '').substring(0, 40);
+      h += '<div class="activity-line">';
+      h += '<span class="time">' + timeStr + '</span>';
+      h += '<span class="dot" style="background:' + sc + '"></span>';
+      h += '<span class="msg"><span style="color:' + sc + ';font-weight:700;font-size:8px;margin-right:4px">' + sl + '</span>';
+      h += '<span style="color:' + sideC + ';font-weight:700">' + (t.side || '').toUpperCase() + '</span> ';
+      h += '<span style="color:#ccc">' + title + '</span> ';
+      h += '<span style="color:#ffb400">' + t.price_cents + '&#162; x' + (t.count || 1) + '</span> ';
+      h += '<span style="color:#888">$' + (t.cost_usd || 0).toFixed(2) + '</span>';
+      h += '</span></div>';
+    });
+    el.innerHTML = h;
+    // Pulse the dot
+    var pulse = document.getElementById('bets-pulse');
+    if (pulse && trades.length > 0) pulse.style.background = '#ffb400';
   } catch(e) {}
 }
 
@@ -7069,8 +7121,17 @@ async function loadPositions() {
     // Use position-monitor for enriched data with current prices
     const data = await fetch(API + '/position-monitor').then(r => r.json());
     const allPositions = data.positions || [];
-    // Filter out old penny bot trades (entry < 15c) — illiquid dead weight
-    const positions = allPositions.filter(p => (p.entry_price || 0) >= 15);
+    var hidePenny = document.getElementById('hide-bot-trades') && document.getElementById('hide-bot-trades').checked;
+    var botJunk = ['netflix', 'spotify', 'billboard', 'title holder', 'nuclear fusion', 'truth social', 'top song', 'top artist', 'featherweight', 'bantamweight', 'flyweight', 'middleweight', 'welterweight', 'lightweight', 'heavyweight', 'pga tour major', 'ballon d'];
+    var positions = allPositions;
+    if (hidePenny) {
+      positions = allPositions.filter(function(p) {
+        if ((p.entry_price || 0) < 15) return false;
+        var t = ((p.title || p.ticker) + '').toLowerCase();
+        for (var i = 0; i < botJunk.length; i++) { if (t.indexOf(botJunk[i]) >= 0) return false; }
+        return true;
+      });
+    }
     var hiddenCount = allPositions.length - positions.length;
     document.getElementById('pos-badge').textContent = positions.length;
     if (positions.length === 0) {
@@ -7540,6 +7601,7 @@ setInterval(loadSeventyFivers, 60000);
 setInterval(loadQuantPicks, 60000);
 loadStatus();
 loadActivity();
+loadBetsFeed();
 loadPortfolio();
 loadTopPicks();
 loadTodayPicks();
@@ -7549,7 +7611,7 @@ loadMispriced();
 loadTrades();
 // Auto-refresh: ticker every 60s, activity every 10s, portfolio every 30s
 setInterval(() => { loadTicker(); }, 60000);
-setInterval(() => { loadActivity(); }, 10000);
+setInterval(() => { loadActivity(); loadBetsFeed(); }, 10000);
 setInterval(() => { loadStatus(); loadPortfolio(); loadTopPicks(); loadTodayPicks(); loadPositions(); loadSettled(); loadTrades(); }, 30000);
 </script>
 </body>
