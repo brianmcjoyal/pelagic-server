@@ -4202,6 +4202,248 @@ def top_picks():
     return jsonify(_EMPTY_PICKS)
 
 
+# ---------------------------------------------------------------------------
+# 75%'ers — High-probability live betting opportunities
+# ---------------------------------------------------------------------------
+_sf_cache = {"data": None, "ts": 0}
+_SF_CACHE_TTL = 60  # seconds
+
+BOT_STATE["sf_wins"] = 0
+BOT_STATE["sf_losses"] = 0
+BOT_STATE["sf_streak"] = 0
+BOT_STATE["sf_best_streak"] = 0
+BOT_STATE["sf_profit"] = 0.0
+BOT_STATE["sf_bets"] = 0
+
+
+def _smart_bet_size(price_cents):
+    """Scale bet size with confidence: higher price = more confident = bigger bet."""
+    if price_cents >= 85:
+        return 20.0
+    elif price_cents >= 80:
+        return 15.0
+    elif price_cents >= 75:
+        return 12.0
+    return 10.0
+
+
+def _generate_seventy_fivers():
+    """Find top 10 markets at 70-85c with cross-platform validation."""
+    import time as _t
+    now = _t.time()
+    if _sf_cache["data"] and (now - _sf_cache["ts"]) < _SF_CACHE_TTL:
+        return _sf_cache["data"]
+
+    try:
+        all_markets = fetch_all_markets()
+    except Exception:
+        return _sf_cache["data"] or {"picks": [], "count": 0}
+
+    # Blocked keywords (weather etc)
+    _BLOCKED = ["temperature", "weather", "highest temp", "lowest temp", "degrees",
+                "fahrenheit", "celsius", "rainfall", "snow", "hurricane", "tornado"]
+
+    def _blocked(q):
+        ql = q.lower()
+        return any(kw in ql for kw in _BLOCKED)
+
+    # Build cross-platform price index for validation
+    other_prices = {}  # normalized_question -> list of prices from other platforms
+    for m in all_markets:
+        if m["platform"] == "kalshi":
+            continue
+        nq = normalize_question(m["question"])
+        if len(nq.split()) < 3:
+            continue
+        if nq not in other_prices:
+            other_prices[nq] = []
+        other_prices[nq].append({
+            "platform": m["platform"],
+            "yes": m.get("yes", 0.5),
+        })
+
+    candidates = []
+    now_dt = datetime.datetime.utcnow()
+
+    for m in all_markets:
+        if m["platform"] != "kalshi":
+            continue
+        title = m.get("question", "")
+        if _blocked(title):
+            continue
+        if _is_parlay_title(title):
+            continue
+
+        ticker = m.get("id", "")
+        vol = m.get("volume", 0) or 0
+        if vol < 100:
+            continue
+
+        # Get prices in cents
+        yes_cents = int(round(m.get("yes", 0.5) * 100))
+        no_cents = int(round(m.get("no", 0.5) * 100))
+
+        # Determine best side at 70-85c
+        side = None
+        price = 0
+        if 70 <= yes_cents <= 85:
+            side = "yes"
+            price = yes_cents
+        elif 70 <= no_cents <= 85:
+            side = "no"
+            price = no_cents
+        else:
+            continue
+
+        # Check if live
+        is_live = False
+        t_upper = ticker.upper()
+        et = m.get("event_ticker", "")
+        et_upper = (et or "").upper()
+        for pfx in LIVE_GAME_SERIES:
+            if t_upper.startswith(pfx) or et_upper.startswith(pfx):
+                is_live = True
+                break
+
+        # Cross-platform validation
+        nq = normalize_question(title)
+        matching_platforms = []
+        for nq_other, prices in other_prices.items():
+            # Simple keyword overlap check
+            words_k = set(nq.split())
+            words_o = set(nq_other.split())
+            overlap = len(words_k & words_o)
+            if overlap >= 3 or (overlap >= 2 and len(words_k) <= 5):
+                for p in prices:
+                    other_prob = p["yes"] if side == "yes" else (1 - p["yes"])
+                    if other_prob >= 0.65:  # other platform also thinks 65%+
+                        matching_platforms.append(p["platform"])
+
+        # Time to close
+        close_time = m.get("close_time", "")
+        time_left = ""
+        if close_time:
+            try:
+                close_dt = datetime.datetime.fromisoformat(close_time.replace("Z", "+00:00")).replace(tzinfo=None)
+                delta = close_dt - now_dt
+                total_secs = int(delta.total_seconds())
+                if total_secs <= 0:
+                    continue  # already closed
+                if total_secs < 3600:
+                    time_left = f"{total_secs // 60}m"
+                elif total_secs < 86400:
+                    time_left = f"{total_secs // 3600}h {(total_secs % 3600) // 60}m"
+                else:
+                    days = total_secs // 86400
+                    time_left = f"{days}d"
+            except Exception:
+                pass
+
+        profit_cents = 100 - price
+        bet_size = _smart_bet_size(price)
+        count = max(1, int(bet_size * 100 / price))
+        confidence = len(matching_platforms) + 1  # 1 for Kalshi itself
+
+        candidates.append({
+            "ticker": ticker,
+            "title": title[:80],
+            "side": side,
+            "price_cents": price,
+            "profit_cents": profit_cents,
+            "volume": vol,
+            "is_live": is_live,
+            "close_time": close_time,
+            "time_left": time_left,
+            "platforms": list(set(matching_platforms))[:3],
+            "platform_count": len(set(matching_platforms)) + 1,
+            "bet_size": bet_size,
+            "count": count,
+            "url": m.get("url", f"https://kalshi.com/markets/{ticker}"),
+            "confidence": confidence,
+        })
+
+    # Sort: live first, then by (platform_count * profit_cents * volume)
+    candidates.sort(key=lambda x: (
+        -int(x["is_live"]),
+        -(x["platform_count"] * x["profit_cents"] * min(x["volume"], 10000)),
+    ))
+
+    result = {"picks": candidates[:10], "count": len(candidates)}
+    _sf_cache["data"] = result
+    _sf_cache["ts"] = _t.time()
+    return result
+
+
+@app.route("/seventy-fivers")
+def seventy_fivers():
+    data = _generate_seventy_fivers()
+    return jsonify(data)
+
+
+@app.route("/quick-bet", methods=["POST"])
+def quick_bet():
+    """One-click bet from the 75%'ers tab."""
+    body = request.get_json(force=True)
+    ticker = body.get("ticker", "")
+    side = body.get("side", "")
+    price_cents = body.get("price_cents", 0)
+
+    if not ticker or not side or not price_cents:
+        return jsonify({"error": "Missing ticker, side, or price_cents"}), 400
+
+    # Smart bet sizing
+    bet_size = _smart_bet_size(price_cents)
+    count = max(1, int(bet_size * 100 / price_cents))
+    cost_usd = (price_cents * count) / 100.0
+
+    # Safety checks
+    try:
+        bal_h = signed_headers("GET", "/portfolio/balance")
+        bal_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
+                            headers=bal_h, timeout=8)
+        if bal_r.ok:
+            balance = bal_r.json().get("balance", 0) / 100
+            min_bal = BOT_CONFIG.get("min_balance_usd", 10.0)
+            if balance - cost_usd < min_bal:
+                return jsonify({"error": f"Would drop below ${min_bal:.0f} safety floor"}), 400
+    except Exception:
+        pass  # proceed anyway if balance check fails
+
+    result = place_kalshi_order(ticker, side, price_cents, count=count)
+    success = "error" not in result
+
+    if success:
+        _log_activity(f"QUICK BET: {side.upper()} {ticker} @ {price_cents}c x{count} (${cost_usd:.2f})", "success")
+        BOT_STATE["sf_bets"] += 1
+    else:
+        err = result.get("error", result.get("response_body", "Unknown"))
+        _log_activity(f"QUICK BET FAILED: {ticker} — {str(err)[:60]}", "error")
+
+    return jsonify({
+        "success": success,
+        "ticker": ticker,
+        "side": side,
+        "price_cents": price_cents,
+        "count": count,
+        "cost_usd": round(cost_usd, 2),
+        "bet_size": bet_size,
+        "result": result,
+    })
+
+
+@app.route("/seventy-fivers-stats")
+def seventy_fivers_stats():
+    return jsonify({
+        "wins": BOT_STATE.get("sf_wins", 0),
+        "losses": BOT_STATE.get("sf_losses", 0),
+        "streak": BOT_STATE.get("sf_streak", 0),
+        "best_streak": BOT_STATE.get("sf_best_streak", 0),
+        "profit": round(BOT_STATE.get("sf_profit", 0), 2),
+        "total_bets": BOT_STATE.get("sf_bets", 0),
+        "win_rate": round(BOT_STATE.get("sf_wins", 0) / max(1, BOT_STATE.get("sf_wins", 0) + BOT_STATE.get("sf_losses", 0)) * 100, 1),
+    })
+
+
 def _generate_picks():
     """Heavy lifting — called by background thread only, never by HTTP."""
     now = datetime.datetime.utcnow()
@@ -4992,10 +5234,10 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans
 .breakdown-val { font-size: 16px; color: #ccc; font-weight: 600; }
 .breakdown-dot { width: 3px; height: 3px; border-radius: 50%; background: #333; }
 .header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; position: sticky; top: 28px; z-index: 100; background: rgba(13,13,13,0.92); backdrop-filter: blur(12px); border-bottom: 1px solid #1a1a1a; margin: 0 -20px 0; }
-.header-left { display: flex; align-items: center; gap: 12px; }
-.logo { width: 36px; height: 36px; }
-h1 { font-size: 20px; color: #fff; font-weight: 700; letter-spacing: -0.3px; }
-h1 span { color: #00dc5a; }
+.header-left { display: flex; align-items: center; gap: 10px; }
+.logo { width: 32px; height: 32px; filter: drop-shadow(0 0 4px rgba(200,200,200,0.3)); }
+h1 { font-size: 20px; color: #fff; font-weight: 700; letter-spacing: -0.3px; margin: 0; }
+h1 span { background: linear-gradient(135deg, #c0c0c0, #e8e8e8, #a8a8a8, #d4d4d4); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
 .subtitle { display: none; }
 /* Toggle switch */
 .switch { position: relative; width: 48px; height: 26px; flex-shrink: 0; }
@@ -5191,16 +5433,23 @@ a:hover { color: #7da5f5; }
     <svg class="logo" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
       <defs>
         <linearGradient id="sharkG" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" style="stop-color:#00dc5a"/>
-          <stop offset="100%" style="stop-color:#00a844"/>
+          <stop offset="0%" style="stop-color:#d4d4d4"/>
+          <stop offset="25%" style="stop-color:#e8e8e8"/>
+          <stop offset="50%" style="stop-color:#a0a0a0"/>
+          <stop offset="75%" style="stop-color:#e0e0e0"/>
+          <stop offset="100%" style="stop-color:#b8b8b8"/>
+        </linearGradient>
+        <linearGradient id="sharkFin" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" style="stop-color:#b0b0b0"/>
+          <stop offset="100%" style="stop-color:#888"/>
         </linearGradient>
       </defs>
-      <path d="M8 38c0 0 4-18 20-22c2-6 8-12 14-14c-2 6-1 10 0 14c6 3 12 8 14 16c1 4 0 8-2 11l-6 3l2-6l-4 5l-8 2l3-4l-6 3c-4 1-10 1-14-1l4-3l-7 1c-4-1-7-3-9-6" fill="url(#sharkG)" opacity="0.9"/>
+      <path d="M8 38c0 0 4-18 20-22c2-6 8-12 14-14c-2 6-1 10 0 14c6 3 12 8 14 16c1 4 0 8-2 11l-6 3l2-6l-4 5l-8 2l3-4l-6 3c-4 1-10 1-14-1l4-3l-7 1c-4-1-7-3-9-6" fill="url(#sharkG)"/>
       <circle cx="44" cy="28" r="2" fill="#0d0d0d"/>
       <circle cx="44.5" cy="27.3" r="0.7" fill="#fff" opacity="0.9"/>
-      <path d="M28 40l-4 10l6-8l5 12l4-11l6 8l-2-11" fill="#00a844" opacity="0.7"/>
+      <path d="M28 40l-4 10l6-8l5 12l4-11l6 8l-2-11" fill="url(#sharkFin)" opacity="0.8"/>
     </svg>
-    <h1><span>Trade</span>Shark</h1>
+    <h1><span>Trade</span><span style="background:linear-gradient(135deg,#e8e8e8,#fff,#c0c0c0);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text">Shark</span></h1>
   </div>
   <div style="display:flex;align-items:center;gap:12px">
     <button id="scan-btn" onclick="triggerScan()" style="background:none;border:1px solid #00dc5a;color:#00dc5a;padding:6px 16px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;font-family:inherit;transition:all 0.2s;display:flex;align-items:center;gap:6px">
@@ -5212,6 +5461,19 @@ a:hover { color: #7da5f5; }
       <input type="checkbox" id="auto-trade-toggle" onchange="toggleAutoTrade()">
       <span class="slider"></span>
     </label>
+  </div>
+</div>
+
+<!-- Progress to $1M -->
+<div class="progress-section" id="progress-section" style="margin:0 0 8px;padding:10px 20px;border-radius:0;border-top:none;background:rgba(13,13,13,0.92)">
+  <div style="display:flex;justify-content:space-between;align-items:center">
+    <span style="font-size:11px;color:#999;font-weight:600">Progress to $1M</span>
+    <span style="font-size:11px;color:#00dc5a;font-weight:700" id="progress-label">0%</span>
+  </div>
+  <div class="progress-bar-bg" style="height:5px;margin-top:4px"><div class="progress-bar-fill" id="progress-fill" style="width:0%"></div></div>
+  <div style="display:flex;justify-content:space-between;margin-top:3px">
+    <span style="font-size:9px;color:#555" id="progress-balance">$0</span>
+    <span style="font-size:9px;color:#555">$1,000,000</span>
   </div>
 </div>
 
@@ -5265,6 +5527,7 @@ a:hover { color: #7da5f5; }
   <button class="tab" onclick="switchTab('picks')">Top Picks</button>
   <button class="tab" onclick="switchTab('activity')">Activity</button>
   <button class="tab" onclick="switchTab('history')">History</button>
+  <button class="tab" onclick="switchTab('seventyfivers')">75%'ers</button>
 </div>
 
 <!-- Positions Tab -->
@@ -5339,18 +5602,27 @@ a:hover { color: #7da5f5; }
   </div>
 </div>
 
-<!-- Progress to $1M -->
-<div class="progress-section" id="progress-section">
-  <div style="display:flex;justify-content:space-between;align-items:center">
-    <span style="font-size:13px;color:#999;font-weight:600">Progress to $1M</span>
-    <span style="font-size:13px;color:#00dc5a;font-weight:700" id="progress-label">0%</span>
-  </div>
-  <div class="progress-bar-bg"><div class="progress-bar-fill" id="progress-fill" style="width:0%"></div></div>
-  <div style="display:flex;justify-content:space-between;margin-top:6px">
-    <span style="font-size:11px;color:#555" id="progress-balance">$0</span>
-    <span style="font-size:11px;color:#555">$1,000,000</span>
+<!-- 75%'ers Tab -->
+<div class="tab-content" id="tab-seventyfivers">
+  <div class="section">
+    <div id="sf-stats-banner" style="display:flex;align-items:center;gap:16px;padding:10px 14px;background:#1a1a2e;border-radius:10px;margin-bottom:14px;flex-wrap:wrap">
+      <span style="font-size:16px;font-weight:700;color:#00dc5a" id="sf-streak-text">Loading...</span>
+      <span style="font-size:12px;color:#888" id="sf-winrate-text"></span>
+      <span style="font-size:12px;color:#888" id="sf-profit-text"></span>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+        <label style="font-size:11px;color:#888;cursor:pointer;display:flex;align-items:center;gap:4px">
+          <input type="checkbox" id="sf-live-only" checked onchange="loadSeventyFivers()" style="accent-color:#00dc5a"> Live Only
+        </label>
+        <button class="refresh-btn" onclick="loadSeventyFivers()">Refresh</button>
+      </div>
+    </div>
+    <div id="sf-cards" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">
+      <div class="loading">Scanning for 75%'ers...</div>
+    </div>
   </div>
 </div>
+
+<!-- Progress to $1M moved to below header -->
 
 </div><!-- end container -->
 
@@ -6377,6 +6649,111 @@ async function loadSettled() {
   }
 }
 
+// --- 75%'ers Tab ---
+async function loadSeventyFivers() {
+  try {
+    var data = await fetch(API + '/seventy-fivers').then(r => r.json());
+    var stats = await fetch(API + '/seventy-fivers-stats').then(r => r.json());
+
+    // Stats banner
+    var streakEl = document.getElementById('sf-streak-text');
+    var wrEl = document.getElementById('sf-winrate-text');
+    var profEl = document.getElementById('sf-profit-text');
+    if (stats.streak > 0) {
+      streakEl.textContent = '\uD83D\uDD25 ' + stats.streak + ' in a row!';
+    } else if (stats.total_bets === 0) {
+      streakEl.textContent = 'No bets yet \u2014 find your first 75%\'er!';
+    } else {
+      streakEl.textContent = 'Best streak: ' + stats.best_streak;
+    }
+    wrEl.textContent = stats.total_bets > 0 ? stats.win_rate + '% win rate (' + stats.wins + 'W/' + stats.losses + 'L)' : '';
+    var pf = stats.profit || 0;
+    profEl.textContent = stats.total_bets > 0 ? ((pf >= 0 ? '+$' : '-$') + Math.abs(pf).toFixed(2) + ' profit') : '';
+    profEl.style.color = pf >= 0 ? '#00dc5a' : '#ff5000';
+
+    // Filter
+    var liveOnly = document.getElementById('sf-live-only').checked;
+    var picks = (data.picks || []).filter(function(p) { return liveOnly ? p.is_live : true; });
+
+    var cardsEl = document.getElementById('sf-cards');
+    if (picks.length === 0) {
+      cardsEl.innerHTML = '<div style="color:#666;text-align:center;padding:40px;grid-column:1/-1">' +
+        (liveOnly ? 'No live 75%\'ers right now. Try turning off "Live Only" or check back during game time.' : 'No 75%\'ers found. Markets may be quiet right now.') + '</div>';
+      return;
+    }
+
+    var html = '';
+    picks.forEach(function(p) {
+      var sideColor = p.side === 'yes' ? '#00dc5a' : '#ff5000';
+      var sideLabel = p.side.toUpperCase();
+      var liveBadge = p.is_live ? '<span style="background:#ff0040;color:#fff;font-size:9px;padding:2px 6px;border-radius:4px;font-weight:700;animation:pulse 2s infinite">\u25CF LIVE</span>' : '';
+      var platforms = '';
+      if (p.platforms && p.platforms.length > 0) {
+        platforms = '<span style="font-size:10px;color:#888;margin-left:4px">' + (p.platform_count) + ' platforms agree</span>';
+      }
+      html += '<div style="background:#111;border:1px solid #222;border-radius:12px;padding:16px;position:relative">';
+      html += '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">';
+      html += '<div style="flex:1;min-width:0"><div style="font-size:12px;color:#ccc;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + p.title + '</div></div>';
+      html += '<div style="margin-left:8px;display:flex;gap:6px;align-items:center">' + liveBadge + '</div>';
+      html += '</div>';
+      html += '<div style="display:flex;align-items:baseline;gap:12px;margin-bottom:8px">';
+      html += '<span style="font-size:28px;font-weight:800;color:#fff">' + p.price_cents + '\u00A2</span>';
+      html += '<span style="background:' + sideColor + ';color:#000;font-size:11px;font-weight:700;padding:2px 8px;border-radius:4px">' + sideLabel + '</span>';
+      html += '<span style="color:#00dc5a;font-size:13px;font-weight:600">+' + p.profit_cents + '\u00A2</span>';
+      html += '</div>';
+      html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">';
+      html += '<div style="font-size:11px;color:#666">';
+      html += 'Vol: ' + (p.volume >= 1000 ? (p.volume/1000).toFixed(1) + 'K' : p.volume);
+      html += ' \u2022 ' + (p.time_left || 'TBD');
+      html += platforms;
+      html += '</div>';
+      html += '</div>';
+      html += '<div style="display:flex;gap:8px">';
+      html += '<button onclick="quickBet(\'' + p.ticker + '\',\'' + p.side + '\',' + p.price_cents + ')" style="flex:1;background:#00dc5a;color:#000;border:none;padding:10px;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer">Bet $' + p.bet_size.toFixed(0) + '</button>';
+      html += '<a href="' + p.url + '" target="_blank" style="display:flex;align-items:center;padding:10px 12px;background:#222;border-radius:8px;color:#888;text-decoration:none;font-size:11px">\u2197</a>';
+      html += '</div>';
+      html += '</div>';
+    });
+    cardsEl.innerHTML = html;
+  } catch(e) {
+    console.error('75%ers error', e);
+    document.getElementById('sf-cards').innerHTML = '<div style="color:#ff5000;text-align:center;padding:40px;grid-column:1/-1">Error loading picks</div>';
+  }
+}
+
+async function quickBet(ticker, side, priceCents) {
+  if (!confirm('Place ' + side.toUpperCase() + ' bet on ' + ticker + ' @ ' + priceCents + '\u00A2?')) return;
+  try {
+    var resp = await fetch(API + '/quick-bet', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ticker: ticker, side: side, price_cents: priceCents})
+    });
+    var data = await resp.json();
+    if (data.success) {
+      showToast('Bet placed! ' + side.toUpperCase() + ' ' + ticker + ' @ ' + priceCents + '\u00A2 x' + data.count + ' ($' + data.cost_usd.toFixed(2) + ')', 'success');
+      loadSeventyFivers();
+      loadPortfolio();
+    } else {
+      showToast('Bet failed: ' + (data.error || 'Unknown error'), 'error');
+    }
+  } catch(e) {
+    showToast('Bet error: ' + e.message, 'error');
+  }
+}
+
+function showToast(msg, type) {
+  var container = document.getElementById('toast-container');
+  if (!container) return;
+  var toast = document.createElement('div');
+  toast.style.cssText = 'padding:12px 20px;border-radius:8px;margin-bottom:8px;font-size:13px;font-weight:600;animation:fadeIn 0.3s;max-width:400px;';
+  toast.style.background = type === 'success' ? '#00dc5a' : '#ff5000';
+  toast.style.color = type === 'success' ? '#000' : '#fff';
+  toast.textContent = msg;
+  container.appendChild(toast);
+  setTimeout(function() { toast.remove(); }, 5000);
+}
+
 // --- Ticker bar: live prices via server proxy ---
 async function loadTicker() {
   try {
@@ -6403,6 +6780,8 @@ function setTicker(sym, price, changePct) {
 
 // Load everything on page load
 loadTicker();
+loadSeventyFivers();
+setInterval(loadSeventyFivers, 60000);
 loadStatus();
 loadActivity();
 loadPortfolio();
