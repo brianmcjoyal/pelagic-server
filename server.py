@@ -6003,13 +6003,13 @@ a:hover { color: #7da5f5; }
 <div class="tab-content" id="tab-history">
   <div class="section">
     <div class="section-title">Scorecard <button class="refresh-btn" onclick="loadSettled()">Refresh</button></div>
-    <div style="display:grid;grid-template-columns:3fr 2fr;gap:12px;align-items:start">
-      <div id="settled-stats" style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px">
-        <span style="color:#666">Loading...</span>
-      </div>
-      <div id="settled-categories"></div>
+    <div id="settled-stats" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+      <span style="color:#666">Loading...</span>
     </div>
-    <div id="settled-table" style="margin-top:12px"></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start">
+      <div id="settled-categories"></div>
+      <div id="settled-table"></div>
+    </div>
   </div>
   <div class="section">
     <div class="section-title">Trade Log <span class="badge" id="trade-badge">0</span><button class="refresh-btn" onclick="loadTrades()">Refresh</button></div>
@@ -7123,9 +7123,9 @@ async function loadSettled() {
     const progressLabel = progress < 0.01 ? '<0.01%' : progress.toFixed(3) + '%';
 
     function statBox(label, value, color) {
-      return '<div style="background:#141414;border:1px solid #1f1f1f;border-radius:8px;padding:8px 10px;text-align:center">' +
-        '<div style="color:#666;font-size:10px;font-weight:500;margin-bottom:2px">' + label + '</div>' +
-        '<div style="color:' + color + ';font-size:18px;font-weight:700">' + value + '</div></div>';
+      return '<div style="background:#141414;border:1px solid #1f1f1f;border-radius:8px;padding:6px 10px;text-align:center;flex:1;min-width:80px">' +
+        '<div style="color:#666;font-size:9px;font-weight:500;margin-bottom:1px">' + label + '</div>' +
+        '<div style="color:' + color + ';font-size:15px;font-weight:700">' + value + '</div></div>';
     }
 
     var html = '';
