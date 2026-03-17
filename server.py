@@ -6660,9 +6660,9 @@ async function loadSeventyFivers() {
     var wrEl = document.getElementById('sf-winrate-text');
     var profEl = document.getElementById('sf-profit-text');
     if (stats.streak > 0) {
-      streakEl.textContent = '\uD83D\uDD25 ' + stats.streak + ' in a row!';
+      streakEl.textContent = String.fromCodePoint(0x1F525) + ' ' + stats.streak + ' in a row!';
     } else if (stats.total_bets === 0) {
-      streakEl.textContent = 'No bets yet \u2014 find your first 75%\'er!';
+      streakEl.textContent = 'No bets yet - find your first 75% pick!';
     } else {
       streakEl.textContent = 'Best streak: ' + stats.best_streak;
     }
@@ -6678,7 +6678,7 @@ async function loadSeventyFivers() {
     var cardsEl = document.getElementById('sf-cards');
     if (picks.length === 0) {
       cardsEl.innerHTML = '<div style="color:#666;text-align:center;padding:40px;grid-column:1/-1">' +
-        (liveOnly ? 'No live 75%\'ers right now. Try turning off "Live Only" or check back during game time.' : 'No 75%\'ers found. Markets may be quiet right now.') + '</div>';
+        (liveOnly ? 'No live 75% picks right now. Try turning off "Live Only" or check back during game time.' : 'No 75% picks found. Markets may be quiet right now.') + '</div>';
       return;
     }
 
@@ -6686,7 +6686,7 @@ async function loadSeventyFivers() {
     picks.forEach(function(p) {
       var sideColor = p.side === 'yes' ? '#00dc5a' : '#ff5000';
       var sideLabel = p.side.toUpperCase();
-      var liveBadge = p.is_live ? '<span style="background:#ff0040;color:#fff;font-size:9px;padding:2px 6px;border-radius:4px;font-weight:700;animation:pulse 2s infinite">\u25CF LIVE</span>' : '';
+      var liveBadge = p.is_live ? '<span style="background:#ff0040;color:#fff;font-size:9px;padding:2px 6px;border-radius:4px;font-weight:700;animation:pulse 2s infinite">&#x25CF; LIVE</span>' : '';
       var platforms = '';
       if (p.platforms && p.platforms.length > 0) {
         platforms = '<span style="font-size:10px;color:#888;margin-left:4px">' + (p.platform_count) + ' platforms agree</span>';
@@ -6697,20 +6697,20 @@ async function loadSeventyFivers() {
       html += '<div style="margin-left:8px;display:flex;gap:6px;align-items:center">' + liveBadge + '</div>';
       html += '</div>';
       html += '<div style="display:flex;align-items:baseline;gap:12px;margin-bottom:8px">';
-      html += '<span style="font-size:28px;font-weight:800;color:#fff">' + p.price_cents + '\u00A2</span>';
+      html += '<span style="font-size:28px;font-weight:800;color:#fff">' + p.price_cents + '&#162;</span>';
       html += '<span style="background:' + sideColor + ';color:#000;font-size:11px;font-weight:700;padding:2px 8px;border-radius:4px">' + sideLabel + '</span>';
-      html += '<span style="color:#00dc5a;font-size:13px;font-weight:600">+' + p.profit_cents + '\u00A2</span>';
+      html += '<span style="color:#00dc5a;font-size:13px;font-weight:600">+' + p.profit_cents + '&#162;</span>';
       html += '</div>';
       html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">';
       html += '<div style="font-size:11px;color:#666">';
       html += 'Vol: ' + (p.volume >= 1000 ? (p.volume/1000).toFixed(1) + 'K' : p.volume);
-      html += ' \u2022 ' + (p.time_left || 'TBD');
+      html += ' &#x2022;' + (p.time_left || 'TBD');
       html += platforms;
       html += '</div>';
       html += '</div>';
       html += '<div style="display:flex;gap:8px">';
       html += '<button onclick="quickBet(\'' + p.ticker + '\',\'' + p.side + '\',' + p.price_cents + ')" style="flex:1;background:#00dc5a;color:#000;border:none;padding:10px;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer">Bet $' + p.bet_size.toFixed(0) + '</button>';
-      html += '<a href="' + p.url + '" target="_blank" style="display:flex;align-items:center;padding:10px 12px;background:#222;border-radius:8px;color:#888;text-decoration:none;font-size:11px">\u2197</a>';
+      html += '<a href="' + p.url + '" target="_blank" style="display:flex;align-items:center;padding:10px 12px;background:#222;border-radius:8px;color:#888;text-decoration:none;font-size:11px">&#x2197;</a>';
       html += '</div>';
       html += '</div>';
     });
@@ -6722,7 +6722,7 @@ async function loadSeventyFivers() {
 }
 
 async function quickBet(ticker, side, priceCents) {
-  if (!confirm('Place ' + side.toUpperCase() + ' bet on ' + ticker + ' @ ' + priceCents + '\u00A2?')) return;
+  if (!confirm('Place ' + side.toUpperCase() + ' bet on ' + ticker + ' @ ' + priceCents + '&#162;?')) return;
   try {
     var resp = await fetch(API + '/quick-bet', {
       method: 'POST',
@@ -6731,7 +6731,7 @@ async function quickBet(ticker, side, priceCents) {
     });
     var data = await resp.json();
     if (data.success) {
-      showToast('Bet placed! ' + side.toUpperCase() + ' ' + ticker + ' @ ' + priceCents + '\u00A2 x' + data.count + ' ($' + data.cost_usd.toFixed(2) + ')', 'success');
+      showToast('Bet placed! ' + side.toUpperCase() + ' ' + ticker + ' @ ' + priceCents + '&#162; x' + data.count + ' ($' + data.cost_usd.toFixed(2) + ')', 'success');
       loadSeventyFivers();
       loadPortfolio();
     } else {
