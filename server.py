@@ -3357,6 +3357,40 @@ def _background_loop():
     _time.sleep(30)  # wait 30s for server to fully start before scanning
     print("[BG] Background loop started")
     _log_activity("Background engine started — v3 QUANT")
+    # Early cache warm — get balance + positions so dashboard shows data immediately
+    try:
+        _bal_early = 0
+        try:
+            _bh_e = signed_headers("GET", "/portfolio/balance")
+            _br_e = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
+                                headers=_bh_e, timeout=10)
+            if _br_e.ok:
+                _bal_early = _br_e.json().get("balance", 0) / 100
+        except Exception:
+            pass
+        _pos_early = []
+        try:
+            _pos_early = check_position_prices()
+        except Exception:
+            pass
+        _mv_early = sum((p.get("current_price") or p.get("entry_price") or 0) * p.get("count", 0)
+                       for p in _pos_early) / 100
+        _inv_early = sum(p.get("market_exposure_cents", 0) for p in _pos_early) / 100
+        _PORTFOLIO_CACHE["data"] = {
+            "balance_usd": round(_bal_early, 2),
+            "portfolio_value_usd": round(_bal_early + _mv_early, 2),
+            "positions_value_usd": round(_mv_early, 2),
+            "open_positions": _pos_early,
+            "open_count": len(_pos_early),
+            "total_invested_usd": round(_inv_early, 2),
+            "total_unrealized_usd": round(sum((p.get("unrealized_pnl_cents") or 0) for p in _pos_early) / 100, 2),
+            "wins": 0, "losses": 0, "breakeven": 0, "win_rate": 0,
+            "total_realized_usd": 0, "settled_history": [],
+        }
+        _PORTFOLIO_CACHE["ts"] = _time.time()
+        print(f"[BG] Early cache warm: ${_bal_early:.2f} cash, {len(_pos_early)} positions")
+    except Exception as e:
+        print(f"[BG] Early cache warm failed (non-fatal): {e}")
     # Hydrate trade history from Kalshi on startup
     try:
         _hydrate_from_kalshi()
@@ -3431,6 +3465,39 @@ def _background_loop():
                     pass
                 _mv2 = sum((p.get("current_price") or p.get("entry_price") or 0) * p.get("count", 0)
                            for p in _pos2) / 100
+                # Fetch settled positions for win/loss stats
+                _wins2 = _losses2 = 0
+                _realized2 = 0.0
+                _settled_list2 = []
+                try:
+                    for _sf2 in ["settled", "unsettled"]:
+                        _sh2 = signed_headers("GET", "/portfolio/positions")
+                        _sr2 = requests.get(
+                            KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/positions",
+                            headers=_sh2, params={"limit": 200, "settlement_status": _sf2},
+                            timeout=10,
+                        )
+                        if _sr2.ok:
+                            for _sp2 in _sr2.json().get("market_positions", []):
+                                _pnl2 = _parse_kalshi_dollars(_sp2.get("realized_pnl_dollars") or _sp2.get("realized_pnl"))
+                                _pnl2_usd = _pnl2 / 100
+                                if _sf2 == "unsettled" and abs(_pnl2_usd) < 0.005:
+                                    continue
+                                _realized2 += _pnl2_usd
+                                if _pnl2_usd > 0.005:
+                                    _wins2 += 1
+                                    _settled_list2.append({"ticker": _sp2.get("ticker", ""), "pnl_usd": round(_pnl2_usd, 2), "won": True})
+                                elif _pnl2_usd < -0.005:
+                                    _losses2 += 1
+                                    _settled_list2.append({"ticker": _sp2.get("ticker", ""), "pnl_usd": round(_pnl2_usd, 2), "won": False})
+                except Exception:
+                    # Fall back to cached values
+                    if _PORTFOLIO_CACHE["data"]:
+                        _wins2 = _PORTFOLIO_CACHE["data"].get("wins", 0)
+                        _losses2 = _PORTFOLIO_CACHE["data"].get("losses", 0)
+                        _realized2 = _PORTFOLIO_CACHE["data"].get("total_realized_usd", 0)
+                        _settled_list2 = _PORTFOLIO_CACHE["data"].get("settled_history", [])
+                _wr2 = round(_wins2 / max(1, _wins2 + _losses2) * 100, 1)
                 _PORTFOLIO_CACHE["data"] = {
                     "balance_usd": round(_bal2, 2),
                     "portfolio_value_usd": round(_bal2 + _mv2, 2),
@@ -3439,12 +3506,12 @@ def _background_loop():
                     "open_count": len(_pos2),
                     "total_invested_usd": round(sum(p.get("market_exposure_cents", 0) for p in _pos2) / 100, 2),
                     "total_unrealized_usd": round(sum((p.get("unrealized_pnl_cents") or 0) for p in _pos2) / 100, 2),
-                    "wins": _PORTFOLIO_CACHE["data"].get("wins", 0) if _PORTFOLIO_CACHE["data"] else 0,
-                    "losses": _PORTFOLIO_CACHE["data"].get("losses", 0) if _PORTFOLIO_CACHE["data"] else 0,
+                    "wins": _wins2,
+                    "losses": _losses2,
                     "breakeven": 0,
-                    "win_rate": _PORTFOLIO_CACHE["data"].get("win_rate", 0) if _PORTFOLIO_CACHE["data"] else 0,
-                    "total_realized_usd": _PORTFOLIO_CACHE["data"].get("total_realized_usd", 0) if _PORTFOLIO_CACHE["data"] else 0,
-                    "settled_history": _PORTFOLIO_CACHE["data"].get("settled_history", []) if _PORTFOLIO_CACHE["data"] else [],
+                    "win_rate": _wr2,
+                    "total_realized_usd": round(_realized2, 2),
+                    "settled_history": _settled_list2[-20:],
                 }
                 _PORTFOLIO_CACHE["ts"] = _time.time()
             except Exception:
@@ -3875,107 +3942,16 @@ _PORTFOLIO_CACHE_TTL = 15  # seconds — serve cached data between refreshes
 
 @app.route("/portfolio-summary")
 def portfolio_summary():
-    """Combined portfolio view: open positions + settled record + balance.
-    Caches results for 15s so the dashboard always shows something."""
-    import time as _time
-    now = _time.time()
-
-    # Return cached data if fresh enough
-    if _PORTFOLIO_CACHE["data"] and (now - _PORTFOLIO_CACHE["ts"]) < _PORTFOLIO_CACHE_TTL:
+    """Return cached portfolio data. Background loop keeps it fresh."""
+    if _PORTFOLIO_CACHE["data"]:
         return jsonify(_PORTFOLIO_CACHE["data"])
-
-    try:
-        # Balance
-        bal_path = "/portfolio/balance"
-        bal_h = signed_headers("GET", bal_path)
-        balance_usd = 0
-        try:
-            bal_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + bal_path, headers=bal_h, timeout=TIMEOUT)
-            if bal_r.ok:
-                balance_usd = bal_r.json().get("balance", 0) / 100
-        except Exception:
-            # Use cached balance if API fails
-            if _PORTFOLIO_CACHE["data"]:
-                balance_usd = _PORTFOLIO_CACHE["data"].get("balance_usd", 0)
-
-        # Open positions with P&L
-        open_positions = check_position_prices()
-        total_invested = sum(p.get("market_exposure_cents", 0) for p in open_positions) / 100
-        total_unrealized = sum((p.get("unrealized_pnl_cents") or 0) for p in open_positions) / 100
-        # Current market value = sum of (current_price * count) for each position
-        # This matches what Kalshi shows as "Positions" value
-        total_market_value = 0
-        for p in open_positions:
-            cp = p.get("current_price") or p.get("entry_price") or 0
-            total_market_value += cp * p.get("count", 0)
-        total_market_value = total_market_value / 100  # cents to dollars
-
-        # Realized P&L: check ALL positions (settled AND unsettled with realized_pnl)
-        # When bot sells early, realized_pnl shows up on unsettled positions too
-        settled_path = "/portfolio/positions"
-        settled_h = signed_headers("GET", settled_path)
-        wins = losses = breakeven = 0
-        total_realized = 0
-        settled_list = []
-        for settlement_filter in ["settled", "unsettled"]:
-            try:
-                sr = requests.get(
-                    KALSHI_BASE_URL + KALSHI_API_PREFIX + settled_path,
-                    headers=settled_h,
-                    params={"limit": 200, "settlement_status": settlement_filter},
-                    timeout=TIMEOUT,
-                )
-                if sr.ok:
-                    for pos in sr.json().get("market_positions", []):
-                        pnl_cents = _parse_kalshi_dollars(pos.get("realized_pnl_dollars") or pos.get("realized_pnl"))
-                        pnl_usd = pnl_cents / 100
-                        ticker = pos.get("ticker", "")
-                        # Skip unsettled positions with zero realized P&L (still open, no sells)
-                        if settlement_filter == "unsettled" and abs(pnl_usd) < 0.005:
-                            continue
-                        total_realized += pnl_usd
-                        if pnl_usd > 0.005:
-                            wins += 1
-                            settled_list.append({"ticker": ticker, "pnl_usd": round(pnl_usd, 2), "won": True})
-                        elif pnl_usd < -0.005:
-                            losses += 1
-                            settled_list.append({"ticker": ticker, "pnl_usd": round(pnl_usd, 2), "won": False})
-                        else:
-                            if settlement_filter == "settled":
-                                breakeven += 1
-            except Exception:
-                pass
-
-        win_rate = round(wins / max(1, wins + losses) * 100, 1)
-        # Portfolio value = cash + current market value of positions (matches Kalshi)
-        portfolio_value = balance_usd + total_market_value
-
-        result = {
-            "balance_usd": round(balance_usd, 2),
-            "portfolio_value_usd": round(portfolio_value, 2),
-            "positions_value_usd": round(total_market_value, 2),
-            "open_positions": open_positions,
-            "open_count": len(open_positions),
-            "total_invested_usd": round(total_invested, 2),
-            "total_unrealized_usd": round(total_unrealized, 2),
-            "wins": wins,
-            "losses": losses,
-            "breakeven": breakeven,
-            "win_rate": win_rate,
-            "total_realized_usd": round(total_realized, 2),
-            "settled_history": settled_list[-20:],
-        }
-
-        # Update cache
-        _PORTFOLIO_CACHE["data"] = result
-        _PORTFOLIO_CACHE["ts"] = now
-
-        return jsonify(result)
-    except Exception as e:
-        # On total failure, return cached data if available
-        if _PORTFOLIO_CACHE["data"]:
-            return jsonify(_PORTFOLIO_CACHE["data"])
-        return jsonify({"error": str(e)})
+    # No cache yet — return empty shell so frontend shows zeros instead of spinning
+    return jsonify({
+        "balance_usd": 0, "portfolio_value_usd": 0, "positions_value_usd": 0,
+        "open_positions": [], "open_count": 0, "total_invested_usd": 0,
+        "total_unrealized_usd": 0, "wins": 0, "losses": 0, "breakeven": 0,
+        "win_rate": 0, "total_realized_usd": 0, "settled_history": [],
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -6059,7 +6035,7 @@ async function loadTrades() {
       const sideClass = t.side === 'yes' ? 'side-yes' : 'side-no';
       const resultClass = t.success ? 'result-win' : 'result-loss';
       const resultLabel = t.success ? 'Filled' : 'Failed';
-      const source = t.manual ? 'Manual' : 'Auto';
+      const source = t.source === 'kalshi_fill' ? 'Kalshi' : (t.manual ? 'Manual' : 'Bot');
       const qty = t.count || 1;
       html += '<tr>';
       html += '<td>' + time + '</td>';
