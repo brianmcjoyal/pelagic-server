@@ -6303,8 +6303,8 @@ async function loadPortfolio() {
     var pfValEl = document.getElementById('pf-value');
     pfValEl.style.color = '#fff';
 
-    // Update progress bar to $1M — use total (cash + invested)
-    var totalVal = (data.balance_usd || 0) + pfVal;
+    // Update progress bar to $1M — pfVal already includes cash + invested
+    var totalVal = pfVal;
     var prog = Math.min(100, (totalVal / 1000000) * 100);
     var progLbl = prog < 0.01 ? '<0.01%' : prog.toFixed(3) + '%';
     var progFill = document.getElementById('progress-fill');
