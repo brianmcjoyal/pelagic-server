@@ -221,6 +221,23 @@ def _hydrate_from_kalshi():
             if order_id not in existing_ids:
                 new_count += 1
 
+        # Enrich with market titles (batch unique tickers)
+        unique_tickers = list(set(t["ticker"] for t in all_trades_rebuilt if t.get("ticker")))
+        title_map = {}
+        for tk in unique_tickers[:50]:  # cap at 50 to avoid long startup
+            try:
+                mkt_path = f"/markets/{tk}"
+                mkt_h = signed_headers("GET", mkt_path)
+                mkt_r = _req.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + mkt_path, headers=mkt_h, timeout=5)
+                if mkt_r.ok:
+                    title_map[tk] = mkt_r.json().get("market", {}).get("title", tk)
+            except Exception:
+                pass
+        for t in all_trades_rebuilt:
+            if t["ticker"] in title_map:
+                t["question"] = title_map[t["ticker"]]
+            t["success"] = True  # Kalshi fills are confirmed trades
+
         # Rebuild state from Kalshi truth
         BOT_STATE["all_trades"] = all_trades_rebuilt
         BOT_STATE["trade_date"] = today_str
@@ -230,7 +247,7 @@ def _hydrate_from_kalshi():
         # Hydrated trades are historical and shouldn't block new trades
         BOT_STATE["hydrated_today_spent"] = round(today_spent, 2)
         _save_state()
-        print(f"[HYDRATE] Rebuilt {len(all_trades_rebuilt)} trades from Kalshi ({new_count} new), today: {today_count} trades, ${today_spent:.2f} spent")
+        print(f"[HYDRATE] Rebuilt {len(all_trades_rebuilt)} trades from Kalshi ({new_count} new), today: {today_count} trades, ${today_spent:.2f} spent, titles: {len(title_map)}")
     except Exception as e:
         print(f"[HYDRATE] Error: {e}")
         import traceback
@@ -6787,19 +6804,32 @@ async function loadTrades() {
     }
     let html = '<table><tr><th>Time</th><th>Market</th><th>Side</th><th>Qty</th><th>Cost</th><th>Deviation</th><th>Result</th><th>Source</th></tr>';
     data.trades.slice().reverse().forEach(t => {
-      const time = new Date(t.timestamp + 'Z').toLocaleString();
-      const sideClass = t.side === 'yes' ? 'side-yes' : 'side-no';
-      const resultClass = t.success ? 'result-win' : 'result-loss';
-      const resultLabel = t.success ? 'Filled' : 'Failed';
-      const source = t.source === 'kalshi_fill' ? 'Kalshi' : (t.manual ? 'Manual' : 'Bot');
-      const qty = t.count || 1;
+      var time = '--';
+      if (t.timestamp) {
+        try {
+          var ts = t.timestamp;
+          if (ts.indexOf('Z') < 0 && ts.indexOf('+') < 0 && ts.indexOf('-', 10) < 0) ts += 'Z';
+          var d = new Date(ts);
+          time = isNaN(d.getTime()) ? t.timestamp.substring(0, 16).replace('T', ' ') : d.toLocaleString();
+        } catch(e) { time = t.timestamp.substring(0, 16); }
+      }
+      var sideClass = t.side === 'yes' ? 'side-yes' : 'side-no';
+      // Kalshi fills are always successful (they are confirmed trades)
+      var isSuccess = t.source === 'kalshi_fill' ? true : (t.success || false);
+      var resultClass = isSuccess ? 'result-win' : 'result-loss';
+      var resultLabel = isSuccess ? 'Filled' : 'Failed';
+      var source = t.source === 'kalshi_fill' ? 'Kalshi' : (t.manual ? 'Manual' : 'Bot');
+      var actionLabel = (t.action === 'sell') ? 'SELL' : '';
+      var qty = t.count || 1;
+      var title = (t.question || t.title || t.ticker || '').substring(0, 50);
+      var devText = t.deviation ? ((t.deviation * 100).toFixed(1) + '%') : '--';
       html += '<tr>';
       html += '<td>' + time + '</td>';
-      html += '<td>' + (t.question || t.ticker).substring(0, 50) + '</td>';
-      html += '<td class="' + sideClass + '">' + qty + 'x ' + t.side.toUpperCase() + '</td>';
+      html += '<td>' + title + '</td>';
+      html += '<td class="' + sideClass + '">' + (actionLabel ? actionLabel + ' ' : '') + qty + 'x ' + (t.side || '').toUpperCase() + '</td>';
       html += '<td>' + qty + '</td>';
-      html += '<td>$' + (t.cost_usd || t.price_cents/100).toFixed(2) + '</td>';
-      html += '<td>' + ((t.deviation || 0) * 100).toFixed(1) + '%</td>';
+      html += '<td>$' + (t.cost_usd || (t.price_cents || 0)/100).toFixed(2) + '</td>';
+      html += '<td>' + devText + '</td>';
       html += '<td class="' + resultClass + '">' + resultLabel + '</td>';
       html += '<td>' + source + '</td>';
       html += '</tr>';
