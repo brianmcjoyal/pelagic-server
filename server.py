@@ -5977,9 +5977,10 @@ a:hover { color: #7da5f5; }
 
 <!-- Positions Tab -->
 <div class="tab-content active" id="tab-positions">
+  <div style="display:flex;justify-content:flex-end;margin-bottom:6px"><label style="font-size:10px;color:#888;cursor:pointer"><input type="checkbox" id="hide-bot-trades" checked onchange="loadPortfolio();loadPositions()" style="margin-right:4px">Hide old bot trades</label></div>
   <div id="portfolio-positions"><div class="loading">Loading positions...</div></div>
   <div class="section" style="margin-top:20px">
-    <div class="section-title">All Positions <span class="badge" id="pos-badge">0</span><label style="margin-left:12px;font-size:10px;color:#888;cursor:pointer;font-weight:400"><input type="checkbox" id="hide-bot-trades" checked onchange="loadPositions()" style="margin-right:4px">Hide old bot trades</label><button class="refresh-btn" onclick="loadPositions()">Refresh</button></div>
+    <div class="section-title">All Positions <span class="badge" id="pos-badge">0</span><button class="refresh-btn" onclick="loadPositions()">Refresh</button></div>
     <div id="pos-table"><div class="loading">Loading positions...</div></div>
   </div>
   <div class="section">
@@ -6419,8 +6420,20 @@ async function loadPortfolio() {
     var wlEl = document.getElementById('pf-wl');
     wlEl.innerHTML = '<span style="color:#00dc5a">' + w + 'W</span> / <span style="color:#ff5000">' + l + 'L</span>';
 
-    // Positions table (filter out old penny positions)
-    var positions = (data.open_positions || []).filter(function(p) { return (p.entry_price || 0) >= 15; });
+    // Positions table (filter out old bot junk)
+    var allPos = data.open_positions || [];
+    var hidePenny = document.getElementById('hide-bot-trades') && document.getElementById('hide-bot-trades').checked;
+    var _botJunk = ['netflix', 'spotify', 'billboard', 'title holder', 'nuclear fusion', 'truth social', 'top song', 'top artist', 'featherweight', 'bantamweight', 'flyweight', 'middleweight', 'welterweight', 'lightweight', 'heavyweight', 'pga tour major', 'ballon d', 'gas prices'];
+    var positions = allPos;
+    if (hidePenny) {
+      positions = allPos.filter(function(p) {
+        if ((p.entry_price || 0) < 15) return false;
+        var t = ((p.title || p.ticker) + '').toLowerCase();
+        for (var i = 0; i < _botJunk.length; i++) { if (t.indexOf(_botJunk[i]) >= 0) return false; }
+        return true;
+      });
+    }
+    var hiddenCount = allPos.length - positions.length;
     var posEl = document.getElementById('portfolio-positions');
     if (positions.length === 0) {
       posEl.innerHTML = '<div style="color:#555;font-size:10px;padding:6px">No open positions</div>';
@@ -6490,6 +6503,9 @@ async function loadPortfolio() {
       html += '</tr>';
     });
     html += '</tbody></table></div>';
+    if (hiddenCount > 0) {
+      html += '<div style="margin-top:6px;font-size:9px;color:#555">' + hiddenCount + ' old bot positions hidden (uncheck toggle to show all)</div>';
+    }
     posEl.innerHTML = html;
   } catch(e) {
     console.error('Portfolio load error:', e);
