@@ -4062,6 +4062,59 @@ def bot_activity():
     })
 
 
+@app.route("/trades-today")
+def trades_today_endpoint():
+    """Return all trades placed today (bot + sniper + quant)."""
+    bot_trades = BOT_STATE.get("trades_today", [])
+    sniper_trades = BOT_STATE.get("snipe_trades_today", [])
+    quant_trades = BOT_STATE.get("quant_trades", [])
+    today_str = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+
+    all_today = []
+    for t in bot_trades:
+        all_today.append({
+            "ticker": t.get("ticker", ""),
+            "title": t.get("question", t.get("ticker", "")),
+            "side": t.get("side", ""),
+            "price_cents": t.get("price_cents", 0),
+            "count": t.get("count", 0),
+            "cost_usd": round(t.get("cost_usd", 0), 2),
+            "time": t.get("timestamp", ""),
+            "strategy": t.get("strategy", "bot"),
+            "success": t.get("success", False),
+        })
+    for t in sniper_trades:
+        all_today.append({
+            "ticker": t.get("ticker", ""),
+            "title": t.get("title", t.get("ticker", "")),
+            "side": t.get("side", ""),
+            "price_cents": t.get("price", 0),
+            "count": t.get("count", 0),
+            "cost_usd": round(t.get("cost", 0), 2),
+            "time": t.get("time", ""),
+            "strategy": "sniper",
+            "success": True,
+        })
+    for t in quant_trades:
+        if (t.get("time", "") or "")[:10] == today_str:
+            all_today.append({
+                "ticker": t.get("ticker", ""),
+                "title": t.get("title", t.get("ticker", "")),
+                "side": t.get("side", ""),
+                "price_cents": t.get("price_cents", 0),
+                "count": t.get("count", 0),
+                "cost_usd": round(t.get("cost_usd", 0), 2),
+                "time": t.get("time", ""),
+                "strategy": "quant",
+                "success": True,
+            })
+
+    # Sort by time descending
+    all_today.sort(key=lambda x: x.get("time", ""), reverse=True)
+    total_spent = sum(t["cost_usd"] for t in all_today if t["success"])
+    return jsonify({"trades": all_today, "count": len(all_today), "total_spent": round(total_spent, 2)})
+
+
 @app.route("/quant-status")
 def quant_status():
     """Real-time quant engine dashboard — shows all strategy performance."""
@@ -5825,7 +5878,7 @@ a:hover { color: #7da5f5; }
   <div class="stat-card"><div class="stat-label">Cash</div><div class="stat-value" id="pf-cash">--</div></div>
   <div class="stat-card"><div class="stat-label">Invested</div><div class="stat-value" id="pf-invested">--</div></div>
   <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-value" id="pf-winrate">--</div></div>
-  <div class="stat-card"><div class="stat-label">Trades Today</div><div class="stat-value" id="trades-today">--</div></div>
+  <div class="stat-card" style="cursor:pointer;position:relative" onclick="toggleTodayTrades()"><div class="stat-label">Trades Today</div><div class="stat-value" id="trades-today" style="text-decoration:underline;text-decoration-style:dotted">--</div><div id="today-trades-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;min-width:350px;max-width:500px;background:#111;border:1px solid #333;border-radius:10px;padding:12px;z-index:100;box-shadow:0 8px 24px rgba(0,0,0,0.6);max-height:400px;overflow-y:auto;font-size:10px"></div></div>
 </div>
 
 <!-- Hidden portfolio elements needed by JS -->
@@ -6069,6 +6122,59 @@ function showToast(msg, type) {
   requestAnimationFrame(() => t.style.opacity = '1');
   setTimeout(() => { t.remove(); }, 5000);
 }
+
+async function toggleTodayTrades() {
+  var dd = document.getElementById('today-trades-dropdown');
+  if (dd.style.display !== 'none') {
+    dd.style.display = 'none';
+    return;
+  }
+  dd.innerHTML = '<div style="color:#888;padding:8px">Loading...</div>';
+  dd.style.display = 'block';
+  try {
+    var data = await fetch(API + '/trades-today').then(r => r.json());
+    var trades = data.trades || [];
+    if (trades.length === 0) {
+      dd.innerHTML = '<div style="color:#666;padding:8px;text-align:center">No trades placed today</div>';
+      return;
+    }
+    var h = '<div style="color:#00dc5a;font-weight:700;font-size:12px;margin-bottom:8px">' + trades.length + ' trades today ($' + data.total_spent.toFixed(2) + ' spent)</div>';
+    h += '<table style="width:100%;border-collapse:collapse">';
+    h += '<tr style="color:#888;border-bottom:1px solid #222"><th style="padding:4px;text-align:left">Time</th><th style="padding:4px;text-align:left">Market</th><th style="padding:4px">Side</th><th style="padding:4px">Price</th><th style="padding:4px">Cost</th><th style="padding:4px">Source</th></tr>';
+    trades.forEach(function(t) {
+      var sideC = t.side === 'yes' ? '#00dc5a' : '#ff5000';
+      var timeStr = '';
+      if (t.time) {
+        var d = new Date(t.time.indexOf('Z') >= 0 ? t.time : t.time + 'Z');
+        timeStr = d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+      }
+      var stratColors = {sniper:'#ffb400', quant:'#00d4ff', bot:'#888', consensus_mispricing:'#888'};
+      var stratLabels = {sniper:'Sniper', quant:'Quant', bot:'Bot', consensus_mispricing:'Bot'};
+      var sc = stratColors[t.strategy] || '#888';
+      var sl = stratLabels[t.strategy] || t.strategy;
+      h += '<tr style="border-bottom:1px solid #1a1a1a">';
+      h += '<td style="padding:4px;color:#666">' + timeStr + '</td>';
+      h += '<td style="padding:4px;color:#ccc;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (t.title || t.ticker) + '</td>';
+      h += '<td style="padding:4px;color:' + sideC + ';font-weight:700;text-align:center">' + (t.side || '').toUpperCase() + '</td>';
+      h += '<td style="padding:4px;color:#fff;text-align:center">' + t.price_cents + '&#162; x' + t.count + '</td>';
+      h += '<td style="padding:4px;color:#ffb400;text-align:center">$' + t.cost_usd.toFixed(2) + '</td>';
+      h += '<td style="padding:4px;color:' + sc + ';text-align:center;font-weight:600">' + sl + '</td>';
+      h += '</tr>';
+    });
+    h += '</table>';
+    dd.innerHTML = h;
+  } catch(e) {
+    dd.innerHTML = '<div style="color:#ff5000;padding:8px">Error: ' + e.message + '</div>';
+  }
+}
+
+// Close dropdown when clicking outside
+document.addEventListener('click', function(e) {
+  var dd = document.getElementById('today-trades-dropdown');
+  if (dd && dd.style.display !== 'none' && !e.target.closest('.stat-card')) {
+    dd.style.display = 'none';
+  }
+});
 
 async function loadStatus() {
   try {
