@@ -1932,7 +1932,8 @@ def live_game_snipe():
                         pass
 
                 # Calculate quantity — bankroll-scaled sizing for compound growth
-                bet_usd = _smart_bet_size(price, bankroll=bal if bal > 0 else None) * closing_boost
+                cat_mult = _category_multiplier(ticker, title)
+                bet_usd = _smart_bet_size(price, bankroll=bal if bal > 0 else None) * closing_boost * cat_mult
                 count = max(1, min(50, int(bet_usd * 100 / price)))
                 cost_usd = (price * count) / 100.0
 
@@ -3087,6 +3088,38 @@ def rank_by_volatility(tickers, min_score=2.0):
 _last_settlement_check = None
 _known_settled = set()  # tickers we already processed
 
+# Category win rate tracking — auto-adjust sizing based on what's winning
+_CATEGORY_STATS = {}  # {cat: {"wins": 0, "losses": 0, "pnl": 0.0}}
+
+def _update_category_stats(ticker, title, won, pnl_usd):
+    """Track win rate by category for auto-adjustment."""
+    cat = classify_market_category(title or "", ticker or "")
+    if cat not in _CATEGORY_STATS:
+        _CATEGORY_STATS[cat] = {"wins": 0, "losses": 0, "pnl": 0.0}
+    if won:
+        _CATEGORY_STATS[cat]["wins"] += 1
+    else:
+        _CATEGORY_STATS[cat]["losses"] += 1
+    _CATEGORY_STATS[cat]["pnl"] += pnl_usd
+
+def _category_multiplier(ticker, title):
+    """Get bet size multiplier based on category performance.
+    Winners get bigger bets, losers get smaller bets."""
+    cat = classify_market_category(title or "", ticker or "")
+    stats = _CATEGORY_STATS.get(cat)
+    if not stats or (stats["wins"] + stats["losses"]) < 2:
+        return 1.0  # Not enough data — neutral
+    total = stats["wins"] + stats["losses"]
+    wr = stats["wins"] / total
+    if wr >= 0.7:
+        return 1.5  # 50% bigger bets on hot categories
+    elif wr >= 0.5:
+        return 1.2  # 20% boost
+    elif wr >= 0.3:
+        return 0.8  # 20% smaller
+    else:
+        return 0.5  # 50% smaller on losing categories
+
 def check_settlements_and_reinvest():
     """Detect newly settled positions and immediately redeploy the freed capital.
 
@@ -3126,10 +3159,14 @@ def check_settlements_and_reinvest():
             _known_settled.add(ticker)
             pnl_cents = _parse_kalshi_dollars(pos.get("realized_pnl_dollars") or pos.get("realized_pnl"))
             pnl_usd = pnl_cents / 100
+            won = pnl_usd > 0
+            # Track category performance
+            title = pos.get("market_title", "") or pos.get("title", "") or ticker
+            _update_category_stats(ticker, title, won, pnl_usd)
             new_settlements.append({
                 "ticker": ticker,
                 "pnl_usd": round(pnl_usd, 2),
-                "won": pnl_usd > 0,
+                "won": won,
             })
 
         if new_settlements:
@@ -4137,6 +4174,23 @@ def bot_activity():
     })
 
 
+@app.route("/category-stats")
+def category_stats():
+    """Category win rate stats for auto-adjustment display."""
+    stats = {}
+    for cat, data in _CATEGORY_STATS.items():
+        total = data["wins"] + data["losses"]
+        stats[cat] = {
+            "wins": data["wins"],
+            "losses": data["losses"],
+            "total": total,
+            "win_rate": round(data["wins"] / total * 100, 1) if total > 0 else 0,
+            "pnl": round(data["pnl"], 2),
+            "multiplier": _category_multiplier("", cat),
+        }
+    return jsonify(stats)
+
+
 @app.route("/trades-today")
 def trades_today_endpoint():
     """Return all trades placed today (bot + sniper + quant)."""
@@ -4532,6 +4586,18 @@ def _generate_seventy_fivers():
                     is_live = True
             except Exception:
                 pass
+
+        # 48h max close time — no long-dated junk, only markets settling soon
+        if close_time:
+            try:
+                close_dt_chk = datetime.datetime.fromisoformat(close_time.replace("Z", "+00:00")).replace(tzinfo=None)
+                hours_to_close = (close_dt_chk - now_dt).total_seconds() / 3600
+                if hours_to_close > 48:
+                    continue  # Skip anything more than 48h out
+            except Exception:
+                pass
+        else:
+            continue  # No close time = skip (probably long-dated)
 
         # Volume filter: relaxed for live sports (they often have low volume)
         if vol < 10 and is_live:
@@ -5840,15 +5906,43 @@ a:hover { color: #7da5f5; }
 .progress-bar-bg { background: #1f1f1f; height: 8px; border-radius: 8px; overflow: hidden; margin-top: 8px; }
 .progress-bar-fill { height: 100%; border-radius: 8px; background: linear-gradient(90deg, #00dc5a, #5b8def); transition: width 0.5s; }
 
+/* P&L Flash animation */
+@keyframes plFlashGreen { 0% { color: #fff; } 50% { color: #00ff6a; text-shadow: 0 0 12px rgba(0,220,90,0.6); } 100% { color: #fff; } }
+@keyframes plFlashRed { 0% { color: #fff; } 50% { color: #ff4040; text-shadow: 0 0 12px rgba(255,80,0,0.6); } 100% { color: #fff; } }
+.pl-flash-green { animation: plFlashGreen 0.6s ease; }
+.pl-flash-red { animation: plFlashRed 0.6s ease; }
+
+/* Sparkline */
+.sparkline { display: inline-block; vertical-align: middle; margin-left: 6px; }
+
 /* Responsive */
-@media (max-width: 600px) {
-  .portfolio-value { font-size: 36px; }
-  .stats-row { grid-template-columns: repeat(2, 1fr); }
-  .stat-value { font-size: 16px; }
+@media (max-width: 900px) {
+  .container { padding: 0 8px; }
+  .portfolio-value { font-size: 32px; }
+  .stats-row { grid-template-columns: repeat(2, 1fr); gap: 6px; }
+  .stat-value { font-size: 14px; }
   .hero-grid { grid-template-columns: 1fr; }
   .picks-grid { grid-template-columns: 1fr; }
-  .tab { padding: 10px 16px; font-size: 13px; }
-  .header { padding: 12px 16px; }
+  .tab { padding: 8px 12px; font-size: 11px; }
+  .header { padding: 10px 12px; flex-wrap: wrap; gap: 8px; }
+  .tabs { overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch; }
+  table { font-size: 9px; }
+  table th, table td { padding: 4px 3px; }
+  .section-title { font-size: 12px; }
+  .chart-section { display: none; } /* hide chart on small screens */
+  #tab-activity > div { grid-template-columns: 1fr !important; } /* stack activity panels */
+  .pos-table-compact th, .pos-table-compact td { font-size: 8px; padding: 3px 2px; }
+  .breakdown-item { font-size: 10px; }
+}
+@media (max-width: 480px) {
+  .portfolio-value { font-size: 26px; }
+  .stats-row { grid-template-columns: 1fr 1fr; }
+  .stat-card { padding: 8px 6px; }
+  .stat-value { font-size: 13px; }
+  .stat-label { font-size: 7px; }
+  .tab { padding: 6px 10px; font-size: 10px; }
+  .ticker-bar { font-size: 9px; }
+  .header h1 { font-size: 16px; }
 }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 #scan-btn:hover:not(:disabled) { background: #00dc5a !important; color: #000 !important; }
@@ -5967,16 +6061,16 @@ a:hover { color: #7da5f5; }
 
 <!-- Tabs -->
 <div class="tabs">
-  <button class="tab active" onclick="switchTab('positions')">Positions</button>
+  <button class="tab active" onclick="switchTab('seventyfivers')">75%'ers</button>
+  <button class="tab" onclick="switchTab('positions')">Positions</button>
   <button class="tab" onclick="switchTab('picks')">Top Picks</button>
   <button class="tab" onclick="switchTab('activity')">Activity</button>
   <button class="tab" onclick="switchTab('history')">History</button>
-  <button class="tab" onclick="switchTab('seventyfivers')">75%'ers</button>
   <button class="tab" onclick="switchTab('quant')">Quant</button>
 </div>
 
 <!-- Positions Tab -->
-<div class="tab-content active" id="tab-positions">
+<div class="tab-content" id="tab-positions">
   <div style="display:flex;justify-content:flex-end;margin-bottom:6px"><label style="font-size:10px;color:#888;cursor:pointer"><input type="checkbox" id="hide-bot-trades" checked onchange="loadPortfolio();loadPositions()" style="margin-right:4px">Hide old bot trades</label></div>
   <div id="portfolio-positions"><div class="loading">Loading positions...</div></div>
   <div class="section" style="margin-top:20px">
@@ -6060,7 +6154,7 @@ a:hover { color: #7da5f5; }
 </div>
 
 <!-- 75%'ers Tab -->
-<div class="tab-content" id="tab-seventyfivers">
+<div class="tab-content active" id="tab-seventyfivers">
   <div class="section">
     <div id="sf-stats-banner" style="display:flex;align-items:center;gap:16px;padding:10px 14px;background:#1a1a2e;border-radius:10px;margin-bottom:14px;flex-wrap:wrap">
       <span style="font-size:16px;font-weight:700;color:#00dc5a" id="sf-streak-text">Loading...</span>
@@ -6348,11 +6442,18 @@ async function loadPortfolio() {
       window._lastPortfolioData = data;
     }
 
-    // Big portfolio value at top
+    // Big portfolio value at top — flash green/red on change
     var pfVal = data.portfolio_value_usd || 0;
-    document.getElementById('pf-value').textContent = '$' + pfVal.toFixed(2);
     var pfValEl = document.getElementById('pf-value');
+    var prevVal = parseFloat(pfValEl.getAttribute('data-prev') || '0');
+    pfValEl.textContent = '$' + pfVal.toFixed(2);
     pfValEl.style.color = '#fff';
+    if (prevVal > 0 && Math.abs(pfVal - prevVal) > 0.01) {
+      pfValEl.classList.remove('pl-flash-green', 'pl-flash-red');
+      void pfValEl.offsetWidth; // force reflow
+      pfValEl.classList.add(pfVal > prevVal ? 'pl-flash-green' : 'pl-flash-red');
+    }
+    pfValEl.setAttribute('data-prev', pfVal.toFixed(2));
 
     // Update progress bar to $1M — pfVal already includes cash + invested
     var totalVal = pfVal;
@@ -6492,7 +6593,14 @@ async function loadPortfolio() {
       html += '<td style="color:' + sideColor + ';font-weight:700;font-size:8px">' + p.side.toUpperCase() + '</td>';
       html += '<td style="font-size:8px">' + p.count + '</td>';
       html += '<td style="font-size:8px">' + (p.entry_price || '?') + 'c</td>';
-      html += '<td style="font-weight:700;font-size:8px">' + (p.current_price || '?') + 'c</td>';
+      // Mini sparkline: entry -> current
+      var sparkColor = (p.pnl_pct || 0) >= 0 ? '#00dc5a' : '#ff5000';
+      var entry = p.entry_price || 50;
+      var curr = p.current_price || entry;
+      var sparkY1 = Math.max(2, Math.min(14, 16 - (entry / 100 * 14)));
+      var sparkY2 = Math.max(2, Math.min(14, 16 - (curr / 100 * 14)));
+      var spark = '<svg class="sparkline" width="30" height="16" viewBox="0 0 30 16"><line x1="2" y1="' + sparkY1 + '" x2="28" y2="' + sparkY2 + '" stroke="' + sparkColor + '" stroke-width="1.5" stroke-linecap="round"/><circle cx="28" cy="' + sparkY2 + '" r="2" fill="' + sparkColor + '"/></svg>';
+      html += '<td style="font-weight:700;font-size:8px">' + (p.current_price || '?') + 'c' + spark + '</td>';
       html += '<td style="color:' + pnlColor + ';font-weight:700;font-size:8px">' + pnlText + '</td>';
       html += '<td style="color:#ffb400;font-size:8px">' + timeLeft + '</td>';
       if (sellPrice > 0) {
@@ -7609,6 +7717,42 @@ function setTicker(sym, price, changePct) {
   }
 }
 
+// Browser notifications
+var _notifEnabled = false;
+if ('Notification' in window) {
+  if (Notification.permission === 'granted') {
+    _notifEnabled = true;
+  } else if (Notification.permission !== 'denied') {
+    Notification.requestPermission().then(function(p) { _notifEnabled = p === 'granted'; });
+  }
+}
+function sendNotif(title, body, tag) {
+  if (!_notifEnabled) return;
+  try { new Notification(title, {body: body, icon: '/favicon.ico', tag: tag || 'tradeshark', silent: false}); } catch(e) {}
+}
+
+// Track last activity count for new trade notifications
+var _lastActivityCount = 0;
+var _lastSettledCount = 0;
+
+async function checkForNotifications() {
+  try {
+    // Check for new trades
+    var data = await fetch(API + '/bot-activity').then(function(r){return r.json();});
+    var items = data.activity || [];
+    if (items.length > _lastActivityCount && _lastActivityCount > 0) {
+      var newest = items[items.length - 1];
+      if (newest && newest.msg && (newest.msg.indexOf('SNIPE') >= 0 || newest.msg.indexOf('SNIPED') >= 0)) {
+        sendNotif('TradeShark Trade', newest.msg, 'trade-' + items.length);
+      }
+      if (newest && newest.msg && newest.msg.indexOf('Settlement') >= 0) {
+        sendNotif('TradeShark Settlement', newest.msg, 'settle-' + items.length);
+      }
+    }
+    _lastActivityCount = items.length;
+  } catch(e) {}
+}
+
 // Load everything on page load
 loadTicker();
 loadSeventyFivers();
@@ -7627,7 +7771,7 @@ loadMispriced();
 loadTrades();
 // Auto-refresh: ticker every 60s, activity every 10s, portfolio every 30s
 setInterval(() => { loadTicker(); }, 60000);
-setInterval(() => { loadActivity(); loadBetsFeed(); }, 10000);
+setInterval(() => { loadActivity(); loadBetsFeed(); checkForNotifications(); }, 10000);
 setInterval(() => { loadStatus(); loadPortfolio(); loadTopPicks(); loadTodayPicks(); loadPositions(); loadSettled(); loadTrades(); }, 30000);
 </script>
 </body>
