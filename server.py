@@ -5839,6 +5839,16 @@ async function loadPortfolio() {
     var pfValEl = document.getElementById('pf-value');
     pfValEl.style.color = '#fff';
 
+    // Update progress bar to $1M
+    var prog = Math.min(100, (pfVal / 1000000) * 100);
+    var progLbl = prog < 0.01 ? '<0.01%' : prog.toFixed(3) + '%';
+    var progFill = document.getElementById('progress-fill');
+    var progLabel = document.getElementById('progress-label');
+    var progBalance = document.getElementById('progress-balance');
+    if (progFill) progFill.style.width = Math.max(0.3, prog) + '%';
+    if (progLabel) progLabel.textContent = progLbl;
+    if (progBalance) progBalance.textContent = '$' + pfVal.toFixed(2);
+
     // Daily P&L change
     var totalPnl = (data.total_unrealized_usd || 0) + (data.total_realized_usd || 0);
     var changeEl = document.getElementById('pf-change');
