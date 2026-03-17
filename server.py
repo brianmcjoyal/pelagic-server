@@ -3803,14 +3803,26 @@ def settled_positions():
     if not headers:
         return jsonify({"settled": [], "error": "No API key"})
     try:
-        resp = requests.get(
-            KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
-            headers=headers,
-            params={"limit": 200, "settlement_status": "settled"},
-            timeout=TIMEOUT,
-        )
-        resp.raise_for_status()
-        positions_list = resp.json().get("market_positions", [])
+        # Paginate to get ALL settled positions
+        positions_list = []
+        cursor = None
+        for _ in range(10):  # max 10 pages = 2000 positions
+            params = {"limit": 200, "settlement_status": "settled"}
+            if cursor:
+                params["cursor"] = cursor
+            h = signed_headers("GET", path)
+            resp = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
+                headers=h,
+                params=params,
+                timeout=TIMEOUT,
+            )
+            resp.raise_for_status()
+            page = resp.json()
+            positions_list.extend(page.get("market_positions", []))
+            cursor = page.get("cursor")
+            if not cursor:
+                break
         wins = 0
         losses = 0
         breakeven = 0
@@ -3822,6 +3834,28 @@ def settled_positions():
         current_streak_type = None
         settled = []
 
+        # Cache market titles to avoid N+1 API calls
+        _title_cache = {}
+
+        def _get_title(ticker):
+            if ticker in _title_cache:
+                return _title_cache[ticker]
+            try:
+                mkt_path = f"/markets/{ticker}"
+                mkt_h = signed_headers("GET", mkt_path)
+                mkt_r = requests.get(
+                    KALSHI_BASE_URL + KALSHI_API_PREFIX + mkt_path,
+                    headers=mkt_h, timeout=5,
+                )
+                if mkt_r.ok:
+                    t = mkt_r.json().get("market", {}).get("title", ticker)
+                    _title_cache[ticker] = t
+                    return t
+            except Exception:
+                pass
+            _title_cache[ticker] = ticker
+            return ticker
+
         for pos in positions_list:
             pnl_cents = _parse_kalshi_dollars(pos.get("realized_pnl_dollars") or pos.get("realized_pnl"))
             pnl = pnl_cents / 100
@@ -3832,21 +3866,7 @@ def settled_positions():
             total_wagered += traded_cents / 100
 
             ticker = pos.get("ticker", "")
-
-            # Enrich with market title
-            title = ticker
-            try:
-                mkt_path = f"/markets/{ticker}"
-                mkt_h = signed_headers("GET", mkt_path)
-                mkt_r = requests.get(
-                    KALSHI_BASE_URL + KALSHI_API_PREFIX + mkt_path,
-                    headers=mkt_h, timeout=5,
-                )
-                if mkt_r.ok:
-                    mkt = mkt_r.json().get("market", {})
-                    title = mkt.get("title", ticker)
-            except Exception:
-                pass
+            title = _get_title(ticker)
 
             if pnl > 0:
                 wins += 1
