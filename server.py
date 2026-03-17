@@ -6003,11 +6003,11 @@ a:hover { color: #7da5f5; }
 <div class="tab-content" id="tab-history">
   <div class="section">
     <div class="section-title">Scorecard <button class="refresh-btn" onclick="loadSettled()">Refresh</button></div>
-    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start">
-      <div id="settled-stats" style="flex:1;min-width:300px;display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
+    <div style="display:grid;grid-template-columns:3fr 2fr;gap:12px;align-items:start">
+      <div id="settled-stats" style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px">
         <span style="color:#666">Loading...</span>
       </div>
-      <div id="settled-categories" style="flex:1;min-width:250px"></div>
+      <div id="settled-categories"></div>
     </div>
     <div id="settled-table" style="margin-top:12px"></div>
   </div>
@@ -7123,8 +7123,8 @@ async function loadSettled() {
     const progressLabel = progress < 0.01 ? '<0.01%' : progress.toFixed(3) + '%';
 
     function statBox(label, value, color) {
-      return '<div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:12px 16px;text-align:center">' +
-        '<div style="color:#666;font-size:11px;font-weight:500;margin-bottom:4px">' + label + '</div>' +
+      return '<div style="background:#141414;border:1px solid #1f1f1f;border-radius:8px;padding:8px 10px;text-align:center">' +
+        '<div style="color:#666;font-size:10px;font-weight:500;margin-bottom:2px">' + label + '</div>' +
         '<div style="color:' + color + ';font-size:18px;font-weight:700">' + value + '</div></div>';
     }
 
@@ -7151,17 +7151,18 @@ async function loadSettled() {
     // Category breakdown — render in side panel
     var catEl = document.getElementById('settled-categories');
     var cats = data.by_category || {};
-    var catKeys = Object.keys(cats).sort(function(a,b){ return (cats[b].pnl_usd || 0) - (cats[a].pnl_usd || 0); });
+    // Only show categories with actual settled bets (filter out 0W/0L noise)
+    var catKeys = Object.keys(cats).filter(function(k){ var c = cats[k]; return (c.wins + c.losses) > 0; }).sort(function(a,b){ return (cats[b].pnl_usd || 0) - (cats[a].pnl_usd || 0); });
     if (catKeys.length > 0 && catEl) {
-      var catHtml = '<div style="padding:12px;background:#141414;border:1px solid #1f1f1f;border-radius:10px;height:100%">';
-      catHtml += '<div style="color:#999;font-size:11px;font-weight:600;margin-bottom:8px">Win Rate by Category</div>';
-      catHtml += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:6px">';
+      var catHtml = '<div style="padding:10px;background:#141414;border:1px solid #1f1f1f;border-radius:10px">';
+      catHtml += '<div style="color:#999;font-size:11px;font-weight:600;margin-bottom:6px">Win Rate by Category</div>';
+      catHtml += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(80px,1fr));gap:4px">';
       catKeys.forEach(function(cat) {
         var c = cats[cat];
         var cwr = c.win_rate || 0;
         var cc = cwr >= 60 ? '#00dc5a' : cwr >= 40 ? '#ffb400' : '#ff5000';
         var pnlC = c.pnl_usd >= 0 ? '#00dc5a' : '#ff5000';
-        catHtml += '<div style="background:#0d0d0d;border:1px solid #222;border-radius:8px;padding:8px 10px;text-align:center">';
+        catHtml += '<div style="background:#0d0d0d;border:1px solid #222;border-radius:8px;padding:6px 8px;text-align:center">';
         catHtml += '<div style="font-size:10px;color:#888;text-transform:capitalize">' + cat + '</div>';
         catHtml += '<div style="font-size:16px;font-weight:700;color:' + cc + '">' + cwr.toFixed(0) + '%</div>';
         catHtml += '<div style="font-size:9px;color:#666">' + c.wins + 'W/' + c.losses + 'L</div>';
