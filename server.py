@@ -4276,8 +4276,6 @@ def _generate_seventy_fivers():
 
         ticker = m.get("id", "")
         vol = m.get("volume", 0) or 0
-        if vol < 100:
-            continue
 
         # Get prices in cents
         yes_cents = int(round(m.get("yes", 0.5) * 100))
@@ -4295,7 +4293,7 @@ def _generate_seventy_fivers():
         else:
             continue
 
-        # Check if live
+        # Check if live — ticker prefix OR closes within 24h
         is_live = False
         t_upper = ticker.upper()
         et = m.get("event_ticker", "")
@@ -4304,6 +4302,22 @@ def _generate_seventy_fivers():
             if t_upper.startswith(pfx) or et_upper.startswith(pfx):
                 is_live = True
                 break
+        # Also mark as live if closes within 24h
+        close_time = m.get("close_time", "")
+        if close_time and not is_live:
+            try:
+                close_dt = datetime.datetime.fromisoformat(close_time.replace("Z", "+00:00")).replace(tzinfo=None)
+                hours_left = (close_dt - now_dt).total_seconds() / 3600
+                if 0 < hours_left <= 24:
+                    is_live = True
+            except Exception:
+                pass
+
+        # Volume filter: relaxed for live sports (they often have low volume)
+        if vol < 10 and is_live:
+            continue
+        if vol < 100 and not is_live:
+            continue
 
         # Cross-platform validation
         nq = normalize_question(title)
@@ -5845,7 +5859,15 @@ async function loadPortfolio() {
     rEl.textContent = (rPnl >= 0 ? '+$' : '-$') + Math.abs(rPnl).toFixed(2);
     rEl.style.color = rPnl >= 0 ? '#00dc5a' : '#ff5000';
 
-    var wr = data.win_rate || 0;
+    // Use /settled endpoint for accurate win rate (same source as scorecard)
+    try {
+      var settledData = await fetch(API + '/settled').then(function(r){return r.json();});
+      var wr = settledData.win_rate || 0;
+      var w = settledData.wins || 0, l = settledData.losses || 0;
+    } catch(e) {
+      var wr = data.win_rate || 0;
+      var w = data.wins || 0, l = data.losses || 0;
+    }
     var wrEl = document.getElementById('pf-winrate');
     wrEl.textContent = wr.toFixed(0) + '%';
     wrEl.style.color = wr >= 60 ? '#00dc5a' : wr >= 40 ? '#ffb400' : '#ff5000';
@@ -5855,7 +5877,6 @@ async function loadPortfolio() {
       wrBar.style.background = wr >= 60 ? '#00dc5a' : wr >= 40 ? '#ffb400' : '#ff5000';
     }
 
-    var w = data.wins || 0, l = data.losses || 0;
     var wlEl = document.getElementById('pf-wl');
     wlEl.innerHTML = '<span style="color:#00dc5a">' + w + 'W</span> / <span style="color:#ff5000">' + l + 'L</span>';
 
