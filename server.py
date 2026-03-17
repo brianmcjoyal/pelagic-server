@@ -4579,6 +4579,7 @@ BOT_STATE["quant_wins"] = 0
 BOT_STATE["quant_losses"] = 0
 BOT_STATE["quant_profit"] = 0.0
 BOT_STATE["quant_bets"] = 0
+BOT_STATE["quant_trades"] = []  # Full trade history for Quant tab
 
 def _generate_quant_picks():
     """Find top 10 mispriced markets with cross-platform edge."""
@@ -4715,6 +4716,21 @@ def quant_bet():
 
     if success:
         BOT_STATE["quant_bets"] = BOT_STATE.get("quant_bets", 0) + 1
+        trade_record = {
+            "ticker": ticker,
+            "title": body.get("title", ticker),
+            "side": side,
+            "price_cents": price_cents,
+            "count": count,
+            "cost_usd": round(cost, 2),
+            "time": datetime.datetime.utcnow().isoformat(),
+            "category": classify_market_category(body.get("title", ticker), ticker),
+            "deviation_pct": body.get("deviation_pct", 0),
+            "status": "open",
+        }
+        BOT_STATE.setdefault("quant_trades", []).append(trade_record)
+        # Keep last 50 trades
+        BOT_STATE["quant_trades"] = BOT_STATE["quant_trades"][-50:]
         _log_activity(
             f"QUANT: {side.upper()} {ticker} @ {price_cents}c x{count} (${cost:.2f})",
             "success"
@@ -4725,12 +4741,14 @@ def quant_bet():
 
 @app.route("/quant-stats")
 def quant_stats():
+    trades = BOT_STATE.get("quant_trades", [])
     return jsonify({
         "wins": BOT_STATE.get("quant_wins", 0),
         "losses": BOT_STATE.get("quant_losses", 0),
         "profit": round(BOT_STATE.get("quant_profit", 0), 2),
         "total_bets": BOT_STATE.get("quant_bets", 0),
         "win_rate": round(BOT_STATE.get("quant_wins", 0) / max(1, BOT_STATE.get("quant_wins", 0) + BOT_STATE.get("quant_losses", 0)) * 100, 1),
+        "trades": trades[-20:],  # Last 20 trades for display
     })
 
 
@@ -6173,14 +6191,20 @@ async function loadPortfolio() {
     rEl.style.color = rPnl >= 0 ? '#00dc5a' : '#ff5000';
 
     // Use /settled endpoint for accurate win rate (same source as scorecard)
+    // Use AbortController for 5s timeout so header doesn't show "--" forever
+    var wr = data.win_rate || 0;
+    var w = data.wins || 0, l = data.losses || 0;
     try {
-      var settledData = await fetch(API + '/settled').then(function(r){return r.json();});
-      var wr = settledData.win_rate || 0;
-      var w = settledData.wins || 0, l = settledData.losses || 0;
-    } catch(e) {
-      var wr = data.win_rate || 0;
-      var w = data.wins || 0, l = data.losses || 0;
-    }
+      var _ac = new AbortController();
+      var _to = setTimeout(function(){ _ac.abort(); }, 5000);
+      var settledData = await fetch(API + '/settled', {signal: _ac.signal}).then(function(r){return r.json();});
+      clearTimeout(_to);
+      if (settledData && settledData.win_rate !== undefined) {
+        wr = settledData.win_rate || 0;
+        w = settledData.wins || 0;
+        l = settledData.losses || 0;
+      }
+    } catch(e) { /* keep fallback values from portfolio-summary */ }
     var wrEl = document.getElementById('pf-winrate');
     wrEl.textContent = wr.toFixed(0) + '%';
     wrEl.style.color = wr >= 60 ? '#00dc5a' : wr >= 40 ? '#ffb400' : '#ff5000';
@@ -7202,25 +7226,57 @@ async function loadQuantPicks() {
       html += '</div>';
       // Action buttons
       html += '<div style="display:flex;gap:8px">';
-      html += '<button onclick="quantBet(&quot;' + p.ticker + '&quot;,&quot;' + p.side + '&quot;,' + p.price_cents + ')" style="flex:1;background:#00d4ff;color:#000;border:none;padding:10px;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer">Trade $' + p.bet_size.toFixed(0) + '</button>';
+      html += '<button onclick="quantBet(&quot;' + p.ticker + '&quot;,&quot;' + p.side + '&quot;,' + p.price_cents + ',&quot;' + p.title.replace(/'/g, '') + '&quot;,' + p.deviation_pct + ')" style="flex:1;background:#00d4ff;color:#000;border:none;padding:10px;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer">Trade $' + p.bet_size.toFixed(0) + '</button>';
       html += '<a href="' + p.url + '" target="_blank" style="display:flex;align-items:center;padding:10px 12px;background:#1a2030;border-radius:8px;color:#888;text-decoration:none;font-size:11px">&#x2197;</a>';
       html += '</div>';
       html += '</div>';
     });
     cardsEl.innerHTML = html;
+
+    // Render trade history below cards
+    var trades = stats.trades || [];
+    if (trades.length > 0) {
+      var histHtml = '<div style="margin-top:20px;background:#0d1117;border:1px solid #1a3050;border-radius:10px;padding:14px">';
+      histHtml += '<div style="color:#00d4ff;font-size:13px;font-weight:700;margin-bottom:10px">Quant Trade History</div>';
+      histHtml += '<table style="width:100%;border-collapse:collapse;font-size:10px">';
+      histHtml += '<tr style="color:#888;border-bottom:1px solid #1a3050;text-align:left">';
+      histHtml += '<th style="padding:6px">Time</th><th style="padding:6px">Market</th><th style="padding:6px">Side</th><th style="padding:6px">Price</th><th style="padding:6px">Cost</th><th style="padding:6px">Edge</th><th style="padding:6px">Status</th>';
+      histHtml += '</tr>';
+      trades.slice().reverse().forEach(function(t) {
+        var sideC = t.side === 'yes' ? '#00dc5a' : '#ff5000';
+        var timeStr = '';
+        if (t.time) {
+          var d = new Date(t.time + 'Z');
+          timeStr = d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+        }
+        var statusC = t.status === 'won' ? '#00dc5a' : t.status === 'lost' ? '#ff5000' : '#888';
+        var statusL = t.status === 'won' ? 'WON' : t.status === 'lost' ? 'LOST' : 'OPEN';
+        histHtml += '<tr style="border-bottom:1px solid #0d1a2e">';
+        histHtml += '<td style="padding:5px;color:#666">' + timeStr + '</td>';
+        histHtml += '<td style="padding:5px;color:#ccc;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (t.title || t.ticker) + '</td>';
+        histHtml += '<td style="padding:5px;color:' + sideC + ';font-weight:700">' + (t.side || '').toUpperCase() + '</td>';
+        histHtml += '<td style="padding:5px;color:#fff">' + (t.price_cents || 0) + '&#162; x' + (t.count || 0) + '</td>';
+        histHtml += '<td style="padding:5px;color:#ffb400">$' + (t.cost_usd || 0).toFixed(2) + '</td>';
+        histHtml += '<td style="padding:5px;color:#00d4ff">' + (t.deviation_pct || 0).toFixed(0) + '%</td>';
+        histHtml += '<td style="padding:5px;color:' + statusC + ';font-weight:600">' + statusL + '</td>';
+        histHtml += '</tr>';
+      });
+      histHtml += '</table></div>';
+      cardsEl.innerHTML += histHtml;
+    }
   } catch(e) {
     console.error('Quant error', e);
     document.getElementById('quant-cards').innerHTML = '<div style="color:#ff5000;text-align:center;padding:40px;grid-column:1/-1">Error loading quant picks</div>';
   }
 }
 
-async function quantBet(ticker, side, priceCents) {
+async function quantBet(ticker, side, priceCents, title, deviationPct) {
   if (!confirm('Place QUANT trade: ' + side.toUpperCase() + ' ' + ticker + ' @ ' + priceCents + 'c?')) return;
   try {
     var resp = await fetch(API + '/quant-bet', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ticker: ticker, side: side, price_cents: priceCents})
+      body: JSON.stringify({ticker: ticker, side: side, price_cents: priceCents, title: title || ticker, deviation_pct: deviationPct || 0})
     });
     var data = await resp.json();
     if (data.success) {
