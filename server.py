@@ -1932,10 +1932,30 @@ def live_game_snipe():
                     continue
 
                 # Only allow vetted categories for auto-trading
-                _ALLOWED_CATEGORIES = ["tennis", "nba", "nfl", "nhl", "mlb", "soccer", "mma", "sports"]
-                # For non-live-sports scan sources, require the market to be in an allowed category
+                _ALLOWED_CATEGORIES = ["tennis", "nba", "nfl", "nhl", "mlb", "soccer", "mma"]
+
+                # WHITELIST: Only bet on major league ticker prefixes we understand
+                _ALLOWED_TICKER_PREFIXES = [
+                    "KXMLBGAME", "KXNBAGAME", "KXNHLGAME", "KXNFLGAME",  # US major leagues
+                    "KXSOCCERGAME",                                        # Soccer
+                    "KXATPMATCH", "KXWTAMATCH", "KXATPCHALLENGERMATCH",   # Tennis
+                    "KXUFCFIGHT",                                          # UFC/MMA
+                    "KXAFLGAME",                                           # AFL
+                ]
+                # BLACKLIST: Block minor/foreign leagues and esports
+                _BLOCKED_TICKER_PREFIXES = [
+                    "KXKHLGAME", "KXVTBGAME", "KXCS2GAME", "KXVALGAME",  # Russian hockey, basketball, esports
+                    "KXDOTAGAME", "KXLOLGAME", "KXCOD",                    # More esports
+                    "KXCRICKET", "KXKABADDI",                              # Niche sports
+                ]
+                t_upper = ticker.upper()
+                # Block blacklisted prefixes
+                if any(t_upper.startswith(bp) for bp in _BLOCKED_TICKER_PREFIXES):
+                    continue
+                # For the catch-all time-based scan, require whitelisted prefix OR allowed category
                 if "series_ticker" not in source_params:
-                    if mcat not in _ALLOWED_CATEGORIES:
+                    is_whitelisted = any(t_upper.startswith(wp) for wp in _ALLOWED_TICKER_PREFIXES)
+                    if not is_whitelisted and mcat not in _ALLOWED_CATEGORIES:
                         continue
 
                 # Volume check — only snipe liquid markets
@@ -4881,6 +4901,12 @@ def _generate_seventy_fivers():
 
         ticker = m.get("id", "")
         vol = m.get("volume", 0) or 0
+
+        # Block minor leagues and esports
+        _75_BLOCKED_PREFIXES = ["KXKHLGAME", "KXVTBGAME", "KXCS2GAME", "KXVALGAME",
+                                "KXDOTAGAME", "KXLOLGAME", "KXCOD", "KXCRICKET", "KXKABADDI"]
+        if any(ticker.upper().startswith(bp) for bp in _75_BLOCKED_PREFIXES):
+            continue
 
         # Get prices in cents
         yes_cents = int(round(m.get("yes", 0.5) * 100))
