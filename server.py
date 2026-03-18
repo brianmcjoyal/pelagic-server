@@ -6512,11 +6512,13 @@ async function loadPortfolio() {
     if (progLabel) progLabel.textContent = progLbl;
     if (progBalance) progBalance.textContent = '$' + totalVal.toFixed(2);
 
-    // Daily P&L change
-    var totalPnl = (data.total_unrealized_usd || 0) + (data.total_realized_usd || 0);
+    // All-time P&L — Day 1 = March 16, 2026
+    var DAY1_BALANCE = 733.92;  // Portfolio value on March 16 (fresh start)
+    var totalPnl = pfVal - DAY1_BALANCE;
     var changeEl = document.getElementById('pf-change');
     if (changeEl) {
-      changeEl.textContent = (totalPnl >= 0 ? '+' : '-') + '$' + Math.abs(totalPnl).toFixed(2) + ' all time';
+      var daysSinceStart = Math.max(1, Math.floor((Date.now() - new Date('2026-03-16T00:00:00').getTime()) / 86400000));
+      changeEl.textContent = (totalPnl >= 0 ? '+' : '-') + '$' + Math.abs(totalPnl).toFixed(2) + ' all time (Day ' + daysSinceStart + ')';
       changeEl.className = 'portfolio-change ' + (totalPnl > 0 ? 'up' : totalPnl < 0 ? 'down' : 'flat');
     }
 
