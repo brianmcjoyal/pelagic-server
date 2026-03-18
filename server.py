@@ -6820,6 +6820,7 @@ a:hover { color: #7da5f5; }
 <div class="tab-content" id="tab-history">
   <div class="section">
     <div class="section-title">Scorecard <button class="refresh-btn" onclick="loadSettled()">Refresh</button></div>
+    <div style="text-align:right;margin-bottom:6px"><label style="font-size:11px;color:#888;cursor:pointer"><input type="checkbox" id="hide-history-junk" checked onchange="loadSettled()" style="margin-right:4px"> Hide old bot trades</label></div>
     <div id="settled-stats" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
       <span style="color:#666">Loading...</span>
     </div>
@@ -8190,16 +8191,43 @@ async function sellPosition(ticker, side, priceCents, count) {
 async function loadSettled() {
   try {
     const data = await fetch(API + '/settled').then(r => r.json());
-    window._settledData = data.settled || [];
+    var allSettled = data.settled || [];
+    var hideJunk = document.getElementById('hide-history-junk') && document.getElementById('hide-history-junk').checked;
+
+    // Filter: hide penny bot trades (entry < 20c, or $0 P&L with unknown side, or bot_version v1-legacy with tiny P&L)
+    var filtered = allSettled;
+    if (hideJunk) {
+      filtered = allSettled.filter(function(s) {
+        // Keep if P&L is significant (> $0.10 win or loss)
+        if (Math.abs(s.pnl_usd) > 0.10) return true;
+        // Keep if entry was >= 20c (not a penny bet)
+        if (s.entry_cents && s.entry_cents >= 20) return true;
+        // Keep if it was a real category (tennis, basketball, etc) with actual result
+        if (s.won === true || s.won === false) {
+          if (s.entry_cents && s.entry_cents >= 20) return true;
+        }
+        // Hide everything else (penny junk, $0 EVEN trades)
+        return false;
+      });
+    }
+    window._settledData = filtered;
+
+    // Recalculate stats from filtered data
+    var w = 0, l = 0, totalPnlCalc = 0, totalWagered = 0, bigW = 0, bigL = 0;
+    filtered.forEach(function(s) {
+      if (s.won === true) { w++; bigW = Math.max(bigW, s.pnl_usd); }
+      else if (s.won === false) { l++; bigL = Math.min(bigL, s.pnl_usd); }
+      totalPnlCalc += s.pnl_usd;
+      totalWagered += s.total_traded || 0;
+    });
+
     const el = document.getElementById('settled-stats');
-    const w = data.wins || 0, l = data.losses || 0, wr = data.win_rate || 0;
-    const pnl = data.total_pnl_usd || 0;
-    const roi = data.roi_pct || 0;
-    const bigW = data.biggest_win_usd || 0;
-    const bigL = data.biggest_loss_usd || 0;
+    const wr = (w + l) > 0 ? Math.round(w / (w + l) * 100) : 0;
+    const pnl = totalPnlCalc;
+    const roi = totalWagered > 0 ? Math.round(pnl / totalWagered * 1000) / 10 : 0;
     const streak = data.streak || 0;
     const streakType = data.streak_type || 'none';
-    const totalBets = data.total_bets || 0;
+    const totalBets = filtered.length;
     const balance = window._currentBalance || 73.61;
     const pnlColor = pnl >= 0 ? '#00dc5a' : '#ff5000';
     const wrColor = wr >= 60 ? '#00dc5a' : wr >= 40 ? '#ffb400' : '#ff5000';
@@ -8237,9 +8265,22 @@ async function loadSettled() {
     if (progLabel) progLabel.textContent = progressLabel;
     if (progBalance) progBalance.textContent = '$' + balance.toFixed(2);
 
-    // Category breakdown — render in side panel
+    // Category breakdown — recalculate from filtered data
     var catEl = document.getElementById('settled-categories');
-    var cats = data.by_category || {};
+    var cats = {};
+    filtered.forEach(function(s) {
+      var cat = s.category || 'other';
+      if (!cats[cat]) cats[cat] = {wins: 0, losses: 0, pnl_usd: 0, bets: 0, win_rate: 0};
+      cats[cat].bets++;
+      if (s.won === true) cats[cat].wins++;
+      else if (s.won === false) cats[cat].losses++;
+      cats[cat].pnl_usd += s.pnl_usd || 0;
+    });
+    Object.keys(cats).forEach(function(k) {
+      var c = cats[k];
+      c.win_rate = (c.wins + c.losses) > 0 ? Math.round(c.wins / (c.wins + c.losses) * 100) : 0;
+      c.pnl_usd = Math.round(c.pnl_usd * 100) / 100;
+    });
     // Only show categories with actual settled bets (filter out 0W/0L noise)
     var catKeys = Object.keys(cats).filter(function(k){ var c = cats[k]; return (c.wins + c.losses) > 0; }).sort(function(a,b){ return (cats[b].pnl_usd || 0) - (cats[a].pnl_usd || 0); });
     if (catKeys.length > 0 && catEl) {
@@ -8266,7 +8307,8 @@ async function loadSettled() {
 
     // Settled positions table
     var tableEl = document.getElementById('settled-table');
-    var settled = data.settled || [];
+    var settled = filtered;
+    var hiddenCount = allSettled.length - filtered.length;
     if (settled.length === 0) {
       tableEl.innerHTML = '<div style="color:#555;font-size:10px;padding:8px">No settled positions yet. Place some bets and we will track every result here.</div>';
     } else {
@@ -8301,6 +8343,9 @@ async function loadSettled() {
         tbl += '</tr>';
       });
       tbl += '</table>';
+      if (hiddenCount > 0) {
+        tbl += '<div style="color:#555;font-size:9px;padding:6px 4px">' + hiddenCount + ' old penny bot trades hidden (uncheck toggle to show all)</div>';
+      }
       tableEl.innerHTML = tbl;
     }
   } catch(e) {
