@@ -1771,9 +1771,9 @@ BOT_STATE["snipe_losses"] = 0
 BOT_STATE["snipe_profit_usd"] = 0.0
 
 def live_game_snipe():
-    """Scan ALL Kalshi markets for near-certain outcomes (90-98c) and buy them.
-    Strategy: anything with 90%+ probability — sports, weather, politics, economics.
-    Profit: 2-10c per contract on settlement."""
+    """Scan LIVE SPORTS markets for high-probability outcomes (70-90c).
+    Strategy: only live sports + vetted short-term markets with volume.
+    Profit: 10-30c per contract on settlement."""
     if not BOT_CONFIG.get("enabled"):
         return []
 
@@ -1868,17 +1868,51 @@ def live_game_snipe():
                 if event_key in existing_events:
                     continue
 
-                # Block banned categories (weather etc)
+                # STRICT FILTERING — only bet on what we understand
+                # Block banned categories
                 blocked = BOT_CONFIG.get("blocked_categories", [])
-                if blocked:
-                    mcat = classify_market_category(title, ticker)
-                    if mcat in blocked:
+                mcat = classify_market_category(title, ticker)
+                if mcat in blocked:
+                    continue
+
+                # Block known junk keywords — stuff the old bot wasted money on
+                title_lower = title.lower()
+                _SNIPE_BLOCKED_KEYWORDS = [
+                    "netflix", "spotify", "billboard", "top song", "top artist",
+                    "youtube", "subscribers", "ishowspeed", "tiktok", "instagram",
+                    "nuclear fusion", "title holder", "featherweight", "bantamweight",
+                    "flyweight", "middleweight", "welterweight", "lightweight",
+                    "heavyweight", "pga tour major", "ballon d'or", "fields medal",
+                    "temperature", "weather", "rainfall", "snow", "hurricane",
+                    "tornado", "fahrenheit", "celsius", "highest temp", "lowest temp",
+                    "gas price", "oil price", "wti", "brent",
+                    "truth social", "tweets", "followers",
+                ]
+                if any(kw in title_lower for kw in _SNIPE_BLOCKED_KEYWORDS):
+                    continue
+
+                # Only allow vetted categories for auto-trading
+                _ALLOWED_CATEGORIES = ["tennis", "nba", "nfl", "nhl", "mlb", "soccer", "mma", "sports"]
+                # For non-live-sports scan sources, require the market to be in an allowed category
+                if "series_ticker" not in source_params:
+                    if mcat not in _ALLOWED_CATEGORIES:
                         continue
 
                 # Volume check — only snipe liquid markets
                 mkt_volume = mkt.get("volume", 0) or 0
                 if mkt_volume < 50:
                     continue
+
+                # Must close within 24h — no long-dated positions
+                close_time_str = mkt.get("close_time", "")
+                if close_time_str:
+                    try:
+                        close_dt_chk = datetime.datetime.fromisoformat(close_time_str.replace("Z", "+00:00")).replace(tzinfo=None)
+                        hours_to_close = (close_dt_chk - datetime.datetime.utcnow()).total_seconds() / 3600
+                        if hours_to_close > 24:
+                            continue
+                    except Exception:
+                        pass
 
                 # Parse prices
                 yes_ask = None
@@ -1946,9 +1980,21 @@ def live_game_snipe():
                 if expected_profit < 1.00:  # skip if less than $1 potential profit
                     continue
 
+                # Vetting log — show WHY this trade passed all filters
+                reasons = []
+                reasons.append(f"cat={mcat}")
+                reasons.append(f"vol={mkt_volume}")
+                if closing_boost > 1:
+                    reasons.append(f"CLOSING EDGE")
+                if cat_mult > 1:
+                    reasons.append(f"hot category x{cat_mult}")
+                elif cat_mult < 1:
+                    reasons.append(f"cold category x{cat_mult}")
+                vetting = " | ".join(reasons)
+
                 _log_activity(
-                    f"🎯 SNIPE: {side.upper()} {ticker} @ {price}c x{count} "
-                    f"(${cost_usd:.2f}) — potential +${expected_profit:.2f} profit | {title[:50]}",
+                    f"SNIPE: {side.upper()} {ticker} @ {price}c x{count} "
+                    f"(${cost_usd:.2f}) +${expected_profit:.2f} potential | {title[:40]} [{vetting}]",
                     "info"
                 )
 
