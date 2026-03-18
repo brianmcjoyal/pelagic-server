@@ -1443,6 +1443,36 @@ def check_position_prices():
                 unrealized_pnl = (current_price - entry_price) * abs_count
                 pnl_pct = round((current_price - entry_price) / max(1, entry_price) * 100, 1)
 
+            # Enriched metadata
+            cat = classify_market_category(title, ticker)
+            is_live = False
+            t_upper = ticker.upper()
+            for pfx in LIVE_GAME_SERIES:
+                if t_upper.startswith(pfx):
+                    is_live = True
+                    break
+            # Check if closing soon (within 24h)
+            time_left_str = ""
+            closing_soon = False
+            if close_time:
+                try:
+                    ct_dt = datetime.datetime.fromisoformat(close_time.replace("Z", "+00:00")).replace(tzinfo=None)
+                    delta = ct_dt - datetime.datetime.utcnow()
+                    secs = int(delta.total_seconds())
+                    if secs > 0:
+                        if secs < 3600:
+                            time_left_str = f"{secs // 60}m"
+                            closing_soon = True
+                        elif secs < 86400:
+                            time_left_str = f"{secs // 3600}h {(secs % 3600) // 60}m"
+                            is_live = True
+                        else:
+                            time_left_str = f"{secs // 86400}d"
+                except Exception:
+                    pass
+
+            vol_score = get_volatility_score(ticker)
+
             enriched.append({
                 "ticker": ticker,
                 "title": title,
@@ -1456,6 +1486,11 @@ def check_position_prices():
                 "pnl_pct": pnl_pct,
                 "close_time": close_time,
                 "market_exposure_cents": _parse_kalshi_dollars(pos.get("market_exposure_dollars")),
+                "category": cat,
+                "is_live": is_live,
+                "closing_soon": closing_soon,
+                "time_left": time_left_str,
+                "volatility": vol_score,
             })
         return enriched
     except Exception as e:
@@ -2028,6 +2063,8 @@ def live_game_snipe():
                             "strategy": "live_sniper",
                             "category": classify_market_category(title, ticker),
                         })
+                        # Track in trade journal for pattern analysis
+                        _journal_trade(ticker, title, side, price, filled, actual_cost, "live_sniper", is_live=True)
                         _log_activity(
                             f"🎯 SNIPED! {side.upper()} {ticker} @ {price}c x{filled} "
                             f"= ${actual_cost:.2f} (potential +${potential:.2f}) | {title[:40]}",
@@ -3171,6 +3208,207 @@ def _category_multiplier(ticker, title):
     else:
         return 0.5  # 50% smaller on losing categories
 
+
+# ---------------------------------------------------------------------------
+# TRADE JOURNAL — Comprehensive data tracking for pattern recognition
+# ---------------------------------------------------------------------------
+# Day 1 = March 16, 2026. Only count wins/losses from this date forward.
+TRADE_JOURNAL_START = "2026-03-16"
+
+_TRADE_JOURNAL = []  # List of enriched trade records with full metadata
+
+def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, strategy, is_live=False):
+    """Create an enriched trade record with all metadata for pattern analysis."""
+    now = datetime.datetime.utcnow()
+    cat = classify_market_category(title or "", ticker or "")
+    vol_score = get_volatility_score(ticker)
+
+    # Detect if it's a sports match
+    t_upper = (ticker or "").upper()
+    sport_type = "other"
+    for pfx in ["KXATP", "KXWTA"]:
+        if t_upper.startswith(pfx):
+            sport_type = "tennis"
+            break
+    for pfx in ["KXNBA"]:
+        if t_upper.startswith(pfx):
+            sport_type = "basketball"
+            break
+    for pfx in ["KXNHL"]:
+        if t_upper.startswith(pfx):
+            sport_type = "hockey"
+            break
+    for pfx in ["KXMLB"]:
+        if t_upper.startswith(pfx):
+            sport_type = "baseball"
+            break
+    for pfx in ["KXNFL"]:
+        if t_upper.startswith(pfx):
+            sport_type = "football"
+            break
+    for pfx in ["KXSOCCER"]:
+        if t_upper.startswith(pfx):
+            sport_type = "soccer"
+            break
+
+    # Hour of day (for time-of-day patterns)
+    hour = now.hour
+    day_of_week = now.strftime("%A")
+
+    return {
+        "ticker": ticker,
+        "title": title,
+        "side": side,
+        "price_cents": price_cents,
+        "count": count,
+        "cost_usd": round(cost_usd, 2),
+        "strategy": strategy,
+        "category": cat,
+        "sport_type": sport_type,
+        "is_live": is_live,
+        "volatility": vol_score,
+        "entry_time": now.isoformat() + "Z",
+        "entry_hour": hour,
+        "entry_day": day_of_week,
+        "entry_date": now.strftime("%Y-%m-%d"),
+        "result": None,  # filled on settlement: "win", "loss", "even"
+        "pnl_usd": None,  # filled on settlement
+        "settlement_time": None,
+        "hold_duration_mins": None,
+        "price_at_entry": price_cents,
+    }
+
+
+def _journal_trade(ticker, title, side, price_cents, count, cost_usd, strategy, is_live=False):
+    """Add a trade to the journal."""
+    rec = _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, strategy, is_live)
+    _TRADE_JOURNAL.append(rec)
+    return rec
+
+
+def _journal_settle(ticker, won, pnl_usd):
+    """Update journal entry with settlement result."""
+    now = datetime.datetime.utcnow()
+    for rec in reversed(_TRADE_JOURNAL):
+        if rec["ticker"] == ticker and rec["result"] is None:
+            rec["result"] = "win" if won else ("loss" if pnl_usd < -0.005 else "even")
+            rec["pnl_usd"] = round(pnl_usd, 2)
+            rec["settlement_time"] = now.isoformat() + "Z"
+            try:
+                entry_dt = datetime.datetime.fromisoformat(rec["entry_time"].replace("Z", "+00:00")).replace(tzinfo=None)
+                rec["hold_duration_mins"] = int((now - entry_dt).total_seconds() / 60)
+            except Exception:
+                pass
+            break
+
+
+def get_pattern_analysis():
+    """Analyze trade journal for patterns in wins vs losses."""
+    settled = [t for t in _TRADE_JOURNAL if t["result"] is not None]
+    if not settled:
+        # Fallback to settled_history from portfolio cache
+        return {"message": "No settled trades in journal yet", "patterns": []}
+
+    wins = [t for t in settled if t["result"] == "win"]
+    losses = [t for t in settled if t["result"] == "loss"]
+
+    patterns = []
+
+    # Pattern 1: Category performance
+    cat_stats = {}
+    for t in settled:
+        cat = t["category"]
+        if cat not in cat_stats:
+            cat_stats[cat] = {"wins": 0, "losses": 0, "pnl": 0.0}
+        if t["result"] == "win":
+            cat_stats[cat]["wins"] += 1
+        elif t["result"] == "loss":
+            cat_stats[cat]["losses"] += 1
+        cat_stats[cat]["pnl"] += t.get("pnl_usd") or 0
+
+    for cat, st in sorted(cat_stats.items(), key=lambda x: x[1]["pnl"], reverse=True):
+        total = st["wins"] + st["losses"]
+        if total > 0:
+            wr = round(st["wins"] / total * 100, 1)
+            patterns.append({
+                "type": "category",
+                "name": cat,
+                "wins": st["wins"],
+                "losses": st["losses"],
+                "win_rate": wr,
+                "pnl": round(st["pnl"], 2),
+                "signal": "strong" if wr >= 60 else ("weak" if wr < 40 else "neutral"),
+            })
+
+    # Pattern 2: Sport type performance
+    sport_stats = {}
+    for t in settled:
+        sp = t.get("sport_type", "other")
+        if sp not in sport_stats:
+            sport_stats[sp] = {"wins": 0, "losses": 0, "pnl": 0.0}
+        if t["result"] == "win":
+            sport_stats[sp]["wins"] += 1
+        elif t["result"] == "loss":
+            sport_stats[sp]["losses"] += 1
+        sport_stats[sp]["pnl"] += t.get("pnl_usd") or 0
+
+    # Pattern 3: Price range performance
+    price_ranges = {"70-75c": [70, 75], "76-80c": [76, 80], "81-85c": [81, 85], "86-90c": [86, 90], "91-100c": [91, 100]}
+    for label, (lo, hi) in price_ranges.items():
+        in_range = [t for t in settled if lo <= (t.get("price_cents") or 0) <= hi]
+        if in_range:
+            w = sum(1 for t in in_range if t["result"] == "win")
+            l = sum(1 for t in in_range if t["result"] == "loss")
+            pnl = sum(t.get("pnl_usd") or 0 for t in in_range)
+            if w + l > 0:
+                patterns.append({
+                    "type": "price_range",
+                    "name": label,
+                    "wins": w,
+                    "losses": l,
+                    "win_rate": round(w / (w + l) * 100, 1),
+                    "pnl": round(pnl, 2),
+                })
+
+    # Pattern 4: Live vs non-live
+    live_w = sum(1 for t in wins if t.get("is_live"))
+    live_l = sum(1 for t in losses if t.get("is_live"))
+    nonlive_w = sum(1 for t in wins if not t.get("is_live"))
+    nonlive_l = sum(1 for t in losses if not t.get("is_live"))
+    if live_w + live_l > 0:
+        patterns.append({"type": "live_vs_nonlive", "name": "Live", "wins": live_w, "losses": live_l,
+                         "win_rate": round(live_w / (live_w + live_l) * 100, 1)})
+    if nonlive_w + nonlive_l > 0:
+        patterns.append({"type": "live_vs_nonlive", "name": "Non-live", "wins": nonlive_w, "losses": nonlive_l,
+                         "win_rate": round(nonlive_w / (nonlive_w + nonlive_l) * 100, 1)})
+
+    # Pattern 5: Time of day
+    hour_stats = {}
+    for t in settled:
+        h = t.get("entry_hour", 0)
+        period = "morning" if h < 12 else ("afternoon" if h < 17 else "evening")
+        if period not in hour_stats:
+            hour_stats[period] = {"wins": 0, "losses": 0}
+        if t["result"] == "win":
+            hour_stats[period]["wins"] += 1
+        elif t["result"] == "loss":
+            hour_stats[period]["losses"] += 1
+
+    # Pattern 6: Average hold time for wins vs losses
+    win_holds = [t.get("hold_duration_mins") for t in wins if t.get("hold_duration_mins")]
+    loss_holds = [t.get("hold_duration_mins") for t in losses if t.get("hold_duration_mins")]
+
+    return {
+        "total_tracked": len(settled),
+        "wins": len(wins),
+        "losses": len(losses),
+        "patterns": patterns,
+        "sport_stats": sport_stats,
+        "hour_stats": hour_stats,
+        "avg_win_hold_mins": round(sum(win_holds) / max(1, len(win_holds)), 1) if win_holds else None,
+        "avg_loss_hold_mins": round(sum(loss_holds) / max(1, len(loss_holds)), 1) if loss_holds else None,
+    }
+
 def check_settlements_and_reinvest():
     """Detect newly settled positions and immediately redeploy the freed capital.
 
@@ -3214,6 +3452,8 @@ def check_settlements_and_reinvest():
             # Track category performance
             title = pos.get("market_title", "") or pos.get("title", "") or ticker
             _update_category_stats(ticker, title, won, pnl_usd)
+            # Track in trade journal for pattern analysis
+            _journal_settle(ticker, won, pnl_usd)
             new_settlements.append({
                 "ticker": ticker,
                 "pnl_usd": round(pnl_usd, 2),
@@ -3648,6 +3888,18 @@ def _background_loop():
                         _realized2 = _PORTFOLIO_CACHE["data"].get("total_realized_usd", 0)
                         _settled_list2 = _PORTFOLIO_CACHE["data"].get("settled_history", [])
                 _wr2 = round(_wins2 / max(1, _wins2 + _losses2) * 100, 1)
+
+                # Day 1+ win rate (only count trades from March 16, 2026 onwards)
+                # Use trade journal for Day 1+ tracking, fall back to _CATEGORY_STATS
+                _d1_wins = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "win")
+                _d1_losses = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "loss")
+                # If journal is empty, use category stats (which reset on restart)
+                if _d1_wins + _d1_losses == 0:
+                    for _cs in _CATEGORY_STATS.values():
+                        _d1_wins += _cs.get("wins", 0)
+                        _d1_losses += _cs.get("losses", 0)
+                _d1_wr = round(_d1_wins / max(1, _d1_wins + _d1_losses) * 100, 1) if (_d1_wins + _d1_losses) > 0 else 0
+
                 _PORTFOLIO_CACHE["data"] = {
                     "balance_usd": round(_bal2, 2),
                     "portfolio_value_usd": round(_bal2 + _mv2, 2),
@@ -3656,10 +3908,13 @@ def _background_loop():
                     "open_count": len(_pos2),
                     "total_invested_usd": round(sum(p.get("market_exposure_cents", 0) for p in _pos2) / 100, 2),
                     "total_unrealized_usd": round(sum((p.get("unrealized_pnl_cents") or 0) for p in _pos2) / 100, 2),
-                    "wins": _wins2,
-                    "losses": _losses2,
+                    "wins": _d1_wins,
+                    "losses": _d1_losses,
+                    "wins_all_time": _wins2,
+                    "losses_all_time": _losses2,
                     "breakeven": 0,
-                    "win_rate": _wr2,
+                    "win_rate": _d1_wr,
+                    "win_rate_all_time": _wr2,
                     "total_realized_usd": round(_realized2, 2),
                     "settled_history": _settled_list2[-20:],
                 }
@@ -4748,6 +5003,19 @@ def _generate_seventy_fivers():
 def seventy_fivers():
     data = _generate_seventy_fivers()
     return jsonify(data)
+
+
+@app.route("/trade-patterns")
+def trade_patterns():
+    """Pattern analysis endpoint — what's winning and losing."""
+    analysis = get_pattern_analysis()
+    return jsonify(analysis)
+
+
+@app.route("/trade-journal")
+def trade_journal():
+    """Full trade journal with all metadata."""
+    return jsonify({"trades": _TRADE_JOURNAL[-50:], "total": len(_TRADE_JOURNAL)})
 
 
 @app.route("/quick-bet", methods=["POST"])
@@ -6112,8 +6380,8 @@ a:hover { color: #7da5f5; }
 
 <!-- Tabs -->
 <div class="tabs">
-  <button class="tab active" onclick="switchTab('seventyfivers')">75%'ers</button>
-  <button class="tab" onclick="switchTab('positions')">Positions</button>
+  <button class="tab active" onclick="switchTab('positions')">Positions</button>
+  <button class="tab" onclick="switchTab('seventyfivers')">75%'ers</button>
   <button class="tab" onclick="switchTab('picks')">Top Picks</button>
   <button class="tab" onclick="switchTab('activity')">Activity</button>
   <button class="tab" onclick="switchTab('history')">History</button>
@@ -6121,7 +6389,7 @@ a:hover { color: #7da5f5; }
 </div>
 
 <!-- Positions Tab -->
-<div class="tab-content" id="tab-positions">
+<div class="tab-content active" id="tab-positions">
   <div style="display:flex;justify-content:flex-end;margin-bottom:6px"><label style="font-size:10px;color:#888;cursor:pointer"><input type="checkbox" id="hide-bot-trades" checked onchange="loadPortfolio();loadPositions()" style="margin-right:4px">Hide old bot trades</label></div>
   <div id="portfolio-positions"><div class="loading">Loading positions...</div></div>
   <div class="section" style="margin-top:20px">
@@ -6200,7 +6468,7 @@ a:hover { color: #7da5f5; }
 </div>
 
 <!-- 75%'ers Tab -->
-<div class="tab-content active" id="tab-seventyfivers">
+<div class="tab-content" id="tab-seventyfivers">
   <div class="section">
     <div id="sf-stats-banner" style="display:flex;align-items:center;gap:16px;padding:10px 14px;background:#1a1a2e;border-radius:10px;margin-bottom:14px;flex-wrap:wrap">
       <span style="font-size:16px;font-weight:700;color:#00dc5a" id="sf-streak-text">Loading...</span>
