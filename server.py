@@ -7199,11 +7199,18 @@ async function loadPortfolio() {
     var cashHero = document.getElementById('pf-cash-hero');
     var invHero = document.getElementById('pf-invested-hero');
     if (cashHero) cashHero.textContent = '$' + (data.balance_usd || 0).toFixed(2);
-    if (invHero) invHero.textContent = '$' + (data.total_invested_usd || 0).toFixed(2);
+    // Show positions market value (what they're worth now, not what you paid)
+    var investedVal = data.positions_value_usd || data.total_invested_usd || 0;
+    // Portfolio should match Kalshi: cash + positions = total
+    // If portfolio_value_usd is available and > cash, derive invested from it
+    if (pfVal > 0 && (data.balance_usd || 0) > 0) {
+      investedVal = pfVal - (data.balance_usd || 0);
+    }
+    if (invHero) invHero.textContent = '$' + Math.max(0, investedVal).toFixed(2);
 
     // Quick stats
     document.getElementById('pf-cash').textContent = '$' + (data.balance_usd || 0).toFixed(2);
-    document.getElementById('pf-invested').textContent = '$' + (data.total_invested_usd || 0).toFixed(2);
+    document.getElementById('pf-invested').textContent = '$' + Math.max(0, investedVal).toFixed(2);
 
     var uPnl = data.total_unrealized_usd || 0;
     var uEl = document.getElementById('pf-unrealized');
