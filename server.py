@@ -1487,8 +1487,13 @@ def auto_exit_check():
         action = None
         reason = None
 
-        # Skip penny positions — no buyers exist, let them settle naturally
-        if current and current < 20:
+        # Skip illiquid positions — no buyers under 25c, let them settle
+        if current and current < 25:
+            continue
+        # Skip old bot junk by keyword
+        _exit_blocked = ["gas price", "netflix", "spotify", "billboard", "nuclear", "truth social", "title holder", "featherweight", "bantamweight", "pga tour"]
+        ptitle = (pos.get("title", "") or ticker).lower()
+        if any(kw in ptitle for kw in _exit_blocked):
             continue
 
         if pnl_pct >= TAKE_PROFIT_PCT:
