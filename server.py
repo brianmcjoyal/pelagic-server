@@ -4235,7 +4235,7 @@ def settled_positions():
         # Cache market titles to avoid N+1 API calls
         _title_cache = {}
 
-        def _get_title(ticker):
+        def _get_market_info(ticker):
             if ticker in _title_cache:
                 return _title_cache[ticker]
             try:
@@ -4246,13 +4246,18 @@ def settled_positions():
                     headers=mkt_h, timeout=5,
                 )
                 if mkt_r.ok:
-                    t = mkt_r.json().get("market", {}).get("title", ticker)
-                    _title_cache[ticker] = t
-                    return t
+                    mkt = mkt_r.json().get("market", {})
+                    info = {
+                        "title": mkt.get("title", ticker),
+                        "close_time": mkt.get("close_time", ""),
+                        "result": mkt.get("result", ""),
+                    }
+                    _title_cache[ticker] = info
+                    return info
             except Exception:
                 pass
-            _title_cache[ticker] = ticker
-            return ticker
+            _title_cache[ticker] = {"title": ticker, "close_time": "", "result": ""}
+            return _title_cache[ticker]
 
         for pos in positions_list:
             pnl_cents = _parse_kalshi_dollars(pos.get("realized_pnl_dollars") or pos.get("realized_pnl"))
@@ -4264,7 +4269,9 @@ def settled_positions():
             total_wagered += traded_cents / 100
 
             ticker = pos.get("ticker", "")
-            title = _get_title(ticker)
+            mkt_info = _get_market_info(ticker)
+            title = mkt_info["title"]
+            close_time = mkt_info.get("close_time", "")
 
             if pnl > 0:
                 wins += 1
@@ -4303,6 +4310,20 @@ def settled_positions():
                     break
 
             category = classify_market_category(title, ticker)
+            side = pos.get("side", "")
+            count = 0
+            try:
+                count = int(float(str(pos.get("total_count_fp") or pos.get("total_count") or 0)))
+            except Exception:
+                pass
+            entry_cents = 0
+            try:
+                if side == "yes":
+                    entry_cents = int(round(float(str(pos.get("average_yes_price_dollars") or pos.get("average_yes_price") or 0)) * 100))
+                else:
+                    entry_cents = int(round(float(str(pos.get("average_no_price_dollars") or pos.get("average_no_price") or 0)) * 100))
+            except Exception:
+                pass
             settled.append({
                 "ticker": ticker,
                 "title": title,
@@ -4314,6 +4335,10 @@ def settled_positions():
                 "bot_version": trade_version,
                 "strategy": trade_strategy,
                 "category": category,
+                "close_time": close_time,
+                "side": side,
+                "count": count,
+                "entry_cents": entry_cents,
             })
 
         total_bets = wins + losses + breakeven
@@ -7941,20 +7966,34 @@ async function loadSettled() {
     if (settled.length === 0) {
       tableEl.innerHTML = '<div style="color:#555;font-size:10px;padding:8px">No settled positions yet. Place some bets and we will track every result here.</div>';
     } else {
-      var tbl = '<table style="width:100%;border-collapse:collapse;font-size:9px">';
+      // Sort by date descending (most recent first)
+      settled.sort(function(a, b) {
+        return (b.close_time || '').localeCompare(a.close_time || '');
+      });
+      var tbl = '<table style="width:100%;border-collapse:collapse;font-size:10px">';
       tbl += '<tr style="color:#888;border-bottom:1px solid #333;text-align:left">';
-      tbl += '<th style="padding:4px">Market</th><th style="padding:4px">Type</th><th style="padding:4px">P&L</th><th style="padding:4px">Result</th>';
+      tbl += '<th style="padding:6px 4px">Date</th><th style="padding:6px 4px">Market</th><th style="padding:6px 4px">Side</th><th style="padding:6px 4px">Entry</th><th style="padding:6px 4px">P&amp;L</th><th style="padding:6px 4px">Result</th>';
       tbl += '</tr>';
       settled.forEach(function(s) {
         var rc = s.won === true ? '#00dc5a' : s.won === false ? '#ff5000' : '#888';
-        var rl = s.won === true ? '✅ WIN' : s.won === false ? '❌ LOSS' : '➖ EVEN';
-        var tc = {consensus:'#00dc5a', arbitrage:'#ffb400', cross_validated:'#00d4ff', kalshi_only:'#666'}[s.pick_type] || '#555';
-        var tl = {consensus:'CONSENSUS', arbitrage:'ARB', cross_validated:'VERIFIED', kalshi_only:'KALSHI'}[s.pick_type] || s.pick_type.toUpperCase();
+        var rl = s.won === true ? 'WIN' : s.won === false ? 'LOSS' : 'EVEN';
+        var badge = s.won === true ? 'background:rgba(0,220,90,0.12);color:#00dc5a' : s.won === false ? 'background:rgba(255,80,0,0.12);color:#ff5000' : 'background:rgba(136,136,136,0.12);color:#888';
+        var sideC = s.side === 'yes' ? '#00dc5a' : s.side === 'no' ? '#ff5000' : '#888';
+        var dateStr = '--';
+        if (s.close_time) {
+          try {
+            var dt = new Date(s.close_time);
+            dateStr = dt.toLocaleDateString('en-US', {month:'short', day:'numeric'});
+          } catch(e) { dateStr = s.close_time.substring(0, 10); }
+        }
+        var entryStr = s.entry_cents ? s.entry_cents + String.fromCharCode(162) + (s.count ? ' x' + s.count : '') : '--';
         tbl += '<tr style="border-bottom:1px solid #1a1a1a">';
-        tbl += '<td style="padding:4px;color:#ddd;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + s.title + '</td>';
-        tbl += '<td style="padding:4px;color:' + tc + '">' + tl + '</td>';
-        tbl += '<td style="padding:4px;color:' + rc + ';font-weight:700">' + (s.pnl_usd >= 0 ? '+' : '') + '$' + s.pnl_usd.toFixed(2) + '</td>';
-        tbl += '<td style="padding:4px;color:' + rc + '">' + rl + '</td>';
+        tbl += '<td style="padding:6px 4px;color:#888;white-space:nowrap">' + dateStr + '</td>';
+        tbl += '<td style="padding:6px 4px;color:#ddd;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + s.title + '</td>';
+        tbl += '<td style="padding:6px 4px;color:' + sideC + ';font-weight:600">' + (s.side || '--').toUpperCase() + '</td>';
+        tbl += '<td style="padding:6px 4px;color:#ccc">' + entryStr + '</td>';
+        tbl += '<td style="padding:6px 4px;color:' + rc + ';font-weight:700">' + (s.pnl_usd >= 0 ? '+' : '') + '$' + Math.abs(s.pnl_usd).toFixed(2) + '</td>';
+        tbl += '<td style="padding:6px 4px"><span style="' + badge + ';padding:2px 8px;border-radius:4px;font-size:9px;font-weight:700">' + rl + '</span></td>';
         tbl += '</tr>';
       });
       tbl += '</table>';
