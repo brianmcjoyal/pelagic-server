@@ -6627,42 +6627,67 @@ async function loadPortfolio() {
     if (thisMonth > 0) html += '<span style="font-size:8px;padding:2px 6px;background:#1a1a1a;border:1px solid #888;border-radius:3px;color:#888">' + thisMonth + ' this month</span>';
     if (later > 0) html += '<span style="font-size:8px;padding:2px 6px;background:#1a1a1a;border:1px solid #444;border-radius:3px;color:#555">' + later + ' later</span>';
     html += '</div>';
-    html += '<div class="pos-scroll"><table class="pos-table-compact"><thead><tr><th>Market</th><th>Side</th><th>Qty</th><th>Entry</th><th>Now</th><th>P&L</th><th>Exp</th><th></th></tr></thead><tbody>';
-    positions.forEach(function(p) {
-      var sideColor = p.side === 'yes' ? '#00dc5a' : '#ff5000';
-      var pnlText = '--';
-      var pnlColor = '#555';
-      if (p.pnl_pct !== null && p.pnl_pct !== undefined) {
-        pnlColor = p.pnl_pct > 0 ? '#00dc5a' : p.pnl_pct < 0 ? '#ff5000' : '#555';
-        var cents = p.unrealized_pnl_cents || 0;
-        pnlText = (p.pnl_pct >= 0 ? '+' : '') + p.pnl_pct + '%';
-        if (Math.abs(cents) >= 1) pnlText += ' ($' + (cents >= 0 ? '+' : '-') + (Math.abs(cents) / 100).toFixed(2) + ')';
+    // Split into winning and losing
+    var winning = positions.filter(function(p) { return (p.pnl_pct || 0) > 0; });
+    var losing = positions.filter(function(p) { return (p.pnl_pct || 0) <= 0; });
+    // Sort each: biggest movers first
+    winning.sort(function(a, b) { return (b.pnl_pct || 0) - (a.pnl_pct || 0); });
+    losing.sort(function(a, b) { return (a.pnl_pct || 0) - (b.pnl_pct || 0); });
+
+    var winPnl = winning.reduce(function(s, p) { return s + (p.unrealized_pnl_cents || 0); }, 0);
+    var losePnl = losing.reduce(function(s, p) { return s + (p.unrealized_pnl_cents || 0); }, 0);
+
+    function buildPosTable(arr, label, color, totalCents) {
+      var t = '<div style="flex:1;min-width:300px">';
+      t += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">';
+      t += '<span style="font-size:11px;font-weight:700;color:' + color + '">' + label + ' (' + arr.length + ')</span>';
+      t += '<span style="font-size:10px;font-weight:700;color:' + color + '">' + (totalCents >= 0 ? '+' : '') + '$' + (Math.abs(totalCents) / 100).toFixed(2) + '</span>';
+      t += '</div>';
+      if (arr.length === 0) {
+        t += '<div style="color:#555;font-size:9px;padding:8px;text-align:center;background:#0a0a0a;border-radius:8px">None</div>';
+        t += '</div>';
+        return t;
       }
-      var timeLeft = formatSettleTime(p.close_time);
-      var sellPrice = p.current_price ? Math.max(1, p.current_price - 1) : 0;
-      html += '<tr>';
-      html += '<td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><a href="https://kalshi.com/markets/' + p.ticker + '" target="_blank" style="color:#ddd">' + (p.title || p.ticker) + '</a></td>';
-      html += '<td style="color:' + sideColor + ';font-weight:700;font-size:8px">' + p.side.toUpperCase() + '</td>';
-      html += '<td style="font-size:8px">' + p.count + '</td>';
-      html += '<td style="font-size:8px">' + (p.entry_price || '?') + 'c</td>';
-      // Mini sparkline: entry -> current
-      var sparkColor = (p.pnl_pct || 0) >= 0 ? '#00dc5a' : '#ff5000';
-      var entry = p.entry_price || 50;
-      var curr = p.current_price || entry;
-      var sparkY1 = Math.max(2, Math.min(14, 16 - (entry / 100 * 14)));
-      var sparkY2 = Math.max(2, Math.min(14, 16 - (curr / 100 * 14)));
-      var spark = '<svg class="sparkline" width="30" height="16" viewBox="0 0 30 16"><line x1="2" y1="' + sparkY1 + '" x2="28" y2="' + sparkY2 + '" stroke="' + sparkColor + '" stroke-width="1.5" stroke-linecap="round"/><circle cx="28" cy="' + sparkY2 + '" r="2" fill="' + sparkColor + '"/></svg>';
-      html += '<td style="font-weight:700;font-size:8px">' + (p.current_price || '?') + 'c' + spark + '</td>';
-      html += '<td style="color:' + pnlColor + ';font-weight:700;font-size:8px">' + pnlText + '</td>';
-      html += '<td style="color:#ffb400;font-size:8px">' + timeLeft + '</td>';
-      if (sellPrice > 0) {
-        html += '<td><button class="hero-execute" style="font-size:7px;padding:1px 5px" onclick="sellPosition(&quot;' + p.ticker + '&quot;,&quot;' + p.side + '&quot;,' + sellPrice + ',' + p.count + ')">SELL</button></td>';
-      } else {
-        html += '<td></td>';
-      }
-      html += '</tr>';
-    });
-    html += '</tbody></table></div>';
+      t += '<div class="pos-scroll" style="max-height:350px"><table class="pos-table-compact"><thead><tr><th>Market</th><th>Side</th><th>Now</th><th>P&L</th><th>Exp</th><th></th></tr></thead><tbody>';
+      arr.forEach(function(p) {
+        var sideColor = p.side === 'yes' ? '#00dc5a' : '#ff5000';
+        var pnlText = '--';
+        var pnlColor = '#555';
+        if (p.pnl_pct !== null && p.pnl_pct !== undefined) {
+          pnlColor = p.pnl_pct > 0 ? '#00dc5a' : p.pnl_pct < 0 ? '#ff5000' : '#555';
+          var cents = p.unrealized_pnl_cents || 0;
+          pnlText = (p.pnl_pct >= 0 ? '+' : '') + p.pnl_pct + '%';
+          if (Math.abs(cents) >= 1) pnlText += ' ($' + (cents >= 0 ? '+' : '-') + (Math.abs(cents) / 100).toFixed(2) + ')';
+        }
+        var timeLeft = formatSettleTime(p.close_time);
+        var sellPrice = p.current_price ? Math.max(1, p.current_price - 1) : 0;
+        var sparkColor = (p.pnl_pct || 0) >= 0 ? '#00dc5a' : '#ff5000';
+        var entry = p.entry_price || 50;
+        var curr = p.current_price || entry;
+        var sparkY1 = Math.max(2, Math.min(14, 16 - (entry / 100 * 14)));
+        var sparkY2 = Math.max(2, Math.min(14, 16 - (curr / 100 * 14)));
+        var spark = '<svg class="sparkline" width="24" height="14" viewBox="0 0 24 14"><line x1="1" y1="' + sparkY1 + '" x2="22" y2="' + sparkY2 + '" stroke="' + sparkColor + '" stroke-width="1.5" stroke-linecap="round"/><circle cx="22" cy="' + sparkY2 + '" r="1.5" fill="' + sparkColor + '"/></svg>';
+        t += '<tr>';
+        t += '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><a href="https://kalshi.com/markets/' + p.ticker + '" target="_blank" style="color:#ddd;font-size:9px">' + (p.title || p.ticker) + '</a></td>';
+        t += '<td style="color:' + sideColor + ';font-weight:700;font-size:8px">' + p.side.toUpperCase() + '</td>';
+        t += '<td style="font-weight:700;font-size:8px">' + (p.current_price || '?') + 'c' + spark + '</td>';
+        t += '<td style="color:' + pnlColor + ';font-weight:700;font-size:8px">' + pnlText + '</td>';
+        t += '<td style="color:#ffb400;font-size:8px">' + timeLeft + '</td>';
+        if (sellPrice > 0) {
+          t += '<td><button class="hero-execute" style="font-size:7px;padding:1px 5px" onclick="sellPosition(&quot;' + p.ticker + '&quot;,&quot;' + p.side + '&quot;,' + sellPrice + ',' + p.count + ')">SELL</button></td>';
+        } else {
+          t += '<td></td>';
+        }
+        t += '</tr>';
+      });
+      t += '</tbody></table></div></div>';
+      return t;
+    }
+
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">';
+    html += buildPosTable(winning, 'Winning', '#00dc5a', winPnl);
+    html += buildPosTable(losing, 'Losing', '#ff5000', losePnl);
+    html += '</div>';
     if (hiddenCount > 0) {
       html += '<div style="margin-top:6px;font-size:9px;color:#555">' + hiddenCount + ' old bot positions hidden (uncheck toggle to show all)</div>';
     }
