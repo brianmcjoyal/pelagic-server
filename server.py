@@ -5108,6 +5108,264 @@ def seventy_fivers_stats():
 
 
 # ---------------------------------------------------------------------------
+# MOONSHOT TAB — Underdog bets in close live games (high payout)
+# ---------------------------------------------------------------------------
+_moonshot_cache = {"data": None, "ts": 0}
+_MOONSHOT_CACHE_TTL = 30  # refresh every 30s for live action
+
+BOT_STATE["moonshot_fund"] = 0.0  # 10% of wins auto-allocated
+BOT_STATE["moonshot_wins"] = 0
+BOT_STATE["moonshot_losses"] = 0
+BOT_STATE["moonshot_profit"] = 0.0
+BOT_STATE["moonshot_bets"] = 0
+BOT_STATE["moonshot_biggest_win"] = 0.0
+
+def _generate_moonshots():
+    """Find live sports underdogs in close games — high payout opportunities.
+    Strategy: When a heavy pre-game favorite is in a close game, the underdog
+    price is artificially low. The market is slow to adjust live odds."""
+    import time as _t
+    now = _t.time()
+    if _moonshot_cache["data"] and (now - _moonshot_cache["ts"]) < _MOONSHOT_CACHE_TTL:
+        return _moonshot_cache["data"]
+
+    candidates = []
+    now_dt = datetime.datetime.utcnow()
+
+    # Scan all live game series for underdogs
+    for series in LIVE_GAME_SERIES:
+        try:
+            mh = signed_headers("GET", "/markets")
+            params = {"limit": 200, "status": "open", "series_ticker": series}
+            resp = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + "/markets",
+                headers=mh, params=params, timeout=8,
+            )
+            if not resp.ok:
+                continue
+            markets = resp.json().get("markets", [])
+
+            for mkt in markets:
+                ticker = mkt.get("ticker", "")
+                title = mkt.get("title", "")
+                vol = mkt.get("volume", 0) or 0
+
+                # Need some volume
+                if vol < 20:
+                    continue
+
+                # Must be closing soon (live game = within 12h)
+                close_time = mkt.get("close_time", "")
+                hours_left = 999
+                if close_time:
+                    try:
+                        close_dt = datetime.datetime.fromisoformat(close_time.replace("Z", "+00:00")).replace(tzinfo=None)
+                        hours_left = (close_dt - now_dt).total_seconds() / 3600
+                        if hours_left > 12 or hours_left <= 0:
+                            continue
+                    except Exception:
+                        continue
+
+                # Parse prices
+                yes_price = 50
+                no_price = 50
+                try:
+                    ya = mkt.get("yes_ask_dollars") or mkt.get("yes_ask") or mkt.get("last_price")
+                    if ya:
+                        yes_price = int(round(float(str(ya)) * 100))
+                    na = mkt.get("no_ask_dollars") or mkt.get("no_ask")
+                    if na:
+                        no_price = int(round(float(str(na)) * 100))
+                    else:
+                        no_price = 100 - yes_price
+                except Exception:
+                    continue
+
+                # MOONSHOT ZONE: underdog at 15-45c (payout 2.2x to 6.7x)
+                # This is the sweet spot — cheap enough for big payout,
+                # but not so cheap that it's hopeless
+                side = None
+                price = 0
+                payout_ratio = 0
+
+                if 15 <= yes_price <= 45:
+                    side = "yes"
+                    price = yes_price
+                    payout_ratio = round(100 / price, 1)
+                elif 15 <= no_price <= 45:
+                    side = "no"
+                    price = no_price
+                    payout_ratio = round(100 / price, 1)
+                else:
+                    continue
+
+                # Calculate implied edge: if the game is close, real odds are
+                # much better than market price suggests
+                # Close game indicator: underdog at 30-45c suggests competitive game
+                closeness = "unknown"
+                edge_estimate = 0
+                if price >= 35:
+                    closeness = "TIGHT"
+                    edge_estimate = 15  # market might be 10-15% behind reality
+                elif price >= 25:
+                    closeness = "COMPETITIVE"
+                    edge_estimate = 10
+                else:
+                    closeness = "TRAILING"
+                    edge_estimate = 5
+
+                # Time pressure bonus: closer to end = more valuable
+                time_bonus = 0
+                time_label = ""
+                if hours_left <= 1:
+                    time_bonus = 10
+                    time_label = "FINAL STRETCH"
+                elif hours_left <= 3:
+                    time_bonus = 5
+                    time_label = "LATE GAME"
+                else:
+                    time_label = "MID GAME"
+
+                # Determine sport type from series prefix
+                sport = "Sports"
+                t_upper = ticker.upper()
+                if "NBA" in t_upper:
+                    sport = "NBA"
+                elif "NHL" in t_upper:
+                    sport = "NHL"
+                elif "MLB" in t_upper:
+                    sport = "MLB"
+                elif "NFL" in t_upper:
+                    sport = "NFL"
+                elif "ATP" in t_upper or "WTA" in t_upper:
+                    sport = "Tennis"
+                elif "SOCCER" in t_upper:
+                    sport = "Soccer"
+
+                # Suggested bet from moonshot fund
+                fund = BOT_STATE.get("moonshot_fund", 0)
+                suggested_bet = min(max(5, fund * 0.25), 25)  # 25% of fund, $5-$25 range
+                potential_win = round(suggested_bet * (payout_ratio - 1), 2)
+
+                # Time remaining string
+                time_left = ""
+                if hours_left < 1:
+                    time_left = f"{int(hours_left * 60)}m"
+                else:
+                    time_left = f"{hours_left:.1f}h"
+
+                # Score: higher = better moonshot
+                score = (edge_estimate + time_bonus) * payout_ratio * min(vol, 500)
+
+                candidates.append({
+                    "ticker": ticker,
+                    "title": title[:80],
+                    "side": side,
+                    "price_cents": price,
+                    "payout_ratio": payout_ratio,
+                    "sport": sport,
+                    "closeness": closeness,
+                    "time_label": time_label,
+                    "time_left": time_left,
+                    "hours_left": round(hours_left, 2),
+                    "volume": vol,
+                    "edge_estimate": edge_estimate,
+                    "suggested_bet": round(suggested_bet, 2),
+                    "potential_win": potential_win,
+                    "score": score,
+                    "url": f"https://kalshi.com/markets/{ticker}",
+                })
+        except Exception:
+            continue
+
+    # Sort by score (best moonshots first)
+    candidates.sort(key=lambda x: -x["score"])
+
+    result = {
+        "picks": candidates[:10],
+        "count": len(candidates),
+        "fund_balance": round(BOT_STATE.get("moonshot_fund", 0), 2),
+        "total_wins": BOT_STATE.get("moonshot_wins", 0),
+        "total_losses": BOT_STATE.get("moonshot_losses", 0),
+        "total_profit": round(BOT_STATE.get("moonshot_profit", 0), 2),
+        "total_bets": BOT_STATE.get("moonshot_bets", 0),
+        "biggest_win": round(BOT_STATE.get("moonshot_biggest_win", 0), 2),
+    }
+    _moonshot_cache["data"] = result
+    _moonshot_cache["ts"] = _t.time()
+    return result
+
+
+@app.route("/moonshots")
+def moonshots():
+    data = _generate_moonshots()
+    return jsonify(data)
+
+
+@app.route("/moonshot-bet", methods=["POST"])
+def moonshot_bet():
+    """Place a moonshot bet from the fund."""
+    body = request.get_json(force=True)
+    ticker = body.get("ticker", "")
+    side = body.get("side", "")
+    price_cents = body.get("price_cents", 0)
+    bet_usd = body.get("bet_usd", 5)
+
+    if not ticker or not side:
+        return jsonify({"error": "Missing ticker or side"}), 400
+
+    # Safety checks
+    fund = BOT_STATE.get("moonshot_fund", 0)
+    if bet_usd > fund + 5:  # allow $5 over fund for manual adds
+        return jsonify({"error": f"Moonshot fund only has ${fund:.2f}"}), 400
+    if bet_usd > 50:
+        return jsonify({"error": "Max moonshot bet is $50"}), 400
+
+    count = max(1, int(bet_usd * 100 / max(1, price_cents)))
+    try:
+        order_h = signed_headers("POST", "/portfolio/orders")
+        order_body = {
+            "ticker": ticker,
+            "action": "buy",
+            "type": "limit",
+            "side": side,
+            "count": count,
+            "yes_price": price_cents if side == "yes" else (100 - price_cents),
+            "expiration_ts": int((datetime.datetime.utcnow() + datetime.timedelta(minutes=2)).timestamp()),
+        }
+        resp = requests.post(
+            KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/orders",
+            headers=order_h, json=order_body, timeout=10,
+        )
+        if resp.ok:
+            actual_cost = (price_cents * count) / 100
+            BOT_STATE["moonshot_fund"] = max(0, fund - actual_cost)
+            BOT_STATE["moonshot_bets"] = BOT_STATE.get("moonshot_bets", 0) + 1
+            payout = (100 * count) / 100
+            _add_activity(
+                f"MOONSHOT: {side.upper()} {ticker} {count}x @ {price_cents}c "
+                f"(${actual_cost:.2f} for ${payout:.2f} payout)",
+                "success",
+            )
+            return jsonify({"success": True, "cost": actual_cost, "count": count, "potential_payout": payout})
+        else:
+            return jsonify({"error": resp.text}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/moonshot-fund", methods=["POST"])
+def moonshot_fund_add():
+    """Manually add to the moonshot fund."""
+    body = request.get_json(force=True)
+    amount = body.get("amount", 0)
+    if amount > 0:
+        BOT_STATE["moonshot_fund"] = BOT_STATE.get("moonshot_fund", 0) + amount
+        return jsonify({"success": True, "new_balance": round(BOT_STATE["moonshot_fund"], 2)})
+    return jsonify({"error": "Amount must be positive"}), 400
+
+
+# ---------------------------------------------------------------------------
 # QUANT TAB — Mispriced market trading (active quantitative approach)
 # ---------------------------------------------------------------------------
 _quant_cache = {"data": None, "ts": 0}
@@ -6494,6 +6752,7 @@ a:hover { color: #7da5f5; }
   <button class="tab" onclick="switchTab('activity')">Activity</button>
   <button class="tab" onclick="switchTab('history')">History</button>
   <button class="tab" onclick="switchTab('quant')">Quant</button>
+  <button class="tab" onclick="switchTab('moonshot')" style="color:#ffb400">Moonshot</button>
 </div>
 
 <!-- Positions Tab -->
@@ -6615,6 +6874,39 @@ a:hover { color: #7da5f5; }
   </div>
 </div>
 
+<div class="tab-content" id="tab-moonshot">
+  <div class="section">
+    <!-- Fund Banner -->
+    <div style="display:flex;align-items:center;gap:16px;padding:12px 16px;background:linear-gradient(135deg,#1a1400,#2a1a00);border:1px solid #4a3000;border-radius:10px;margin-bottom:14px;flex-wrap:wrap">
+      <div>
+        <div style="font-size:10px;color:#aa8800;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Moonshot Fund</div>
+        <div style="font-size:24px;font-weight:800;color:#ffb400" id="moonshot-fund-bal">$0.00</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button onclick="addToMoonshotFund(5)" style="background:none;border:1px solid #4a3000;color:#ffb400;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;font-family:inherit">+$5</button>
+        <button onclick="addToMoonshotFund(10)" style="background:none;border:1px solid #4a3000;color:#ffb400;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;font-family:inherit">+$10</button>
+        <button onclick="addToMoonshotFund(25)" style="background:none;border:1px solid #4a3000;color:#ffb400;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;font-family:inherit">+$25</button>
+      </div>
+      <div style="margin-left:auto;display:flex;gap:16px">
+        <div style="text-align:center"><div style="font-size:9px;color:#666">Bets</div><div style="font-size:14px;font-weight:700;color:#ffb400" id="ms-total-bets">0</div></div>
+        <div style="text-align:center"><div style="font-size:9px;color:#666">Wins</div><div style="font-size:14px;font-weight:700;color:#00dc5a" id="ms-wins">0</div></div>
+        <div style="text-align:center"><div style="font-size:9px;color:#666">Profit</div><div style="font-size:14px;font-weight:700;color:#00dc5a" id="ms-profit">$0</div></div>
+        <div style="text-align:center"><div style="font-size:9px;color:#666">Best Hit</div><div style="font-size:14px;font-weight:700;color:#ffb400" id="ms-best">$0</div></div>
+      </div>
+    </div>
+
+    <div style="font-size:11px;color:#666;margin-bottom:12px;padding:0 4px">
+      Underdogs in close live games. The market is slow to adjust &mdash; big payouts when the favorite slips.
+      <span style="color:#ffb400">10% of every win auto-funds this tab.</span>
+      <button class="refresh-btn" onclick="loadMoonshots()" style="margin-left:8px">Refresh</button>
+    </div>
+
+    <div id="moonshot-cards" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px">
+      <div class="loading">Scanning live games for moonshots...</div>
+    </div>
+  </div>
+</div>
+
 </div><!-- end container -->
 
 <div class="toast-container" id="toast-container"></div>
@@ -6631,6 +6923,11 @@ function switchTab(name) {
   document.getElementById('tab-' + name).classList.add('active');
   var tabs = document.querySelectorAll('.tab');
   tabs.forEach(function(t) { if (t.getAttribute('onclick').indexOf(name) >= 0) t.classList.add('active'); });
+  // Lazy-load tab data
+  if (name === 'moonshot') loadMoonshots();
+  if (name === 'quant') loadQuantPicks();
+  if (name === 'seventyfivers') loadSeventyFivers();
+  if (name === 'history') loadSettled();
 }
 
 const API = window.location.origin;
@@ -8262,6 +8559,117 @@ async function quantBet(ticker, side, priceCents, title, deviationPct) {
     }
   } catch(e) {
     showToast('Trade error: ' + e.message, 'error');
+  }
+}
+
+// --- Moonshot Tab ---
+async function loadMoonshots() {
+  try {
+    var data = await fetch(API + '/moonshots').then(r => r.json());
+    var picks = data.picks || [];
+
+    // Update fund stats
+    var fundEl = document.getElementById('moonshot-fund-bal');
+    if (fundEl) fundEl.textContent = '$' + (data.fund_balance || 0).toFixed(2);
+    var betsEl = document.getElementById('ms-total-bets');
+    if (betsEl) betsEl.textContent = data.total_bets || 0;
+    var winsEl = document.getElementById('ms-wins');
+    if (winsEl) winsEl.textContent = data.total_wins || 0;
+    var profEl = document.getElementById('ms-profit');
+    if (profEl) {
+      var p = data.total_profit || 0;
+      profEl.textContent = (p >= 0 ? '+' : '-') + '$' + Math.abs(p).toFixed(2);
+      profEl.style.color = p >= 0 ? '#00dc5a' : '#ff5000';
+    }
+    var bestEl = document.getElementById('ms-best');
+    if (bestEl) bestEl.textContent = '$' + (data.biggest_win || 0).toFixed(2);
+
+    var container = document.getElementById('moonshot-cards');
+    if (picks.length === 0) {
+      container.innerHTML = '<div class="empty" style="grid-column:1/-1">No live underdog opportunities right now. Check back during game time!</div>';
+      return;
+    }
+
+    var html = '';
+    picks.forEach(function(p, i) {
+      var sideC = p.side === 'yes' ? '#00dc5a' : '#ff5000';
+      var closenessC = p.closeness === 'TIGHT' ? '#00dc5a' : p.closeness === 'COMPETITIVE' ? '#ffb400' : '#ff5000';
+      var timeC = p.time_label === 'FINAL STRETCH' ? '#ff5000' : p.time_label === 'LATE GAME' ? '#ffb400' : '#888';
+
+      html += '<div style="background:linear-gradient(135deg,#141400,#1a1400);border:1px solid #3a2a00;border-radius:12px;padding:14px;position:relative">';
+
+      // Rank badge
+      html += '<div style="position:absolute;top:10px;right:12px;font-size:18px;font-weight:800;color:#2a2000">#' + (i + 1) + '</div>';
+
+      // Sport + Time badges
+      html += '<div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap">';
+      html += '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;background:rgba(255,180,0,0.12);color:#ffb400">' + p.sport + '</span>';
+      html += '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;background:rgba(255,180,0,0.08);color:' + timeC + '">' + p.time_label + ' (' + p.time_left + ')</span>';
+      html += '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;background:rgba(0,220,90,0.08);color:' + closenessC + '">' + p.closeness + '</span>';
+      html += '</div>';
+
+      // Title
+      html += '<div style="font-size:13px;color:#e0e0e0;font-weight:600;margin-bottom:6px;line-height:1.3"><a href="' + p.url + '" target="_blank" style="color:#e0e0e0;text-decoration:none">' + p.title + '</a></div>';
+
+      // Price + Payout
+      html += '<div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">';
+      html += '<div><div style="font-size:9px;color:#666">Price</div><div style="font-size:20px;font-weight:800;color:' + sideC + '">' + p.price_cents + String.fromCharCode(162) + ' <span style="font-size:11px;font-weight:600">' + p.side.toUpperCase() + '</span></div></div>';
+      html += '<div><div style="font-size:9px;color:#666">Payout</div><div style="font-size:20px;font-weight:800;color:#ffb400">' + p.payout_ratio + 'x</div></div>';
+      html += '<div><div style="font-size:9px;color:#666">If you bet $' + p.suggested_bet.toFixed(0) + '</div><div style="font-size:16px;font-weight:700;color:#00dc5a">+$' + p.potential_win.toFixed(2) + '</div></div>';
+      html += '</div>';
+
+      // Volume
+      html += '<div style="font-size:10px;color:#666;margin-bottom:8px">Vol: ' + p.volume.toLocaleString() + ' contracts</div>';
+
+      // Bet button
+      html += '<div style="display:flex;gap:6px">';
+      html += '<button onclick="placeMoonshot(&quot;' + p.ticker + '&quot;, &quot;' + p.side + '&quot;, ' + p.price_cents + ', 5)" style="flex:1;background:none;border:1px solid #4a3000;color:#ffb400;padding:8px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;font-family:inherit">$5</button>';
+      html += '<button onclick="placeMoonshot(&quot;' + p.ticker + '&quot;, &quot;' + p.side + '&quot;, ' + p.price_cents + ', 10)" style="flex:1;background:none;border:1px solid #4a3000;color:#ffb400;padding:8px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;font-family:inherit">$10</button>';
+      html += '<button onclick="placeMoonshot(&quot;' + p.ticker + '&quot;, &quot;' + p.side + '&quot;, ' + p.price_cents + ', 20)" style="flex:1;background:rgba(255,180,0,0.12);border:1px solid #ffb400;color:#ffb400;padding:8px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:700;font-family:inherit">$20</button>';
+      html += '</div>';
+
+      html += '</div>';
+    });
+    container.innerHTML = html;
+  } catch(e) {
+    document.getElementById('moonshot-cards').innerHTML = '<div class="empty" style="color:#ff5000">Error: ' + e.message + '</div>';
+  }
+}
+
+async function placeMoonshot(ticker, side, priceCents, betUsd) {
+  if (!confirm('Place $' + betUsd + ' moonshot on ' + side.toUpperCase() + ' ' + ticker + ' at ' + priceCents + String.fromCharCode(162) + '?')) return;
+  try {
+    var resp = await fetch(API + '/moonshot-bet', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ticker: ticker, side: side, price_cents: priceCents, bet_usd: betUsd}),
+    });
+    var data = await resp.json();
+    if (data.success) {
+      showToast('MOONSHOT placed! $' + data.cost.toFixed(2) + ' for $' + data.potential_payout.toFixed(2) + ' potential payout', 'success');
+      loadMoonshots();
+    } else {
+      showToast('Moonshot failed: ' + (data.error || 'Unknown'), 'error');
+    }
+  } catch(e) {
+    showToast('Moonshot error: ' + e.message, 'error');
+  }
+}
+
+async function addToMoonshotFund(amount) {
+  try {
+    var resp = await fetch(API + '/moonshot-fund', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({amount: amount}),
+    });
+    var data = await resp.json();
+    if (data.success) {
+      showToast('Added $' + amount + ' to Moonshot Fund (new balance: $' + data.new_balance.toFixed(2) + ')', 'success');
+      loadMoonshots();
+    }
+  } catch(e) {
+    showToast('Error: ' + e.message, 'error');
   }
 }
 
