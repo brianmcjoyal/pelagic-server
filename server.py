@@ -6527,10 +6527,16 @@ async function loadPortfolio() {
     var _botJunk = ['netflix', 'spotify', 'billboard', 'title holder', 'nuclear fusion', 'truth social', 'top song', 'top artist', 'featherweight', 'bantamweight', 'flyweight', 'middleweight', 'welterweight', 'lightweight', 'heavyweight', 'pga tour major', 'ballon d', 'gas prices'];
     var positions = allPos;
     if (hidePenny) {
+      var now48h = Date.now() + (48 * 3600 * 1000);
       positions = allPos.filter(function(p) {
         if ((p.entry_price || 0) < 15) return false;
         var t = ((p.title || p.ticker) + '').toLowerCase();
         for (var i = 0; i < _botJunk.length; i++) { if (t.indexOf(_botJunk[i]) >= 0) return false; }
+        // Hide positions expiring more than 48h from now
+        if (p.close_time) {
+          var closeMs = new Date(p.close_time).getTime();
+          if (closeMs > now48h) return false;
+        }
         return true;
       });
     }
@@ -7249,10 +7255,15 @@ async function loadPositions() {
     var botJunk = ['netflix', 'spotify', 'billboard', 'title holder', 'nuclear fusion', 'truth social', 'top song', 'top artist', 'featherweight', 'bantamweight', 'flyweight', 'middleweight', 'welterweight', 'lightweight', 'heavyweight', 'pga tour major', 'ballon d'];
     var positions = allPositions;
     if (hidePenny) {
+      var now48h = Date.now() + (48 * 3600 * 1000);
       positions = allPositions.filter(function(p) {
         if ((p.entry_price || 0) < 15) return false;
         var t = ((p.title || p.ticker) + '').toLowerCase();
         for (var i = 0; i < botJunk.length; i++) { if (t.indexOf(botJunk[i]) >= 0) return false; }
+        if (p.close_time) {
+          var closeMs = new Date(p.close_time).getTime();
+          if (closeMs > now48h) return false;
+        }
         return true;
       });
     }
