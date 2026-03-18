@@ -6129,37 +6129,32 @@ a:hover { color: #7da5f5; }
   </div>
 </div>
 
-<!-- Picks Tab -->
+<!-- Picks Tab — Goldman Sachs Style Research Desk -->
 <div class="tab-content" id="tab-picks">
-  <div class="hero-section">
-    <div class="section-title">Top 5 Picks <span class="badge" id="hero-badge">0</span><button class="refresh-btn" onclick="loadTopPicks()">Refresh</button></div>
-    <div id="hero-picks" class="hero-grid"><div class="loading" style="grid-column:1/-1">Scanning markets...</div></div>
-  </div>
-  <div class="two-col">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
     <div>
-      <div class="top-picks">
-        <div class="section-title">Sports <span class="badge" id="picks-badge-sports">0</span></div>
-        <div id="top-picks-list-sports" class="picks-grid"><div class="loading" style="grid-column:1/-1">Loading...</div></div>
-      </div>
-      <div class="section">
-        <div class="section-title">Sports Settling Today <span class="badge" id="today-badge-sports">0</span></div>
-        <div id="today-table-sports"><div class="loading">Loading...</div></div>
-      </div>
+      <div style="font-size:16px;font-weight:800;color:#fff;letter-spacing:0.5px">TradeShark Research Desk</div>
+      <div style="font-size:9px;color:#888;margin-top:2px">Quantitative Analysis | Cross-Platform Validated | Updated Every 60s</div>
     </div>
-    <div>
-      <div class="top-picks">
-        <div class="section-title">Non-Sports <span class="badge" id="picks-badge-nonsports">0</span></div>
-        <div id="top-picks-list-nonsports" class="picks-grid"><div class="loading" style="grid-column:1/-1">Loading...</div></div>
-      </div>
-      <div class="section">
-        <div class="section-title">Non-Sports Settling Today <span class="badge" id="today-badge-nonsports">0</span></div>
-        <div id="today-table-nonsports"><div class="loading">Loading...</div></div>
-      </div>
-    </div>
+    <button class="refresh-btn" onclick="loadTopPicks()" style="font-size:10px">Refresh Analysis</button>
   </div>
-  <div class="section">
-    <div class="section-title">Miscellaneous <span class="badge" id="misc-badge">0</span></div>
-    <div id="misc-picks" class="picks-grid"><div class="loading" style="grid-column:1/-1">Scanning...</div></div>
+  <div id="gs-picks-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+    <div class="loading" style="grid-column:1/-1;padding:40px;text-align:center;color:#888">Scanning 3,000+ markets across 6 platforms...</div>
+  </div>
+  <!-- Hidden elements for backward compatibility -->
+  <div style="display:none">
+    <span id="hero-badge">0</span>
+    <div id="hero-picks"></div>
+    <span id="picks-badge-sports">0</span>
+    <div id="top-picks-list-sports"></div>
+    <span id="picks-badge-nonsports">0</span>
+    <div id="top-picks-list-nonsports"></div>
+    <span id="today-badge-sports">0</span>
+    <div id="today-table-sports"></div>
+    <span id="today-badge-nonsports">0</span>
+    <div id="today-table-nonsports"></div>
+    <span id="misc-badge">0</span>
+    <div id="misc-picks"></div>
   </div>
 </div>
 
@@ -6981,72 +6976,170 @@ function renderPickCard(p, idx, prefix) {
   return h;
 }
 
+function _gsConviction(p) {
+  var score = 0;
+  // Cross-platform validation is the strongest signal
+  var platCount = (p.platform_count || 0) + 1;
+  if (platCount >= 4) score += 3;
+  else if (platCount >= 3) score += 2;
+  else if (platCount >= 2) score += 1;
+  // High win probability
+  var wp = (p.win_probability || 0.5) * 100;
+  if (wp >= 80) score += 3;
+  else if (wp >= 70) score += 2;
+  else if (wp >= 60) score += 1;
+  // Volume = institutional interest
+  var vol = p.volume || 0;
+  if (vol >= 5000) score += 2;
+  else if (vol >= 1000) score += 1;
+  // News confirms thesis
+  if (p.news_confirms) score += 1;
+  // Deviation = edge size
+  if ((p.deviation || 0) >= 0.3) score += 1;
+  // Map to conviction
+  if (score >= 8) return {label: 'STRONG BUY', color: '#00dc5a', stars: 5};
+  if (score >= 6) return {label: 'BUY', color: '#00dc5a', stars: 4};
+  if (score >= 4) return {label: 'OVERWEIGHT', color: '#ffb400', stars: 3};
+  if (score >= 2) return {label: 'MARKET WEIGHT', color: '#888', stars: 2};
+  return {label: 'SPECULATIVE', color: '#ff5000', stars: 1};
+}
+
+function _gsThesis(p) {
+  var parts = [];
+  var platCount = (p.platform_count || 0) + 1;
+  var wp = ((p.win_probability || 0.5) * 100).toFixed(0);
+  var dev = ((p.deviation || 0) * 100).toFixed(0);
+  var side = p.signal === 'buy_yes' ? 'YES' : 'NO';
+  // Primary thesis
+  if (platCount >= 3) {
+    parts.push('Cross-platform consensus across ' + platCount + ' independent exchanges confirms ' + side + ' at ' + wp + '% probability.');
+  } else if (platCount >= 2) {
+    parts.push('Dual-platform validation supports ' + side + ' position with ' + wp + '% implied probability.');
+  } else {
+    parts.push('Single-platform signal at ' + wp + '% implied probability on the ' + side + ' side.');
+  }
+  // Edge
+  if ((p.deviation || 0) > 0.15) {
+    parts.push('Kalshi is mispriced by ' + dev + '% vs consensus, creating an exploitable edge.');
+  }
+  // News
+  if (p.news_confirms) {
+    parts.push('Recent news flow confirms directional bias.');
+  }
+  // Risk
+  var vol = p.volume || 0;
+  if (vol < 500) {
+    parts.push('Liquidity risk: low volume (' + vol + ') may impact exit.');
+  }
+  return parts.join(' ');
+}
+
+function _gsRiskLevel(p) {
+  var wp = (p.win_probability || 0.5) * 100;
+  var vol = p.volume || 0;
+  if (wp >= 80 && vol >= 1000) return {label: 'LOW', color: '#00dc5a'};
+  if (wp >= 65 && vol >= 500) return {label: 'MODERATE', color: '#ffb400'};
+  return {label: 'ELEVATED', color: '#ff5000'};
+}
+
+function renderGSTile(p, idx) {
+  var conv = _gsConviction(p);
+  var thesis = _gsThesis(p);
+  var risk = _gsRiskLevel(p);
+  var side = p.signal === 'buy_yes' ? 'YES' : 'NO';
+  var sideColor = p.signal === 'buy_yes' ? '#00dc5a' : '#ff5000';
+  var wp = ((p.win_probability || 0.5) * 100).toFixed(0);
+  var platCount = (p.platform_count || 0) + 1;
+  var settleTime = formatSettleTime(p.close_time);
+  var ct = Math.max(1, Math.floor(500 / p.price_cents));
+  var cost = (p.price_cents * ct / 100).toFixed(2);
+  var profit = ((100 - p.price_cents) * ct / 100).toFixed(2);
+  var stars = '';
+  for (var s = 0; s < 5; s++) stars += '<span style="color:' + (s < conv.stars ? '#ffb400' : '#333') + '">&#9733;</span>';
+
+  var h = '<div style="background:#0d0d0d;border:1px solid #1a1a1a;border-radius:10px;padding:14px;position:relative;border-left:3px solid ' + conv.color + '">';
+  // Header row
+  h += '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">';
+  h += '<div style="flex:1">';
+  h += '<div style="font-size:7px;font-weight:700;color:' + conv.color + ';letter-spacing:1px;margin-bottom:2px">' + conv.label + '</div>';
+  h += '<div style="font-size:8px;color:#666">' + stars + '</div>';
+  h += '</div>';
+  h += '<div style="text-align:right">';
+  h += '<div style="font-size:20px;font-weight:800;color:' + sideColor + '">' + side + ' ' + wp + '%</div>';
+  h += '<div style="font-size:8px;color:#666">' + p.price_cents + '&#162; entry | ' + settleTime + '</div>';
+  h += '</div>';
+  h += '</div>';
+
+  // Market question
+  h += '<div style="font-size:11px;color:#ddd;font-weight:600;margin-bottom:6px;line-height:1.3"><a href="' + (p.kalshi_url || '#') + '" target="_blank" style="color:#ddd;text-decoration:none">' + (p.kalshi_question || p.ticker || 'Unknown Market') + '</a></div>';
+
+  // Investment thesis
+  h += '<div style="font-size:9px;color:#999;line-height:1.4;margin-bottom:8px;border-left:2px solid #222;padding-left:8px">' + thesis + '</div>';
+
+  // News headlines
+  var news = p.news || [];
+  if (news.length > 0) {
+    h += '<div style="margin-bottom:8px">';
+    h += '<div style="font-size:7px;color:#555;font-weight:700;letter-spacing:0.5px;margin-bottom:3px">CATALYST</div>';
+    news.slice(0, 2).forEach(function(n) {
+      h += '<div style="font-size:8px;color:#888;margin-bottom:1px">&#x2022; ' + (n.title || n).toString().substring(0, 70) + '</div>';
+    });
+    h += '</div>';
+  }
+
+  // Metrics row
+  h += '<div style="display:flex;gap:10px;margin-bottom:8px;flex-wrap:wrap">';
+  h += '<div style="text-align:center"><div style="font-size:7px;color:#555;font-weight:600">PLATFORMS</div><div style="font-size:12px;font-weight:800;color:#00d4ff">' + platCount + '</div></div>';
+  h += '<div style="text-align:center"><div style="font-size:7px;color:#555;font-weight:600">VOLUME</div><div style="font-size:12px;font-weight:800;color:#ccc">' + (p.volume || 0).toLocaleString() + '</div></div>';
+  h += '<div style="text-align:center"><div style="font-size:7px;color:#555;font-weight:600">EDGE</div><div style="font-size:12px;font-weight:800;color:#ffb400">' + ((p.deviation || 0) * 100).toFixed(0) + '%</div></div>';
+  h += '<div style="text-align:center"><div style="font-size:7px;color:#555;font-weight:600">RISK</div><div style="font-size:12px;font-weight:800;color:' + risk.color + '">' + risk.label + '</div></div>';
+  h += '<div style="text-align:center"><div style="font-size:7px;color:#555;font-weight:600">POTENTIAL</div><div style="font-size:12px;font-weight:800;color:#00dc5a">+$' + profit + '</div></div>';
+  h += '</div>';
+
+  // Action button
+  h += '<button class="hero-execute" style="width:100%;padding:8px;font-size:10px;font-weight:700" onclick="executePickTrade(this, ' + p._globalIdx + ')">EXECUTE ' + side + ' &#x2022; $' + cost + ' &#x2022; +$' + profit + ' potential</button>';
+  h += '</div>';
+  return h;
+}
+
 async function loadTopPicks() {
-  if (_picksFirstLoad) {
-    document.getElementById('hero-picks').innerHTML = '<div class="loading" style="grid-column:1/-1">Scanning 6 platforms + news...</div>';
-    document.getElementById('top-picks-list-sports').innerHTML = '<div class="loading" style="grid-column:1/-1">Loading...</div>';
-    document.getElementById('top-picks-list-nonsports').innerHTML = '<div class="loading" style="grid-column:1/-1">Loading...</div>';
+  var gsGrid = document.getElementById('gs-picks-grid');
+  if (_picksFirstLoad && gsGrid) {
+    gsGrid.innerHTML = '<div class="loading" style="grid-column:1/-1;padding:40px;text-align:center;color:#888">Scanning 3,000+ markets across 6 platforms...</div>';
   }
   try {
     const data = await fetch(API + '/top-picks').then(r => r.json());
     _picksFirstLoad = false;
     const picks = data.picks || [];
-    const heroTickers = new Set(data.hero || []);
-    const miscTickers = new Set(data.misc || []);
-    // Tag each pick with global index for trade execution
     picks.forEach((p, i) => { p._globalIdx = i; });
     _picksData = picks;
 
-    // Hero: Top 5 best bets
-    const heroPicks = picks.filter(p => heroTickers.has(p.kalshi_ticker)).slice(0, 5);
-    document.getElementById('hero-badge').textContent = heroPicks.length;
-    if (heroPicks.length === 0) {
-      document.getElementById('hero-picks').innerHTML = '<div class="empty" style="grid-column:1/-1">Scanning for best bets...</div>';
-    } else {
-      let html = '';
-      heroPicks.forEach((p, idx) => { html += renderHeroCard(p, idx); });
-      document.getElementById('hero-picks').innerHTML = html;
+    // Deduplicate and take top 10 by score
+    var seen = {};
+    var top10 = [];
+    picks.forEach(function(p) {
+      var tk = p.kalshi_ticker || '';
+      if (!seen[tk] && tk) {
+        seen[tk] = true;
+        top10.push(p);
+      }
+    });
+    top10 = top10.slice(0, 10);
+
+    if (gsGrid) {
+      if (top10.length === 0) {
+        gsGrid.innerHTML = '<div class="empty" style="grid-column:1/-1;padding:40px;text-align:center">Market scan in progress. Analysis will appear shortly.</div>';
+      } else {
+        var html = '';
+        top10.forEach(function(p, idx) { html += renderGSTile(p, idx); });
+        gsGrid.innerHTML = html;
+      }
     }
 
-    // Sports
-    const sports = picks.filter(p => isSports(p) && !miscTickers.has(p.kalshi_ticker)).slice(0, 10);
-    document.getElementById('picks-badge-sports').textContent = sports.length;
-    if (sports.length === 0) {
-      document.getElementById('top-picks-list-sports').innerHTML = '<div class="empty" style="grid-column:1/-1">No sports picks right now.</div>';
-    } else {
-      let html = '';
-      sports.forEach((p, idx) => { html += renderPickCard(p, idx, 'sports'); });
-      document.getElementById('top-picks-list-sports').innerHTML = html;
-      sports.forEach((p, idx) => { drawPickChart('sports-chart-' + idx, p.prices || {}, p.signal); });
-    }
-
-    // Non-sports
-    const nonSports = picks.filter(p => !isSports(p) && !miscTickers.has(p.kalshi_ticker)).slice(0, 10);
-    document.getElementById('picks-badge-nonsports').textContent = nonSports.length;
-    if (nonSports.length === 0) {
-      document.getElementById('top-picks-list-nonsports').innerHTML = '<div class="empty" style="grid-column:1/-1">No non-sports picks right now.</div>';
-    } else {
-      let html = '';
-      nonSports.forEach((p, idx) => { html += renderPickCard(p, idx, 'nonsports'); });
-      document.getElementById('top-picks-list-nonsports').innerHTML = html;
-      nonSports.forEach((p, idx) => { drawPickChart('nonsports-chart-' + idx, p.prices || {}, p.signal); });
-    }
-
-    // Miscellaneous
-    const misc = picks.filter(p => miscTickers.has(p.kalshi_ticker)).slice(0, 10);
-    document.getElementById('misc-badge').textContent = misc.length;
-    if (misc.length === 0) {
-      document.getElementById('misc-picks').innerHTML = '<div class="empty" style="grid-column:1/-1">No miscellaneous picks.</div>';
-    } else {
-      let html = '';
-      misc.forEach((p, idx) => { html += renderPickCard(p, idx, 'misc'); });
-      document.getElementById('misc-picks').innerHTML = html;
-      misc.forEach((p, idx) => { drawPickChart('misc-chart-' + idx, p.prices || {}, p.signal); });
-    }
+    // Also update hidden elements for backward compat
+    document.getElementById('hero-badge').textContent = top10.length;
   } catch(e) {
-    document.getElementById('hero-picks').innerHTML = '<div class="empty" style="grid-column:1/-1">Error: ' + e.message + '</div>';
-    document.getElementById('top-picks-list-sports').innerHTML = '<div class="empty" style="grid-column:1/-1">Error: ' + e.message + '</div>';
-    document.getElementById('top-picks-list-nonsports').innerHTML = '<div class="empty" style="grid-column:1/-1">Error: ' + e.message + '</div>';
+    if (gsGrid) gsGrid.innerHTML = '<div class="empty" style="grid-column:1/-1">Analysis error: ' + e.message + '</div>';
   }
 }
 
