@@ -6234,34 +6234,117 @@ a:hover { color: #7da5f5; }
 /* Sparkline */
 .sparkline { display: inline-block; vertical-align: middle; margin-left: 6px; }
 
+/* Touch-friendly tap targets */
+@media (pointer: coarse) {
+  .tab { min-height: 44px; display: flex; align-items: center; }
+  .trade-btn, .pick-execute, .hero-execute, .refresh-btn, #scan-btn { min-height: 44px; }
+  .switch { width: 52px; height: 28px; }
+  .slider:before { height: 22px; width: 22px; }
+  input:checked + .slider:before { transform: translateX(24px); }
+}
+
 /* Responsive */
+/* ===== TABLET (max 900px) ===== */
 @media (max-width: 900px) {
   .container { padding: 0 8px; }
   .portfolio-value { font-size: 32px; }
-  .stats-row { grid-template-columns: repeat(2, 1fr); gap: 6px; }
+  .stats-row { grid-template-columns: repeat(2, 1fr); gap: 1px; }
   .stat-value { font-size: 14px; }
-  .hero-grid { grid-template-columns: 1fr; }
+  .stat-card { padding: 10px 8px; }
+  .hero-grid { grid-template-columns: 1fr 1fr; }
   .picks-grid { grid-template-columns: 1fr; }
-  .tab { padding: 8px 12px; font-size: 11px; }
+  .tab { padding: 8px 14px; font-size: 12px; }
   .header { padding: 10px 12px; flex-wrap: wrap; gap: 8px; }
-  .tabs { overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch; }
-  table { font-size: 9px; }
-  table th, table td { padding: 4px 3px; }
-  .section-title { font-size: 12px; }
-  .chart-section { display: none; } /* hide chart on small screens */
-  #tab-activity > div { grid-template-columns: 1fr !important; } /* stack activity panels */
-  .pos-table-compact th, .pos-table-compact td { font-size: 8px; padding: 3px 2px; }
+  .tabs { overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  table { font-size: 11px; }
+  table th, table td { padding: 6px 4px; }
+  .section-title { font-size: 13px; }
+  .chart-section { padding: 0 8px 12px; }
+  .chart-canvas { height: 120px; }
+  #tab-activity > div { grid-template-columns: 1fr !important; }
+  .pos-table-compact th, .pos-table-compact td { font-size: 10px; padding: 6px 4px; }
   .breakdown-item { font-size: 10px; }
+  .two-col { grid-template-columns: 1fr; }
+  .portfolio-hero { padding: 24px 12px 6px; }
+  .portfolio-breakdown { gap: 10px; flex-wrap: wrap; }
+  .breakdown-val { font-size: 14px; }
+  .progress-section { padding: 8px 12px; }
+  .pick-card { padding: 12px; }
+  .hero-card { padding: 12px; }
+  .toast-container { top: 60px; right: 8px; left: 8px; }
+  .toast { max-width: 100%; font-size: 12px; padding: 10px 14px; }
+  /* Positions winning/losing columns stack on tablet */
+  #pos-split { grid-template-columns: 1fr !important; }
 }
+
+/* ===== MOBILE (max 480px) ===== */
 @media (max-width: 480px) {
-  .portfolio-value { font-size: 26px; }
-  .stats-row { grid-template-columns: 1fr 1fr; }
-  .stat-card { padding: 8px 6px; }
+  body { font-size: 13px; }
+  .portfolio-value { font-size: 28px; letter-spacing: -0.5px; }
+  .portfolio-change { font-size: 12px; }
+  .portfolio-hero { padding: 16px 8px 4px; }
+  .stats-row { grid-template-columns: 1fr 1fr; gap: 1px; border-radius: 8px; }
+  .stat-card { padding: 8px 4px; }
   .stat-value { font-size: 13px; }
-  .stat-label { font-size: 7px; }
-  .tab { padding: 6px 10px; font-size: 10px; }
-  .ticker-bar { font-size: 9px; }
+  .stat-label { font-size: 7px; letter-spacing: 0.3px; }
+  .tab { padding: 8px 12px; font-size: 11px; }
+  .tabs { gap: 0; padding: 0 4px; }
+  .ticker-bar { font-size: 9px; gap: 12px; padding: 4px 8px; justify-content: flex-start; }
+  .ticker-item { gap: 3px; }
+  .header { padding: 8px 10px; top: 22px; margin: 0 -8px 0; }
   .header h1 { font-size: 16px; }
+  .logo { width: 26px; height: 26px; }
+  h1 { font-size: 16px; }
+  #scan-btn { padding: 4px 10px; font-size: 11px; }
+  #scan-btn svg { width: 12px; height: 12px; }
+  .switch { width: 40px; height: 22px; }
+  .slider:before { height: 16px; width: 16px; }
+  input:checked + .slider:before { transform: translateX(18px); }
+  .toggle-label { font-size: 10px; }
+  .container { padding: 0 6px 20px; }
+  .chart-section { display: none; }
+  .progress-section { padding: 6px 10px; margin: 0 0 6px; }
+  .progress-section span { font-size: 9px !important; }
+  .section-title { font-size: 12px; flex-wrap: wrap; }
+  .badge { font-size: 10px; padding: 1px 8px; }
+  .refresh-btn { padding: 4px 10px; font-size: 10px; }
+  /* Tables — card-like on mobile */
+  table { font-size: 10px; }
+  table th { padding: 6px 4px; font-size: 8px; }
+  table td { padding: 8px 4px; font-size: 10px; }
+  .pos-table-compact th { font-size: 8px; padding: 4px 3px; }
+  .pos-table-compact td { font-size: 9px; padding: 6px 3px; }
+  .pos-scroll { max-height: 400px; }
+  /* Cards */
+  .pick-card { padding: 10px; border-radius: 8px; }
+  .pick-question { font-size: 12px; -webkit-line-clamp: 2; }
+  .pick-edge { font-size: 10px; }
+  .pick-execute { padding: 6px 10px; font-size: 11px; }
+  .pick-footer { gap: 4px; }
+  .pick-meta { font-size: 9px; }
+  .hero-grid { grid-template-columns: 1fr; gap: 8px; }
+  .hero-card { padding: 10px; border-radius: 8px; }
+  .hero-prob { font-size: 22px; }
+  .hero-question { font-size: 12px; }
+  .hero-execute { padding: 5px 10px; font-size: 11px; }
+  /* Activity */
+  .activity-line { gap: 6px; padding: 6px 0; }
+  .activity-line .time { font-size: 10px; min-width: 55px; }
+  .activity-line .msg { font-size: 11px; }
+  .activity-bar { max-height: 250px; }
+  /* Breakdown */
+  .portfolio-breakdown { gap: 8px; margin-top: 8px; }
+  .breakdown-val { font-size: 13px; }
+  .breakdown-label { font-size: 9px; }
+  .breakdown-dot { display: none; }
+  /* Today trades dropdown */
+  #today-trades-dropdown { min-width: 280px !important; left: -100px !important; right: auto !important; }
+  /* Quant/75ers cards on mobile */
+  .sf-card { padding: 10px !important; }
+  /* Hide less critical info on mobile */
+  .pos-count { font-size: 11px; }
+  .empty { padding: 20px; font-size: 12px; }
 }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 #scan-btn:hover:not(:disabled) { background: #00dc5a !important; color: #000 !important; }
