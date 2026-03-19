@@ -6221,6 +6221,19 @@ def trades_today_endpoint():
                 "source": "you",
             })
 
+    # Enrich with close_time from cached market data
+    close_time_map = {}
+    try:
+        for m in _market_cache.get("data") or []:
+            ticker = m.get("ticker", "")
+            ct = m.get("expected_expiration_time") or m.get("close_time") or ""
+            if ticker and ct:
+                close_time_map[ticker] = ct
+    except Exception:
+        pass
+    for t in all_today:
+        t["close_time"] = close_time_map.get(t.get("ticker", ""), "")
+
     # Sort by time descending
     all_today.sort(key=lambda x: x.get("time", ""), reverse=True)
     total_spent = sum(t["cost_usd"] for t in all_today if t["success"])
@@ -9461,7 +9474,20 @@ async function loadBetsFeed() {
       h += '<span style="color:' + sideC + ';font-weight:700">' + (t.side || '').toUpperCase() + '</span> ';
       h += '<span style="color:#ccc">' + title + '</span> ';
       h += '<span style="color:#ffb400">' + t.price_cents + '&#162; x' + (t.count || 1) + '</span> ';
-      h += '<span style="color:#888">$' + (t.cost_usd || 0).toFixed(2) + '</span>';
+      h += '<span style="color:#888">$' + (t.cost_usd || 0).toFixed(2) + '</span> ';
+      // Time until settlement
+      var settleStr = '';
+      if (t.close_time) {
+        try {
+          var ct = new Date(t.close_time);
+          var diff = ct - new Date();
+          if (diff <= 0) { settleStr = 'Settling now'; }
+          else if (diff < 3600000) { settleStr = Math.ceil(diff/60000) + 'm'; }
+          else if (diff < 86400000) { settleStr = Math.floor(diff/3600000) + 'h ' + Math.floor((diff%3600000)/60000) + 'm'; }
+          else { settleStr = Math.floor(diff/86400000) + 'd ' + Math.floor((diff%86400000)/3600000) + 'h'; }
+        } catch(e) {}
+      }
+      if (settleStr) h += '<span style="color:#555;font-size:10px;margin-left:4px">⏱ ' + settleStr + '</span>';
       h += '</span></div>';
     });
     el.innerHTML = h;
