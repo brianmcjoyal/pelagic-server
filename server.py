@@ -5636,6 +5636,102 @@ def insights_endpoint():
         return jsonify({"error": str(e), "insights": []})
 
 
+# ---------------------------------------------------------------------------
+# News Feed — top financial headlines from RSS
+# ---------------------------------------------------------------------------
+
+_NEWS_FEED_CACHE = {"stories": [], "ts": 0}
+_NEWS_FEED_TTL = 900  # 15 minutes
+
+def _fetch_news_feed():
+    """Fetch top financial news from RSS feeds. Returns list of story dicts."""
+    import urllib.request
+    import time as _time
+
+    now = _time.time()
+    if _NEWS_FEED_CACHE["stories"] and (now - _NEWS_FEED_CACHE["ts"]) < _NEWS_FEED_TTL:
+        return _NEWS_FEED_CACHE["stories"]
+
+    feeds = [
+        ("https://feeds.marketwatch.com/marketwatch/topstories/", "MarketWatch"),
+        ("https://www.cnbc.com/id/100003114/device/rss/rss.html", "CNBC"),
+        ("https://finance.yahoo.com/news/rssindex", "Yahoo Finance"),
+    ]
+
+    all_stories = []
+    for url, source_name in feeds:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                raw = resp.read()
+            root = ET.fromstring(raw)
+            # RSS feeds use <channel><item>
+            for item in root.findall(".//item")[:10]:
+                title = item.findtext("title", "").strip()
+                link = item.findtext("link", "").strip()
+                pub = item.findtext("pubDate", "").strip()
+                desc = item.findtext("description", "").strip()
+                # Clean HTML from description
+                desc = re.sub(r"<[^>]+>", "", desc).strip()
+                if len(desc) > 200:
+                    desc = desc[:197] + "..."
+                if title and link:
+                    # Parse pubDate into ISO format
+                    pub_iso = ""
+                    if pub:
+                        try:
+                            from email.utils import parsedate_to_datetime
+                            dt = parsedate_to_datetime(pub)
+                            pub_iso = dt.isoformat()
+                        except Exception:
+                            pub_iso = pub
+                    all_stories.append({
+                        "title": html_unescape(title),
+                        "link": link,
+                        "source": source_name,
+                        "published": pub_iso,
+                        "summary": html_unescape(desc) if desc else "",
+                    })
+        except Exception:
+            continue
+
+    # Sort by published date descending
+    def _sort_key(s):
+        try:
+            return datetime.datetime.fromisoformat(s["published"].replace("Z", "+00:00"))
+        except Exception:
+            return datetime.datetime.min
+    all_stories.sort(key=_sort_key, reverse=True)
+    result = all_stories[:10]
+    _NEWS_FEED_CACHE["stories"] = result
+    _NEWS_FEED_CACHE["ts"] = now
+    return result
+
+
+@app.route("/news")
+def news_endpoint():
+    """Return top 10 financial news stories from RSS feeds."""
+    try:
+        stories = _fetch_news_feed()
+        if not stories:
+            return jsonify({"stories": [], "error": "News temporarily unavailable — RSS feeds did not respond."})
+        return jsonify({"stories": stories, "cached_at": _NEWS_FEED_CACHE["ts"]})
+    except Exception as e:
+        return jsonify({"stories": [], "error": f"News temporarily unavailable: {str(e)}"})
+
+
+@app.route("/news/refresh")
+def news_refresh():
+    """Force refresh news feed cache."""
+    _NEWS_FEED_CACHE["stories"] = []
+    _NEWS_FEED_CACHE["ts"] = 0
+    try:
+        stories = _fetch_news_feed()
+        return jsonify({"stories": stories, "cached_at": _NEWS_FEED_CACHE["ts"]})
+    except Exception as e:
+        return jsonify({"stories": [], "error": str(e)})
+
+
 _PORTFOLIO_CACHE = {"data": None, "ts": 0}
 _PORTFOLIO_CACHE_TTL = 15  # seconds — serve cached data between refreshes
 
@@ -8070,6 +8166,7 @@ a:hover { color: #7da5f5; }
   <button class="tab" onclick="switchTab('quant')">Quant</button>
   <button class="tab" onclick="switchTab('moonshark')" style="color:#00d4ff">&#x1F988; MoonShark</button>
   <button class="tab" onclick="switchTab('analytics')" style="color:#00d4ff">Analytics</button>
+  <button class="tab" onclick="switchTab('news')" style="color:#ccc">&#x1F4F0; News</button>
 </div>
 
 <!-- Positions Tab -->
@@ -8289,6 +8386,25 @@ a:hover { color: #7da5f5; }
   </div>
 </div>
 
+<!-- News Tab -->
+<div class="tab-content" id="tab-news">
+  <div class="section">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+      <div>
+        <div style="color:#ccc;font-size:16px;font-weight:700">&#x1F4F0; Market News</div>
+        <div style="color:#666;font-size:11px;margin-top:2px">Top financial stories</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <span id="news-updated" style="color:#555;font-size:10px"></span>
+        <button onclick="loadNews(true)" style="background:#1a1a2e;border:1px solid #333;color:#ccc;padding:4px 10px;border-radius:6px;font-size:11px;cursor:pointer">Refresh</button>
+      </div>
+    </div>
+    <div id="news-feed" style="display:flex;flex-direction:column;gap:10px">
+      <div class="loading">Loading news...</div>
+    </div>
+  </div>
+</div>
+
 </div><!-- end container -->
 
 <div class="toast-container" id="toast-container"></div>
@@ -8311,6 +8427,7 @@ function switchTab(name) {
   if (name === 'seventyfivers') loadSeventyFivers();
   if (name === 'history') loadSettled();
   if (name === 'analytics') { loadAnalytics(); loadInsights(); }
+  if (name === 'news') loadNews();
 }
 
 const API = window.location.origin;
@@ -10379,6 +10496,70 @@ loadTrades();
 setInterval(() => { loadTicker(); }, 60000);
 setInterval(() => { loadActivity(); loadBetsFeed(); checkForNotifications(); }, 10000);
 setInterval(() => { loadStatus(); loadPortfolio(); loadTopPicks(); loadTodayPicks(); loadPositions(); loadSettled(); loadTrades(); }, 30000);
+
+// --- News Feed ---
+var _newsLoaded = false;
+async function loadNews(forceRefresh) {
+  var feed = document.getElementById('news-feed');
+  var updEl = document.getElementById('news-updated');
+  if (!forceRefresh && _newsLoaded) return;
+  feed.innerHTML = '<div class="loading">Loading news...</div>';
+  try {
+    var url = API + (forceRefresh ? '/news/refresh' : '/news');
+    var resp = await fetch(url);
+    var data = await resp.json();
+    if (data.error && (!data.stories || data.stories.length === 0)) {
+      feed.innerHTML = '<div style="color:#888;font-size:12px;padding:20px;text-align:center">' + data.error + '</div>';
+      return;
+    }
+    if (!data.stories || data.stories.length === 0) {
+      feed.innerHTML = '<div style="color:#888;font-size:12px;padding:20px;text-align:center">No news stories available right now.</div>';
+      return;
+    }
+    var html = '';
+    data.stories.forEach(function(s) {
+      var timeAgo = '';
+      if (s.published) {
+        try {
+          var pub = new Date(s.published);
+          var diff = Date.now() - pub.getTime();
+          var mins = Math.floor(diff / 60000);
+          var hrs = Math.floor(mins / 60);
+          if (hrs >= 24) timeAgo = Math.floor(hrs / 24) + 'd ago';
+          else if (hrs > 0) timeAgo = hrs + 'h ago';
+          else if (mins > 0) timeAgo = mins + 'm ago';
+          else timeAgo = 'just now';
+        } catch(e) { timeAgo = ''; }
+      }
+      var srcColors = {
+        'CNBC': '#ffb400',
+        'Yahoo Finance': '#7b2ff7',
+        'MarketWatch': '#00dc5a',
+        'Google News': '#4285f4',
+      };
+      var srcColor = srcColors[s.source] || '#888';
+      html += '<div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:12px">';
+      html += '<a href="' + s.link + '" target="_blank" rel="noopener" style="color:#e0e0e0;text-decoration:none;font-size:13px;font-weight:600;line-height:1.4;display:block">' + s.title + '</a>';
+      html += '<div style="display:flex;align-items:center;gap:8px;margin-top:6px">';
+      html += '<span style="background:' + srcColor + '22;color:' + srcColor + ';font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px">' + s.source + '</span>';
+      if (timeAgo) html += '<span style="color:#666;font-size:10px">' + timeAgo + '</span>';
+      html += '</div>';
+      if (s.summary) {
+        html += '<div style="color:#888;font-size:11px;margin-top:6px;line-height:1.4">' + s.summary + '</div>';
+      }
+      html += '</div>';
+    });
+    feed.innerHTML = html;
+    _newsLoaded = true;
+    // Update timestamp
+    if (data.cached_at) {
+      var ago = Math.floor((Date.now() / 1000 - data.cached_at) / 60);
+      updEl.textContent = ago <= 0 ? 'Updated just now' : 'Updated ' + ago + 'm ago';
+    }
+  } catch(e) {
+    feed.innerHTML = '<div style="color:#ff5000;font-size:12px;padding:20px;text-align:center">Failed to load news. Try again later.</div>';
+  }
+}
 </script>
 </body>
 </html>
