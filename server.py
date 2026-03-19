@@ -6361,11 +6361,30 @@ def volatility_view():
 
 @app.route("/trades")
 def trades():
+    # Build settlement lookup from trade journal
+    settle_map = {}
+    for jt in _TRADE_JOURNAL:
+        if jt.get("result"):
+            settle_map[jt["ticker"]] = {
+                "result": jt["result"],
+                "pnl_usd": jt.get("pnl_usd", 0),
+            }
+    # Enrich all_trades with settlement outcome
+    enriched = []
+    for t in BOT_STATE["all_trades"]:
+        tc = dict(t)
+        ticker = tc.get("ticker", "")
+        if ticker in settle_map:
+            tc["outcome"] = settle_map[ticker]["result"]
+            tc["pnl_usd"] = settle_map[ticker]["pnl_usd"]
+        else:
+            tc["outcome"] = None
+        enriched.append(tc)
     return jsonify({
-        "total": len(BOT_STATE["all_trades"]),
+        "total": len(enriched),
         "today": len(BOT_STATE["trades_today"]),
         "daily_spent_usd": BOT_STATE["daily_spent_usd"],
-        "trades": BOT_STATE["all_trades"],
+        "trades": enriched,
     })
 
 
@@ -8646,20 +8665,19 @@ a:hover { color: #7da5f5; }
 
 <!-- Tabs -->
 <div class="tabs">
-  <button class="tab active" onclick="switchTab('moonshark')" style="color:#00d4ff">&#x1F988; MoonShark</button>
-  <button class="tab" onclick="switchTab('positions')">Positions</button>
+  <button class="tab active" onclick="switchTab('positions')">Positions</button>
+  <button class="tab" onclick="switchTab('activity')">Activity</button>
+  <button class="tab" onclick="switchTab('moonshark')" style="color:#00d4ff">&#x1F988; MoonShark</button>
   <button class="tab" onclick="switchTab('seventyfivers')">75%'ers</button>
   <button class="tab" onclick="switchTab('picks')">Top Picks</button>
-  <button class="tab" onclick="switchTab('activity')">Activity</button>
   <button class="tab" onclick="switchTab('history')">History</button>
   <button class="tab" onclick="switchTab('quant')">Quant</button>
   <button class="tab" onclick="switchTab('analytics')" style="color:#00d4ff">Analytics</button>
   <button class="tab" onclick="switchTab('news')" style="color:#ccc">&#x1F4F0; News</button>
-  <button class="tab" onclick="switchTab('newsideas')" style="color:#e6b800">&#x1F4A1; News Ideas</button>
 </div>
 
 <!-- Positions Tab -->
-<div class="tab-content" id="tab-positions">
+<div class="tab-content active" id="tab-positions">
   <div style="display:flex;justify-content:flex-end;margin-bottom:6px"><label style="font-size:10px;color:#888;cursor:pointer"><input type="checkbox" id="hide-bot-trades" checked onchange="loadPortfolio();loadPositions()" style="margin-right:4px">Hide old bot trades</label></div>
   <div id="portfolio-positions"><div class="loading">Loading positions...</div></div>
   <div class="section" style="margin-top:20px">
@@ -8778,7 +8796,7 @@ a:hover { color: #7da5f5; }
   </div>
 </div>
 
-<div class="tab-content active" id="tab-moonshark">
+<div class="tab-content" id="tab-moonshark">
   <div class="section">
     <!-- Header -->
     <div style="display:flex;align-items:center;gap:16px;padding:14px 18px;background:linear-gradient(135deg,#001a2a,#002a3a);border:1px solid #004a6a;border-radius:12px;margin-bottom:14px;flex-wrap:wrap">
@@ -8892,11 +8910,7 @@ a:hover { color: #7da5f5; }
       <div class="loading">Loading news...</div>
     </div>
   </div>
-</div>
-
-<!-- News Ideas Tab -->
-<div class="tab-content" id="tab-newsideas">
-  <div class="section">
+  <div class="section" style="margin-top:20px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
       <div>
         <div style="color:#e6b800;font-size:16px;font-weight:700">&#x1F4A1; News Ideas</div>
@@ -8935,8 +8949,7 @@ function switchTab(name) {
   if (name === 'seventyfivers') loadSeventyFivers();
   if (name === 'history') loadSettled();
   if (name === 'analytics') { loadAnalytics(); loadInsights(); }
-  if (name === 'news') loadNews();
-  if (name === 'newsideas') loadNewsIdeas();
+  if (name === 'news') { loadNews(); loadNewsIdeas(); }
 }
 
 const API = window.location.origin;
@@ -9909,10 +9922,23 @@ async function loadTrades() {
         } catch(e) { time = t.timestamp.substring(0, 16); }
       }
       var sideClass = t.side === 'yes' ? 'side-yes' : 'side-no';
-      // Kalshi fills are always successful (they are confirmed trades)
-      var isSuccess = t.source === 'kalshi_fill' ? true : (t.success || false);
-      var resultClass = isSuccess ? 'result-win' : 'result-loss';
-      var resultLabel = isSuccess ? 'Filled' : 'Failed';
+      // Show settlement outcome: win/loss/pending
+      var resultClass, resultLabel;
+      if (t.outcome === 'win') {
+        resultClass = 'result-win';
+        resultLabel = 'WON' + (t.pnl_usd ? ' +$' + Math.abs(t.pnl_usd).toFixed(2) : '');
+      } else if (t.outcome === 'loss') {
+        resultClass = 'result-loss';
+        resultLabel = 'LOST' + (t.pnl_usd ? ' -$' + Math.abs(t.pnl_usd).toFixed(2) : '');
+      } else if (t.outcome === 'even') {
+        resultClass = '';
+        resultLabel = 'EVEN';
+      } else {
+        // Not yet settled
+        var isSuccess = t.source === 'kalshi_fill' ? true : (t.success || false);
+        resultClass = isSuccess ? '' : 'result-loss';
+        resultLabel = isSuccess ? 'Open' : 'Failed';
+      }
       var source = t.source === 'kalshi_fill' ? 'Kalshi' : (t.manual ? 'Manual' : 'Bot');
       var actionLabel = (t.action === 'sell') ? 'SELL' : '';
       var qty = t.count || 1;
