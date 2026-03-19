@@ -10765,7 +10765,7 @@ async function loadInsights() {
     }
     var html = '';
     data.insights.forEach(function(ins) {
-      var icon = ins.trend === 'positive' ? '\uD83D\uDCC8' : ins.trend === 'negative' ? '\uD83D\uDCC9' : '\u27A1\uFE0F';
+      var icon = ins.trend === 'positive' ? '📈' : ins.trend === 'negative' ? '📉' : '➡️';
       var borderColor = ins.trend === 'positive' ? '#00dc5a' : ins.trend === 'negative' ? '#ff5000' : '#333';
       html += '<div style="background:#141414;border:1px solid #1f1f1f;border-left:3px solid ' + borderColor + ';border-radius:10px;padding:12px 14px">';
       html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">';
