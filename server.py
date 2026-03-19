@@ -8742,11 +8742,15 @@ a:hover { color: #7da5f5; }
       </div>
     </div>
     <div class="section">
-      <div class="section-title">Bets Placed <span style="width:8px;height:8px;border-radius:50%;background:#ffb400;display:inline-block" id="bets-pulse"></span></div>
+      <div class="section-title">Bets Placed Today <span class="badge" id="bets-today-count">0</span> <span style="width:8px;height:8px;border-radius:50%;background:#ffb400;display:inline-block" id="bets-pulse"></span></div>
       <div class="activity-bar" id="bets-feed" style="max-height:400px;overflow-y:auto">
         <div id="bets-lines"><div class="activity-line"><span class="time">--:--</span><span class="dot info"></span><span class="msg">Loading trade history...</span></div></div>
       </div>
     </div>
+  </div>
+  <div class="section" style="margin-top:16px">
+    <div class="section-title">All Bets <span class="badge" id="all-bets-count">0</span> <button class="refresh-btn" onclick="loadAllBets()">Refresh</button></div>
+    <div id="all-bets-table"><div class="loading">Loading all bets...</div></div>
   </div>
 </div>
 
@@ -8961,6 +8965,7 @@ function switchTab(name) {
   if (name === 'quant') loadQuantPicks();
   if (name === 'seventyfivers') loadSeventyFivers();
   if (name === 'history') loadSettled();
+  if (name === 'activity') { loadActivity(); loadBetsFeed(); loadAllBets(); }
   if (name === 'analytics') { loadAnalytics(); loadInsights(); }
   if (name === 'news') { loadNews(); loadNewsIdeas(); }
 }
@@ -9445,6 +9450,7 @@ async function loadBetsFeed() {
     var trades = data.trades || [];
     var el = document.getElementById('bets-lines');
     if (!el) return;
+    document.getElementById('bets-today-count').textContent = trades.length;
     if (trades.length === 0) {
       el.innerHTML = '<div class="activity-line"><span class="time">--:--</span><span class="dot info"></span><span class="msg" style="color:#666">No bets placed today</span></div>';
       return;
@@ -9495,6 +9501,63 @@ async function loadBetsFeed() {
     var pulse = document.getElementById('bets-pulse');
     if (pulse && trades.length > 0) pulse.style.background = '#ffb400';
   } catch(e) {}
+}
+
+async function loadAllBets() {
+  try {
+    const data = await fetch(API + '/trades').then(r => r.json());
+    const trades = data.trades || [];
+    document.getElementById('all-bets-count').textContent = trades.length;
+    if (trades.length === 0) {
+      document.getElementById('all-bets-table').innerHTML = '<div class="empty">No bets yet</div>';
+      return;
+    }
+    let html = '<table><tr><th>Date</th><th>Market</th><th>Side</th><th>Qty</th><th>Entry</th><th>Cost</th><th>Result</th><th>Source</th></tr>';
+    trades.slice().reverse().forEach(t => {
+      var time = '--';
+      if (t.timestamp) {
+        try {
+          var ts = t.timestamp;
+          if (ts.indexOf('Z') < 0 && ts.indexOf('+') < 0 && ts.indexOf('-', 10) < 0) ts += 'Z';
+          var d = new Date(ts);
+          time = isNaN(d.getTime()) ? ts.substring(0, 10) : d.toLocaleDateString();
+        } catch(e) { time = t.timestamp.substring(0, 10); }
+      }
+      var sideClass = t.side === 'yes' ? 'side-yes' : 'side-no';
+      var resultClass, resultLabel;
+      if (t.outcome === 'win') {
+        resultClass = 'result-win';
+        resultLabel = 'WON' + (t.pnl_usd ? ' +$' + Math.abs(t.pnl_usd).toFixed(2) : '');
+      } else if (t.outcome === 'loss') {
+        resultClass = 'result-loss';
+        resultLabel = 'LOST' + (t.pnl_usd ? ' -$' + Math.abs(t.pnl_usd).toFixed(2) : '');
+      } else if (t.outcome === 'even') {
+        resultClass = '';
+        resultLabel = 'EVEN';
+      } else {
+        resultClass = '';
+        resultLabel = 'Open';
+      }
+      var source = t.source === 'kalshi_fill' ? 'Kalshi' : (t.manual ? 'YOU' : 'BOT');
+      var sourceColor = t.manual ? '#5abf5a' : '#7a7aff';
+      var qty = t.count || 1;
+      var title = (t.question || t.title || t.ticker || '').substring(0, 45);
+      html += '<tr>';
+      html += '<td>' + time + '</td>';
+      html += '<td>' + title + '</td>';
+      html += '<td class="' + sideClass + '">' + qty + 'x ' + (t.side || '').toUpperCase() + '</td>';
+      html += '<td>' + qty + '</td>';
+      html += '<td>' + (t.price_cents || '--') + 'c</td>';
+      html += '<td>$' + (t.cost_usd || (t.price_cents || 0)/100).toFixed(2) + '</td>';
+      html += '<td class="' + resultClass + '">' + resultLabel + '</td>';
+      html += '<td style="color:' + sourceColor + '">' + source + '</td>';
+      html += '</tr>';
+    });
+    html += '</table>';
+    document.getElementById('all-bets-table').innerHTML = html;
+  } catch(e) {
+    document.getElementById('all-bets-table').innerHTML = '<div class="empty">Error loading bets</div>';
+  }
 }
 
 let _mispricedFirstLoad = true;
@@ -11114,6 +11177,7 @@ setInterval(loadQuantPicks, 60000);
 loadStatus();
 loadActivity();
 loadBetsFeed();
+loadAllBets();
 loadPortfolio();
 loadTopPicks();
 loadTodayPicks();
