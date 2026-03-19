@@ -1983,8 +1983,9 @@ def check_position_prices():
 
             vol_score = get_volatility_score(ticker)
 
-            # Determine who placed this bet: check journal & all_trades for strategy
-            placed_by = "you"  # default to manual
+            # Determine who placed this bet: check journal, all_trades, and today's trade lists
+            placed_by = None
+            # 1) Check trade journal (most reliable if server hasn't restarted)
             for jt in reversed(_TRADE_JOURNAL):
                 if jt.get("ticker") == ticker and jt.get("side") == side:
                     strat = jt.get("strategy", "")
@@ -1995,7 +1996,8 @@ def check_position_prices():
                     else:
                         placed_by = "you"
                     break
-            if placed_by == "you":
+            # 2) Check all_trades history
+            if not placed_by:
                 for at in reversed(BOT_STATE.get("all_trades", [])):
                     if at.get("ticker") == ticker:
                         if at.get("manual"):
@@ -2003,6 +2005,26 @@ def check_position_prices():
                         elif at.get("strategy") in ("moonshark", "live_sniper", "consensus_mispricing", "arb"):
                             placed_by = "bot"
                         break
+            # 3) Check today's bot trade lists (survives journal wipe on restart)
+            if not placed_by:
+                for tlist in [BOT_STATE.get("moonshark_trades_today", []),
+                              BOT_STATE.get("snipe_trades_today", []),
+                              BOT_STATE.get("trades_today", [])]:
+                    for bt in tlist:
+                        if bt.get("ticker") == ticker:
+                            placed_by = "bot"
+                            break
+                    if placed_by:
+                        break
+            # 4) Check manual trades today
+            if not placed_by:
+                for mt in BOT_STATE.get("manual_trades_today", []):
+                    if mt.get("ticker") == ticker:
+                        placed_by = "you"
+                        break
+            # 5) Default: unknown — label as "unknown" so we can tell
+            if not placed_by:
+                placed_by = "unknown"
 
             enriched.append({
                 "ticker": ticker,
@@ -9337,7 +9359,7 @@ async function loadPortfolio() {
         var sparkY2 = Math.max(2, Math.min(14, 16 - (curr / 100 * 14)));
         var spark = '<svg class="sparkline" width="24" height="14" viewBox="0 0 24 14"><line x1="1" y1="' + sparkY1 + '" x2="22" y2="' + sparkY2 + '" stroke="' + sparkColor + '" stroke-width="1.5" stroke-linecap="round"/><circle cx="22" cy="' + sparkY2 + '" r="1.5" fill="' + sparkColor + '"/></svg>';
         t += '<tr>';
-        var placedTag = p.placed_by === 'bot' ? '<span style="font-size:7px;padding:1px 3px;background:#1a1a2e;border:1px solid #4a4ae0;border-radius:3px;color:#7a7aff;margin-right:4px;vertical-align:middle" title="Placed by TradeShark bot">BOT</span>' : '<span style="font-size:7px;padding:1px 3px;background:#1a2e1a;border:1px solid #3a8a3a;border-radius:3px;color:#5abf5a;margin-right:4px;vertical-align:middle" title="Placed by you">YOU</span>';
+        var placedTag = p.placed_by === 'bot' ? '<span style="font-size:7px;padding:1px 3px;background:#1a1a2e;border:1px solid #4a4ae0;border-radius:3px;color:#7a7aff;margin-right:4px;vertical-align:middle" title="Placed by TradeShark bot">BOT</span>' : p.placed_by === 'unknown' ? '<span style="font-size:7px;padding:1px 3px;background:#2e2e1a;border:1px solid #8a8a3a;border-radius:3px;color:#bfbf5a;margin-right:4px;vertical-align:middle" title="Source unknown — placed before last restart">?</span>' : '<span style="font-size:7px;padding:1px 3px;background:#1a2e1a;border:1px solid #3a8a3a;border-radius:3px;color:#5abf5a;margin-right:4px;vertical-align:middle" title="Placed by you">YOU</span>';
         t += '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + placedTag + '<a href="https://kalshi.com/markets/' + p.ticker + '" target="_blank" style="color:#ddd;font-size:9px">' + (p.title || p.ticker) + '</a></td>';
         t += '<td style="color:' + sideColor + ';font-weight:700;font-size:8px">' + p.side.toUpperCase() + '</td>';
         t += '<td style="font-weight:700;font-size:8px">' + (p.current_price || '?') + 'c' + spark + '</td>';
