@@ -5770,7 +5770,7 @@ def ticker_prices():
     except Exception:
         pass
     # Stocks via Yahoo v8 chart endpoint (v7 quote requires auth now)
-    for sym in ("VOO", "TSLA"):
+    for sym in ("VOO", "TSLA", "GOOG"):
         try:
             chart = _req.get(
                 f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}",
@@ -8053,6 +8053,7 @@ a:hover { color: #7da5f5; }
   <div class="ticker-item"><span class="ticker-symbol">ETH</span> <span class="ticker-price" id="tk-eth">--</span> <span class="ticker-chg" id="tk-eth-chg"></span></div>
   <div class="ticker-item"><span class="ticker-symbol">VOO</span> <span class="ticker-price" id="tk-voo">--</span> <span class="ticker-chg" id="tk-voo-chg"></span></div>
   <div class="ticker-item"><span class="ticker-symbol">TSLA</span> <span class="ticker-price" id="tk-tsla">--</span> <span class="ticker-chg" id="tk-tsla-chg"></span></div>
+  <div class="ticker-item"><span class="ticker-symbol">GOOG</span> <span class="ticker-price" id="tk-goog">--</span> <span class="ticker-chg" id="tk-goog-chg"></span></div>
 </div>
 
 <div class="header">
@@ -10236,7 +10237,7 @@ async function toggleMoonshark() {
 async function loadTicker() {
   try {
     var data = await fetch(API + '/ticker-prices').then(r => r.json());
-    ['btc','eth','voo','tsla'].forEach(function(sym) {
+    ['btc','eth','voo','tsla','goog'].forEach(function(sym) {
       if (data[sym]) setTicker(sym, data[sym].price, data[sym].change);
     });
   } catch(e) { console.warn('Ticker error', e); }
