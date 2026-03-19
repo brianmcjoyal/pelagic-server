@@ -5374,6 +5374,268 @@ def analytics_endpoint():
         return jsonify({"error": str(e)})
 
 
+@app.route("/insights")
+def insights_endpoint():
+    """Generate 5 actionable daily insights from trading data."""
+    try:
+        settled = [t for t in _TRADE_JOURNAL if t.get("result") is not None]
+        pending = [t for t in _TRADE_JOURNAL if t.get("result") is None]
+        markets_scanned = BOT_STATE.get("last_scan_markets", 0)
+        mispriced_count = BOT_STATE.get("last_scan_mispriced", 0)
+        daily_spent = BOT_STATE.get("daily_spent_usd", 0.0)
+        max_daily = BOT_CONFIG.get("max_daily_usd", 150.0)
+        moonshark_trades = BOT_STATE.get("moonshark_trades_today", [])
+        moonshark_spent = BOT_STATE.get("moonshark_daily_spent", 0.0)
+
+        insights = []
+
+        # If very little data, return "getting started" insights
+        if len(settled) < 3:
+            insights.append({
+                "title": "Scanner Active",
+                "detail": f"Monitoring {markets_scanned} markets across 4 platforms. Found {mispriced_count} mispriced opportunities on last scan.",
+                "trend": "neutral",
+                "action": "Scanning every 60 seconds for arbitrage edges.",
+            })
+            insights.append({
+                "title": "MoonShark Armed",
+                "detail": f"Watching for underdog contracts under 30\u00a2 in close live games. {len(moonshark_trades)} moonshot bets placed today (${moonshark_spent:.2f} spent).",
+                "trend": "neutral",
+                "action": "Will fire when a live underdog has strong momentum signals.",
+            })
+            insights.append({
+                "title": "Waiting for Results",
+                "detail": f"{len(_TRADE_JOURNAL)} total trades placed, {len(pending)} still pending settlement. Need settled trades to generate performance insights.",
+                "trend": "neutral",
+                "action": "Insights will sharpen as more trades settle and patterns emerge.",
+            })
+            pct_used = round(daily_spent / max(0.01, max_daily) * 100, 1)
+            insights.append({
+                "title": "Daily Budget",
+                "detail": f"${daily_spent:.2f} of ${max_daily:.2f} budget used today ({pct_used}%). Smart sizing adjusts bets based on bankroll.",
+                "trend": "positive" if pct_used < 80 else "negative",
+                "action": "Budget resets at midnight UTC each day.",
+            })
+            cat_count = len([c for c, s in _CATEGORY_STATS.items() if (s.get("wins", 0) + s.get("losses", 0)) > 0])
+            insights.append({
+                "title": "Category Learning",
+                "detail": f"Tracking performance across {cat_count} sport categories. Auto-learning adjusts bet sizes as win/loss data accumulates.",
+                "trend": "neutral",
+                "action": "Categories with 70%+ win rate get 1.5x bet sizing boost.",
+            })
+            return jsonify({"insights": insights[:5]})
+
+        # --- Enough data: generate real insights ---
+        candidates = []
+
+        # 1. Best/worst performing sport
+        by_sport = {}
+        for t in settled:
+            sport = t.get("sport_type") or t.get("category") or "other"
+            if sport not in by_sport:
+                by_sport[sport] = {"wins": 0, "losses": 0, "pnl": 0.0, "total": 0}
+            by_sport[sport]["total"] += 1
+            if t["result"] == "win":
+                by_sport[sport]["wins"] += 1
+            elif t["result"] == "loss":
+                by_sport[sport]["losses"] += 1
+            by_sport[sport]["pnl"] += t.get("pnl_usd") or 0
+
+        sports_with_data = {k: v for k, v in by_sport.items() if v["total"] >= 2}
+        if sports_with_data:
+            for k in sports_with_data:
+                s = sports_with_data[k]
+                s["win_rate"] = round(s["wins"] / max(1, s["wins"] + s["losses"]) * 100, 1)
+            best_sport = max(sports_with_data.items(), key=lambda x: x[1]["pnl"])
+            worst_sport = min(sports_with_data.items(), key=lambda x: x[1]["pnl"])
+            bname, bdata = best_sport
+            mult = _category_multiplier("", bname)
+            candidates.append({
+                "title": f"{bname.upper()} is Your Best Sport",
+                "detail": f"{bdata['win_rate']}% win rate across {bdata['total']} trades with ${bdata['pnl']:.2f} P&L. Leading all categories.",
+                "trend": "positive",
+                "action": f"Category multiplier set to {mult}x for {bname.upper()} bet sizing.",
+                "priority": abs(bdata["pnl"]) + 10,
+            })
+            if len(sports_with_data) > 1 and worst_sport[0] != best_sport[0]:
+                wname, wdata = worst_sport
+                wmult = _category_multiplier("", wname)
+                candidates.append({
+                    "title": f"{wname.upper()} Needs Improvement",
+                    "detail": f"{wdata['win_rate']}% win rate with ${wdata['pnl']:.2f} P&L across {wdata['total']} trades.",
+                    "trend": "negative" if wdata["pnl"] < 0 else "neutral",
+                    "action": f"Category multiplier reduced to {wmult}x to limit exposure.",
+                    "priority": abs(wdata["pnl"]) + 5,
+                })
+
+        # 2. Optimal price range
+        price_buckets = [("<70", 0, 69), ("70-74", 70, 74), ("75-79", 75, 79),
+                         ("80-84", 80, 84), ("85-89", 85, 89), ("90-100", 90, 100)]
+        by_price = {}
+        for t in settled:
+            pc = t.get("price_cents") or 0
+            bucket = "<70"
+            for label, lo, hi in price_buckets:
+                if lo <= pc <= hi:
+                    bucket = label
+                    break
+            if bucket not in by_price:
+                by_price[bucket] = {"wins": 0, "losses": 0, "pnl": 0.0, "total": 0}
+            by_price[bucket]["total"] += 1
+            if t["result"] == "win":
+                by_price[bucket]["wins"] += 1
+            elif t["result"] == "loss":
+                by_price[bucket]["losses"] += 1
+            by_price[bucket]["pnl"] += t.get("pnl_usd") or 0
+
+        valid_prices = {k: v for k, v in by_price.items() if v["total"] >= 2}
+        if valid_prices:
+            for k in valid_prices:
+                v = valid_prices[k]
+                v["win_rate"] = round(v["wins"] / max(1, v["wins"] + v["losses"]) * 100, 1)
+            best_price = max(valid_prices.items(), key=lambda x: x[1]["win_rate"])
+            pname, pdata = best_price
+            candidates.append({
+                "title": f"{pname}\u00a2 is the Sweet Spot",
+                "detail": f"{pdata['win_rate']}% win rate in the {pname}\u00a2 range ({pdata['total']} trades, ${pdata['pnl']:.2f} P&L).",
+                "trend": "positive" if pdata["pnl"] > 0 else "neutral",
+                "action": "Smart sizing already weights these higher-confidence ranges.",
+                "priority": pdata["win_rate"] / 10 + 5,
+            })
+
+        # 3. Time of day pattern
+        time_map = {}
+        for t in settled:
+            hour = t.get("entry_hour")
+            if hour is None:
+                continue
+            if 6 <= hour < 12:
+                period = "Morning"
+            elif 12 <= hour < 18:
+                period = "Afternoon"
+            elif 18 <= hour < 24:
+                period = "Evening"
+            else:
+                period = "Night"
+            if period not in time_map:
+                time_map[period] = {"wins": 0, "losses": 0, "pnl": 0.0, "total": 0}
+            time_map[period]["total"] += 1
+            if t["result"] == "win":
+                time_map[period]["wins"] += 1
+            elif t["result"] == "loss":
+                time_map[period]["losses"] += 1
+            time_map[period]["pnl"] += t.get("pnl_usd") or 0
+
+        valid_times = {k: v for k, v in time_map.items() if v["total"] >= 2}
+        if valid_times:
+            for k in valid_times:
+                v = valid_times[k]
+                v["win_rate"] = round(v["wins"] / max(1, v["wins"] + v["losses"]) * 100, 1)
+            best_time = max(valid_times.items(), key=lambda x: x[1]["win_rate"])
+            tname, tdata = best_time
+            candidates.append({
+                "title": f"{tname} Sessions Win Most",
+                "detail": f"{tdata['win_rate']}% win rate during {tname.lower()} hours ({tdata['total']} trades, ${tdata['pnl']:.2f} P&L).",
+                "trend": "positive" if tdata["pnl"] > 0 else "neutral",
+                "action": "Scanner runs 24/7 but edges cluster when more markets are active.",
+                "priority": tdata["win_rate"] / 10 + 3,
+            })
+
+        # 4. MoonShark performance
+        moon_trades = [t for t in _TRADE_JOURNAL if t.get("strategy") == "moonshark"]
+        moon_settled = [t for t in moon_trades if t.get("result") is not None]
+        moon_wins = sum(1 for t in moon_settled if t["result"] == "win")
+        moon_pnl = sum(t.get("pnl_usd", 0) for t in moon_settled)
+        if len(moon_trades) > 0:
+            if moon_wins > 0:
+                candidates.append({
+                    "title": f"MoonShark Hit {moon_wins}x",
+                    "detail": f"{moon_wins} moonshot wins from {len(moon_settled)} settled bets. Total MoonShark P&L: ${moon_pnl:.2f}.",
+                    "trend": "positive",
+                    "action": f"Longshots paying off. {len(moon_trades) - len(moon_settled)} still pending.",
+                    "priority": 15 if moon_wins > 0 else 5,
+                })
+            else:
+                candidates.append({
+                    "title": "MoonShark Hunting",
+                    "detail": f"{len(moon_trades)} moonshot bets placed, {len(moon_settled)} settled, 0 hits yet. P&L: ${moon_pnl:.2f}.",
+                    "trend": "negative" if moon_pnl < -5 else "neutral",
+                    "action": f"{len(moon_trades) - len(moon_settled)} pending \u2014 one big hit can flip MoonShark green.",
+                    "priority": 4,
+                })
+
+        # 5. Win/loss streak
+        recent = sorted(settled, key=lambda t: t.get("entry_time", ""), reverse=True)
+        if len(recent) >= 2:
+            streak_type = recent[0].get("result")
+            streak_count = 0
+            for t in recent:
+                if t.get("result") == streak_type:
+                    streak_count += 1
+                else:
+                    break
+            if streak_count >= 2:
+                if streak_type == "win":
+                    candidates.append({
+                        "title": f"{streak_count}-Trade Win Streak",
+                        "detail": f"Last {streak_count} settled trades were winners. Momentum is strong.",
+                        "trend": "positive",
+                        "action": "Riding the streak \u2014 smart sizing stays disciplined to protect gains.",
+                        "priority": streak_count + 8,
+                    })
+                elif streak_type == "loss":
+                    candidates.append({
+                        "title": f"{streak_count}-Trade Loss Streak",
+                        "detail": f"Last {streak_count} settled trades lost. Variance happens \u2014 expected in high-volume trading.",
+                        "trend": "negative",
+                        "action": "Category multipliers auto-reduce exposure on losing categories.",
+                        "priority": streak_count + 8,
+                    })
+
+        # 6. Daily spending efficiency
+        pct_used = round(daily_spent / max(0.01, max_daily) * 100, 1)
+        trades_today_count = len(BOT_STATE.get("trades_today", []))
+        candidates.append({
+            "title": f"Budget {pct_used}% Deployed",
+            "detail": f"${daily_spent:.2f} of ${max_daily:.2f} daily budget used across {trades_today_count} trades today.",
+            "trend": "positive" if 20 < pct_used < 90 else ("negative" if pct_used >= 90 else "neutral"),
+            "action": "Near-limit days mean lots of edges found. Low days mean tight markets." if pct_used > 50 else "Plenty of room for afternoon/evening markets.",
+            "priority": 6 if pct_used > 10 else 2,
+        })
+
+        # 7. Overall win rate trend
+        total_wins = sum(1 for t in settled if t["result"] == "win")
+        total_losses = sum(1 for t in settled if t["result"] == "loss")
+        overall_wr = round(total_wins / max(1, total_wins + total_losses) * 100, 1)
+        total_pnl = sum(t.get("pnl_usd", 0) for t in settled)
+        candidates.append({
+            "title": f"Overall: {overall_wr}% Win Rate",
+            "detail": f"{total_wins}W / {total_losses}L with ${total_pnl:.2f} total P&L across {len(settled)} settled trades.",
+            "trend": "positive" if overall_wr >= 55 else ("negative" if overall_wr < 45 else "neutral"),
+            "action": "Edge holds above 50%. Category learning tunes sizing to amplify winners.",
+            "priority": 7,
+        })
+
+        # 8. Matching quality / opportunity count
+        candidates.append({
+            "title": f"{mispriced_count} Live Opportunities",
+            "detail": f"Scanner found {mispriced_count} mispriced contracts across {markets_scanned} markets on last sweep.",
+            "trend": "positive" if mispriced_count > 5 else ("neutral" if mispriced_count > 0 else "negative"),
+            "action": "Cross-platform matching surfaces edges invisible to single-exchange traders.",
+            "priority": 3 if mispriced_count > 0 else 1,
+        })
+
+        # Sort by priority descending, take top 5
+        candidates.sort(key=lambda x: x.get("priority", 0), reverse=True)
+        for c in candidates:
+            c.pop("priority", None)
+        insights = candidates[:5]
+
+        return jsonify({"insights": insights})
+    except Exception as e:
+        return jsonify({"error": str(e), "insights": []})
+
+
 _PORTFOLIO_CACHE = {"data": None, "ts": 0}
 _PORTFOLIO_CACHE_TTL = 15  # seconds — serve cached data between refreshes
 
@@ -7986,6 +8248,14 @@ a:hover { color: #7da5f5; }
 <!-- Analytics Tab -->
 <div class="tab-content" id="tab-analytics">
   <div class="section">
+    <!-- Daily Insights Feed -->
+    <div style="margin-bottom:24px">
+      <div style="color:#00d4ff;font-size:14px;font-weight:700;margin-bottom:10px">Daily Insights</div>
+      <div id="daily-insights-feed" style="display:flex;flex-direction:column;gap:8px">
+        <div class="loading">Generating insights...</div>
+      </div>
+    </div>
+
     <!-- Key Insights Summary -->
     <div id="analytics-insights" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin-bottom:20px">
       <div class="loading">Loading analytics...</div>
@@ -8040,7 +8310,7 @@ function switchTab(name) {
   if (name === 'quant') loadQuantPicks();
   if (name === 'seventyfivers') loadSeventyFivers();
   if (name === 'history') loadSettled();
-  if (name === 'analytics') loadAnalytics();
+  if (name === 'analytics') { loadAnalytics(); loadInsights(); }
 }
 
 const API = window.location.origin;
@@ -9903,6 +10173,35 @@ async function checkForNotifications() {
     }
     _lastActivityCount = items.length;
   } catch(e) {}
+}
+
+// --- Daily Insights Feed ---
+async function loadInsights() {
+  try {
+    var data = await fetch(API + '/insights').then(r => r.json());
+    var feed = document.getElementById('daily-insights-feed');
+    if (data.error || !data.insights || data.insights.length === 0) {
+      feed.innerHTML = '<div style="color:#555;font-size:11px;padding:8px">No insights available yet.</div>';
+      return;
+    }
+    var html = '';
+    data.insights.forEach(function(ins) {
+      var icon = ins.trend === 'positive' ? '\uD83D\uDCC8' : ins.trend === 'negative' ? '\uD83D\uDCC9' : '\u27A1\uFE0F';
+      var borderColor = ins.trend === 'positive' ? '#00dc5a' : ins.trend === 'negative' ? '#ff5000' : '#333';
+      html += '<div style="background:#141414;border:1px solid #1f1f1f;border-left:3px solid ' + borderColor + ';border-radius:10px;padding:12px 14px">';
+      html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">';
+      html += '<span style="font-size:16px">' + icon + '</span>';
+      html += '<span style="color:#eee;font-size:13px;font-weight:700">' + ins.title + '</span>';
+      html += '</div>';
+      html += '<div style="color:#aaa;font-size:11px;line-height:1.4;margin-bottom:4px">' + ins.detail + '</div>';
+      html += '<div style="color:#666;font-size:10px;font-style:italic">' + ins.action + '</div>';
+      html += '</div>';
+    });
+    feed.innerHTML = html;
+  } catch(e) {
+    console.error('Insights load error', e);
+    document.getElementById('daily-insights-feed').innerHTML = '<div style="color:#ff5000;font-size:12px">Error loading insights: ' + e.message + '</div>';
+  }
 }
 
 // --- Analytics Tab ---
