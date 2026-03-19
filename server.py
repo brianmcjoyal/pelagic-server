@@ -5732,6 +5732,236 @@ def news_refresh():
         return jsonify({"stories": [], "error": str(e)})
 
 
+# ---------------------------------------------------------------------------
+# News Ideas — market analysis from top global headlines
+# ---------------------------------------------------------------------------
+_NEWS_IDEAS_CACHE = {"ideas": [], "ts": 0}
+_NEWS_IDEAS_TTL = 1800  # 30 minutes
+
+_NEWS_KEYWORD_RULES = [
+    {
+        "category": "interest-rates",
+        "keywords": ["interest rate", "fed ", "federal reserve", "central bank", "rate hike", "rate cut", "monetary policy", "fomc", "powell", "basis point", "bps"],
+        "market_take": "Rate changes directly impact bond prices, bank stocks, and borrowing costs across the economy. Central bank signals move markets before any official decision is made.",
+        "profit_angle": "Look for prediction markets on Fed rate decisions and bet on the direction implied by today's rhetoric.",
+        "sentiment": "neutral",
+        "color": "#5b8def",
+    },
+    {
+        "category": "geopolitics",
+        "keywords": ["war ", "conflict", "military", "troops", "invasion", "missile", "nato", "geopolit", "tensions", "sanction", "nuclear", "attack", "ceasefire", "peace deal"],
+        "market_take": "Geopolitical instability typically drives oil and gold prices up while equities sell off. Defense sector stocks and safe-haven assets tend to outperform during escalation.",
+        "profit_angle": "Look for defense sector and commodity prediction markets that haven't priced in escalation yet.",
+        "sentiment": "bearish",
+        "color": "#ff5000",
+    },
+    {
+        "category": "tech",
+        "keywords": ["tech earn", "layoff", "artificial intelligence", " ai ", "openai", "google", "apple", "microsoft", "meta ", "nvidia", "chip", "semiconductor", "nasdaq", "silicon valley"],
+        "market_take": "Tech sector movements create volatility in NASDAQ and ripple through growth stocks. Earnings beats or misses can shift sentiment across the entire sector.",
+        "profit_angle": "Watch for prediction markets on tech company earnings and stock price targets that lag behind breaking news.",
+        "sentiment": "neutral",
+        "color": "#7b2ff7",
+    },
+    {
+        "category": "trade-policy",
+        "keywords": ["tariff", "trade war", "trade deal", "import duty", "export ban", "trade restrict", "wto ", "trade deficit", "customs", "trade agreement"],
+        "market_take": "Trade restrictions impact import-dependent companies and currencies. Tariff announcements create immediate repricing in affected sectors and trading partners' markets.",
+        "profit_angle": "Look for prediction markets on trade policy outcomes — they often misprice speed of implementation.",
+        "sentiment": "bearish",
+        "color": "#ff8c00",
+    },
+    {
+        "category": "energy",
+        "keywords": ["oil ", "crude", "opec", "energy", "natural gas", "petroleum", "fuel", "gasoline", "pipeline", "drilling", "refiner"],
+        "market_take": "Energy price shifts ripple through transportation, manufacturing, and consumer spending. OPEC decisions can move oil 5-10% in a single session.",
+        "profit_angle": "Watch commodity prediction markets for oil price targets — they lag behind supply-side news.",
+        "sentiment": "neutral",
+        "color": "#e6a800",
+    },
+    {
+        "category": "housing",
+        "keywords": ["housing", "real estate", "mortgage", "home sale", "home price", "rent ", "rental", "property", "foreclosure", "housing start"],
+        "market_take": "Housing data signals consumer confidence and bank exposure to mortgage risk. Weakening housing often precedes broader economic slowdowns.",
+        "profit_angle": "Watch for markets on economic indicators — housing weakness often leads Fed to cut rates.",
+        "sentiment": "neutral",
+        "color": "#20b2aa",
+    },
+    {
+        "category": "jobs",
+        "keywords": ["jobs ", "unemployment", "labor", "nonfarm", "payroll", "hiring", "workforce", "wage", "employment", "jobless", "layoff"],
+        "market_take": "Employment data is a key Fed input. Strong jobs support rate holds, while weak jobs push toward rate cuts — both moves create tradable opportunities.",
+        "profit_angle": "Watch Fed decision markets — jobs data shifts rate-cut probabilities within minutes.",
+        "sentiment": "neutral",
+        "color": "#4682b4",
+    },
+    {
+        "category": "crypto",
+        "keywords": ["crypto", "bitcoin", "btc ", "ethereum", "eth ", "blockchain", "stablecoin", "defi", "token", "binance", "coinbase", "sec crypto"],
+        "market_take": "Crypto volatility creates prediction market opportunities across price targets, regulatory outcomes, and adoption milestones.",
+        "profit_angle": "Look for token price and regulatory outcome markets on Kalshi and Polymarket — crypto news moves fast.",
+        "sentiment": "neutral",
+        "color": "#f7931a",
+    },
+    {
+        "category": "politics",
+        "keywords": ["election", "poll ", "ballot", "vote ", "campaign", "congress", "senate", "democrat", "republican", "president", "governor", "political", "legislation", "bill pass"],
+        "market_take": "Political shifts impact regulation, taxes, and trade policy. Markets price in policy changes before they happen, creating edge for fast movers.",
+        "profit_angle": "Prediction markets on election outcomes can be highly profitable — political news creates mispricing windows.",
+        "sentiment": "neutral",
+        "color": "#dc143c",
+    },
+    {
+        "category": "healthcare",
+        "keywords": ["pharma", "fda ", "drug approv", "biotech", "vaccine", "clinical trial", "health care", "healthcare", "hospital", "medical", "therapeut"],
+        "market_take": "Drug approvals and health policy changes move biotech stocks sharply. FDA decisions are binary events with outsized impact.",
+        "profit_angle": "Watch FDA decision prediction markets — approval/rejection outcomes create massive volatility.",
+        "sentiment": "neutral",
+        "color": "#00c9a7",
+    },
+    {
+        "category": "climate",
+        "keywords": ["climate", "hurricane", "flood", "wildfire", "drought", "earthquake", "storm", "tornado", "natural disaster", "extreme weather", "emissions"],
+        "market_take": "Extreme weather impacts agriculture, insurance, and energy sectors. Natural disasters can disrupt supply chains and spike commodity prices.",
+        "profit_angle": "Look for weather prediction markets on Kalshi — disaster impacts are often underpriced early.",
+        "sentiment": "bearish",
+        "color": "#2e8b57",
+    },
+]
+
+
+def _classify_headline(title):
+    """Match a headline to a category and return market analysis."""
+    title_lower = title.lower()
+    for rule in _NEWS_KEYWORD_RULES:
+        for kw in rule["keywords"]:
+            if kw in title_lower:
+                return rule
+    # Default/general
+    return {
+        "category": "general",
+        "market_take": "Major news events create market volatility and shift trader sentiment. Watch for related prediction markets that may be mispriced as the crowd reacts.",
+        "profit_angle": "Monitor prediction markets in related sectors — breaking news creates brief mispricing windows before odds adjust.",
+        "sentiment": "neutral",
+        "color": "#888",
+    }
+
+
+def _fetch_news_ideas():
+    """Fetch global news from multiple RSS feeds and generate market analysis."""
+    import urllib.request
+    import time as _time
+
+    now = _time.time()
+    if _NEWS_IDEAS_CACHE["ideas"] and (now - _NEWS_IDEAS_CACHE["ts"]) < _NEWS_IDEAS_TTL:
+        return _NEWS_IDEAS_CACHE["ideas"]
+
+    feeds = [
+        # Financial feeds (reuse existing)
+        ("https://feeds.marketwatch.com/marketwatch/topstories/", "MarketWatch"),
+        ("https://www.cnbc.com/id/100003114/device/rss/rss.html", "CNBC"),
+        ("https://finance.yahoo.com/news/rssindex", "Yahoo Finance"),
+        # Global news feeds
+        ("https://feeds.reuters.com/reuters/topNews", "Reuters"),
+        ("https://feeds.bbci.co.uk/news/world/rss.xml", "BBC World"),
+        ("https://rsshub.app/apnews/topics/apf-topnews", "AP News"),
+    ]
+
+    all_stories = []
+    for url, source_name in feeds:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                raw = resp.read()
+            root = ET.fromstring(raw)
+            for item in root.findall(".//item")[:8]:
+                title = item.findtext("title", "").strip()
+                link = item.findtext("link", "").strip()
+                pub = item.findtext("pubDate", "").strip()
+                if title and link:
+                    pub_iso = ""
+                    if pub:
+                        try:
+                            from email.utils import parsedate_to_datetime
+                            dt = parsedate_to_datetime(pub)
+                            pub_iso = dt.isoformat()
+                        except Exception:
+                            pub_iso = pub
+                    all_stories.append({
+                        "headline": html_unescape(title),
+                        "link": link,
+                        "source": source_name,
+                        "published": pub_iso,
+                    })
+        except Exception:
+            continue
+
+    # Sort by published date descending
+    def _sort_key(s):
+        try:
+            return datetime.datetime.fromisoformat(s["published"].replace("Z", "+00:00"))
+        except Exception:
+            return datetime.datetime.min
+    all_stories.sort(key=_sort_key, reverse=True)
+
+    # Deduplicate by similar headlines
+    seen_titles = []
+    unique_stories = []
+    for s in all_stories:
+        dupe = False
+        for seen in seen_titles:
+            if SequenceMatcher(None, s["headline"].lower(), seen).ratio() > 0.6:
+                dupe = True
+                break
+        if not dupe:
+            seen_titles.append(s["headline"].lower())
+            unique_stories.append(s)
+
+    # Take top 10 and classify
+    ideas = []
+    for s in unique_stories[:10]:
+        rule = _classify_headline(s["headline"])
+        ideas.append({
+            "headline": s["headline"],
+            "source": s["source"],
+            "link": s["link"],
+            "published": s["published"],
+            "category": rule["category"],
+            "market_take": rule["market_take"],
+            "profit_angle": rule["profit_angle"],
+            "sentiment": rule.get("sentiment", "neutral"),
+            "color": rule.get("color", "#888"),
+        })
+
+    _NEWS_IDEAS_CACHE["ideas"] = ideas
+    _NEWS_IDEAS_CACHE["ts"] = now
+    return ideas
+
+
+@app.route("/news-ideas")
+def news_ideas_endpoint():
+    """Return top 10 global news stories with market analysis."""
+    try:
+        ideas = _fetch_news_ideas()
+        if not ideas:
+            return jsonify({"ideas": [], "error": "News ideas temporarily unavailable."})
+        return jsonify({"ideas": ideas, "cached_at": _NEWS_IDEAS_CACHE["ts"]})
+    except Exception as e:
+        return jsonify({"ideas": [], "error": f"News ideas unavailable: {str(e)}"})
+
+
+@app.route("/news-ideas/refresh")
+def news_ideas_refresh():
+    """Force refresh news ideas cache."""
+    _NEWS_IDEAS_CACHE["ideas"] = []
+    _NEWS_IDEAS_CACHE["ts"] = 0
+    try:
+        ideas = _fetch_news_ideas()
+        return jsonify({"ideas": ideas, "cached_at": _NEWS_IDEAS_CACHE["ts"]})
+    except Exception as e:
+        return jsonify({"ideas": [], "error": str(e)})
+
+
 _PORTFOLIO_CACHE = {"data": None, "ts": 0}
 _PORTFOLIO_CACHE_TTL = 15  # seconds — serve cached data between refreshes
 
@@ -8311,6 +8541,7 @@ a:hover { color: #7da5f5; }
   <button class="tab" onclick="switchTab('quant')">Quant</button>
   <button class="tab" onclick="switchTab('analytics')" style="color:#00d4ff">Analytics</button>
   <button class="tab" onclick="switchTab('news')" style="color:#ccc">&#x1F4F0; News</button>
+  <button class="tab" onclick="switchTab('newsideas')" style="color:#e6b800">&#x1F4A1; News Ideas</button>
 </div>
 
 <!-- Positions Tab -->
@@ -8549,6 +8780,25 @@ a:hover { color: #7da5f5; }
   </div>
 </div>
 
+<!-- News Ideas Tab -->
+<div class="tab-content" id="tab-newsideas">
+  <div class="section">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+      <div>
+        <div style="color:#e6b800;font-size:16px;font-weight:700">&#x1F4A1; News Ideas</div>
+        <div style="color:#666;font-size:11px;margin-top:2px">Market signals from today's headlines</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <span id="newsideas-updated" style="color:#555;font-size:10px"></span>
+        <button onclick="loadNewsIdeas(true)" style="background:#1a1a20;border:1px solid #3a3520;color:#e6b800;padding:4px 10px;border-radius:6px;font-size:11px;cursor:pointer">Refresh</button>
+      </div>
+    </div>
+    <div id="newsideas-feed" style="display:flex;flex-direction:column;gap:10px">
+      <div class="loading">Analyzing headlines...</div>
+    </div>
+  </div>
+</div>
+
 </div><!-- end container -->
 
 <div class="toast-container" id="toast-container"></div>
@@ -8572,6 +8822,7 @@ function switchTab(name) {
   if (name === 'history') loadSettled();
   if (name === 'analytics') { loadAnalytics(); loadInsights(); }
   if (name === 'news') loadNews();
+  if (name === 'newsideas') loadNewsIdeas();
 }
 
 const API = window.location.origin;
@@ -10769,6 +11020,78 @@ async function loadNews(forceRefresh) {
     }
   } catch(e) {
     feed.innerHTML = '<div style="color:#ff5000;font-size:12px;padding:20px;text-align:center">Failed to load news. Try again later.</div>';
+  }
+}
+
+var _newsIdeasLoaded = false;
+async function loadNewsIdeas(forceRefresh) {
+  var feed = document.getElementById('newsideas-feed');
+  var updEl = document.getElementById('newsideas-updated');
+  if (!forceRefresh && _newsIdeasLoaded) return;
+  feed.innerHTML = '<div class="loading">Analyzing headlines...</div>';
+  try {
+    var url = API + (forceRefresh ? '/news-ideas/refresh' : '/news-ideas');
+    var resp = await fetch(url);
+    var data = await resp.json();
+    if (data.error && (!data.ideas || data.ideas.length === 0)) {
+      feed.innerHTML = '<div style="color:#888;font-size:12px;padding:20px;text-align:center">' + data.error + '</div>';
+      return;
+    }
+    if (!data.ideas || data.ideas.length === 0) {
+      feed.innerHTML = '<div style="color:#888;font-size:12px;padding:20px;text-align:center">No news ideas available right now.</div>';
+      return;
+    }
+    var sentimentEmoji = { bullish: '🟢', bearish: '🔴', neutral: '⚪' };
+    var sentimentLabel = { bullish: 'Bullish', bearish: 'Bearish', neutral: 'Neutral' };
+    var html = '';
+    data.ideas.forEach(function(idea) {
+      var timeAgo = '';
+      if (idea.published) {
+        try {
+          var pub = new Date(idea.published);
+          var diff = Date.now() - pub.getTime();
+          var mins = Math.floor(diff / 60000);
+          var hrs = Math.floor(mins / 60);
+          if (hrs >= 24) timeAgo = Math.floor(hrs / 24) + 'd ago';
+          else if (hrs > 0) timeAgo = hrs + 'h ago';
+          else if (mins > 0) timeAgo = mins + 'm ago';
+          else timeAgo = 'just now';
+        } catch(e) { timeAgo = ''; }
+      }
+      var catColor = idea.color || '#888';
+      var catLabel = idea.category.replace('-', ' ').replace(/\\b\\w/g, function(l) { return l.toUpperCase(); });
+      var sEmoji = sentimentEmoji[idea.sentiment] || '⚪';
+      var sLabel = sentimentLabel[idea.sentiment] || 'Neutral';
+      var sentBg = idea.sentiment === 'bullish' ? 'rgba(0,220,90,0.08)' : idea.sentiment === 'bearish' ? 'rgba(255,80,0,0.08)' : 'rgba(255,255,255,0.04)';
+      var sentColor = idea.sentiment === 'bullish' ? '#00dc5a' : idea.sentiment === 'bearish' ? '#ff5000' : '#888';
+
+      html += '<div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:14px;border-left:3px solid ' + catColor + '">';
+      // Top row: category badge + sentiment badge
+      html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">';
+      html += '<span style="background:' + catColor + '18;color:' + catColor + ';font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;text-transform:uppercase;letter-spacing:0.5px">' + catLabel + '</span>';
+      html += '<span style="background:' + sentBg + ';color:' + sentColor + ';font-size:10px;font-weight:600;padding:2px 8px;border-radius:4px">' + sEmoji + ' ' + sLabel + '</span>';
+      html += '</div>';
+      // Headline
+      html += '<a href="' + idea.link + '" target="_blank" rel="noopener" style="color:#e0e0e0;text-decoration:none;font-size:13px;font-weight:600;line-height:1.4;display:block;margin-bottom:6px">' + idea.headline + '</a>';
+      // Source + time
+      html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">';
+      html += '<span style="color:#666;font-size:10px;font-weight:500">' + idea.source + '</span>';
+      if (timeAgo) html += '<span style="color:#555;font-size:10px">&middot; ' + timeAgo + '</span>';
+      html += '</div>';
+      // Market take
+      html += '<div style="color:#bbb;font-size:12px;line-height:1.5;margin-bottom:8px;padding:8px 10px;background:rgba(255,255,255,0.03);border-radius:6px">' + idea.market_take + '</div>';
+      // Profit angle
+      html += '<div style="color:#00dc5a;font-size:12px;font-weight:600;line-height:1.4;padding:6px 10px;background:rgba(0,220,90,0.06);border-radius:6px;border:1px solid rgba(0,220,90,0.12)">&#x1F4B0; ' + idea.profit_angle + '</div>';
+      html += '</div>';
+    });
+    feed.innerHTML = html;
+    _newsIdeasLoaded = true;
+    if (data.cached_at) {
+      var ago = Math.floor((Date.now() / 1000 - data.cached_at) / 60);
+      updEl.textContent = ago <= 0 ? 'Updated just now' : 'Updated ' + ago + 'm ago';
+    }
+  } catch(e) {
+    feed.innerHTML = '<div style="color:#ff5000;font-size:12px;padding:20px;text-align:center">Failed to load news ideas. Try again later.</div>';
   }
 }
 </script>
