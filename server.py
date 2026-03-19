@@ -1231,6 +1231,36 @@ DISTINGUISHING_CATEGORIES = {
     },
 }
 
+# Words that indicate the ACTION/OUTCOME type of a prediction market question
+_ACTION_VERBS = {
+    "win", "wins", "winning", "lose", "loses", "beat", "beats",
+    "release", "releases", "launch", "launches", "announce", "announces",
+    "attend", "attends", "visit", "visits", "sign", "signs",
+    "resign", "resigns", "fire", "fires", "fired", "hire", "hires",
+    "ipo", "merge", "merges", "acquire", "acquires", "buy", "buys",
+    "sell", "sells", "ban", "bans", "pass", "passes",
+    "approve", "approves", "veto", "vetoes", "confirm", "confirms",
+    "invade", "invades", "attack", "attacks", "strike", "strikes",
+    "elect", "elected", "nominate", "nominated", "appoint", "appointed",
+    "score", "scores", "hit", "hits", "reach", "reaches",
+    "default", "defaults", "collapse", "collapses",
+    "die", "dies", "arrest", "arrested", "indict", "indicted",
+    "convict", "convicted", "impeach", "impeached",
+    "drop", "drops", "rise", "rises", "fall", "falls",
+    "tweet", "tweets", "post", "posts", "say", "says",
+    "trade", "traded", "trades", "draft", "drafted",
+    "start", "starts", "end", "ends", "close", "closes", "open", "opens",
+    "lead", "leads", "leader", "head", "president", "governor", "mayor",
+    "champion", "championship", "mvp", "award", "awards",
+    "album", "song", "movie", "film", "show", "book",
+    "token", "coin", "airdrop",
+}
+
+# Sport team names and identifiers for sports-specific matching
+_SPORT_LEAGUES = {"nba", "nfl", "mlb", "nhl", "ufc", "mls", "wnba",
+                  "ncaa", "pga", "f1", "nascar", "atp", "wta", "fifa",
+                  "epl", "premier", "league", "serie", "bundesliga", "ligue"}
+
 
 def normalize_question(q):
     q = q.lower()
@@ -1259,9 +1289,148 @@ def keyword_overlap(a, b):
     return len(intersection) / min(len(set_a), len(set_b))
 
 
+def _extract_entities(raw_q):
+    """Extract named entities (people, companies, teams) from a question.
+    Returns a set of lowercase multi-word entity strings AND individual tokens.
+    Groups consecutive capitalized words into phrases (e.g. 'Jorge Rodriguez').
+    This way 'Jorge Rodriguez' != 'Delcy Rodriguez' because the full-name
+    entities differ even though they share a last name."""
+    words = raw_q.split()
+    entities = set()
+    current_phrase = []
+    _skip_starts = {"will", "what", "when", "where", "who", "how", "is", "are",
+                    "does", "do", "can", "should", "if", "the", "a", "an"}
+
+    for i, w in enumerate(words):
+        clean = re.sub(r"[^a-zA-Z0-9']", "", w)
+        if not clean or len(clean) <= 1:
+            # Flush any accumulated phrase
+            if current_phrase:
+                entities.add(" ".join(current_phrase))
+                current_phrase = []
+            continue
+        is_cap = clean[0].isupper() and clean.lower() not in STOP_WORDS
+        # Skip sentence-start common words
+        if i == 0 and clean.lower() in _skip_starts:
+            is_cap = False
+        if is_cap:
+            current_phrase.append(clean.lower())
+        else:
+            if current_phrase:
+                entities.add(" ".join(current_phrase))
+                current_phrase = []
+    if current_phrase:
+        entities.add(" ".join(current_phrase))
+
+    # Also add individual words from multi-word entities for partial matching
+    multi_words = [e for e in entities if " " in e]
+    for mw in multi_words:
+        for part in mw.split():
+            entities.add(part)
+
+    return entities
+
+
+def _extract_timeframe(raw_q):
+    """Extract date/deadline from a question. Returns a (year, month, day) tuple
+    or None. Partial dates return what's available, e.g. (2026, None, None)."""
+    q = raw_q.lower()
+    # Pattern: "by/before/in/on March 31, 2026" or "2026" alone
+    # Month name + day + year
+    m = re.search(r'(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:\s*,)?\s*(\d{4})', q)
+    if m:
+        month_map = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+                     "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
+        mon_str = m.group(1)[:3]
+        return (int(m.group(3)), month_map.get(mon_str, 0), int(m.group(2)))
+    # Month name + year (no day)
+    m = re.search(r'(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{4})', q)
+    if m:
+        month_map = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+                     "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
+        mon_str = m.group(1)[:3]
+        return (int(m.group(2)), month_map.get(mon_str, 0), None)
+    # "Q1/Q2/Q3/Q4 2026"
+    m = re.search(r'q([1-4])\s*(\d{4})', q)
+    if m:
+        quarter = int(m.group(1))
+        quarter_end_month = quarter * 3
+        return (int(m.group(2)), quarter_end_month, None)
+    # Bare year: "in 2026" or "2026" or "before 2027"
+    m = re.search(r'\b(20\d{2})\b', q)
+    if m:
+        return (int(m.group(1)), None, None)
+    return None
+
+
+def _timeframes_compatible(tf_a, tf_b):
+    """Check if two timeframes are compatible for arbitrage matching.
+    Both must refer to essentially the same deadline."""
+    if tf_a is None or tf_b is None:
+        # If neither has a timeframe, that's fine (both open-ended)
+        # If only one has a timeframe, penalize but don't block
+        return tf_a is None and tf_b is None
+    year_a, mon_a, day_a = tf_a
+    year_b, mon_b, day_b = tf_b
+    # Years must match
+    if year_a != year_b:
+        return False
+    # If both have months, they must match (or be within 1 month)
+    if mon_a is not None and mon_b is not None:
+        if abs(mon_a - mon_b) > 1:
+            return False
+        # If both have days and months match, days must be close
+        if mon_a == mon_b and day_a is not None and day_b is not None:
+            if abs(day_a - day_b) > 7:
+                return False
+    return True
+
+
+def _extract_actions(raw_q):
+    """Extract action/outcome words from a question."""
+    q_clean = re.sub(r"[^a-z0-9\s]", "", raw_q.lower())
+    tokens = set(q_clean.split())
+    return tokens & _ACTION_VERBS
+
+
+def _is_sports_market(raw_q):
+    """Check if a question is about sports."""
+    q_lower = raw_q.lower()
+    tokens = set(re.sub(r"[^a-z0-9\s]", "", q_lower).split())
+    return bool(tokens & _SPORT_LEAGUES)
+
+
+def _sports_compatible(raw_a, raw_b):
+    """For sports markets, check that the same teams and outcome type match."""
+    ents_a = _extract_entities(raw_a)
+    ents_b = _extract_entities(raw_b)
+    # Remove sport league names from entity sets — we want team/player names
+    ents_a -= _SPORT_LEAGUES
+    ents_b -= _SPORT_LEAGUES
+    if not ents_a or not ents_b:
+        return True  # Can't tell, don't block
+    # At least 50% of entities from the shorter set must appear in the longer
+    smaller = ents_a if len(ents_a) <= len(ents_b) else ents_b
+    larger = ents_b if len(ents_a) <= len(ents_b) else ents_a
+    overlap = smaller & larger
+    if len(overlap) < len(smaller) * 0.5:
+        return False
+    return True
+
+
 def similarity(a, b, raw_a="", raw_b=""):
-    cats_a = extract_categories(raw_a or a)
-    cats_b = extract_categories(raw_b or b)
+    """Compute similarity between two normalized questions.
+    Returns a float 0-1. Uses category checks, entity matching, timeframe
+    validation, action matching, and keyword overlap to minimize false positives.
+
+    Also sets a _last_match_details dict on the function for quality scoring.
+    """
+    ra = raw_a or a
+    rb = raw_b or b
+
+    # ── Category check (existing) ──
+    cats_a = extract_categories(ra)
+    cats_b = extract_categories(rb)
     penalty = 1.0
     for cat in cats_a:
         if cat in cats_b and not (cats_a[cat] & cats_b[cat]):
@@ -1272,13 +1441,118 @@ def similarity(a, b, raw_a="", raw_b=""):
         b_has = cat in cats_b
         if a_has != b_has:
             penalty *= 0.7
+
+    # ── Entity check — both questions must be about the same subject ──
+    ents_a = _extract_entities(ra)
+    ents_b = _extract_entities(rb)
+    if ents_a and ents_b:
+        # Multi-word entities (full names) are the strongest signal
+        multi_a = {e for e in ents_a if " " in e}
+        multi_b = {e for e in ents_b if " " in e}
+        # If both have full names, at least one must match
+        if multi_a and multi_b:
+            if not (multi_a & multi_b):
+                return 0  # "Jorge Rodriguez" != "Delcy Rodriguez"
+        # Check overlap of all entity tokens
+        overlap = ents_a & ents_b
+        if not overlap:
+            return 0
+        smaller_ent = min(len(ents_a), len(ents_b))
+        ent_ratio = len(overlap) / smaller_ent if smaller_ent > 0 else 0
+        if ent_ratio < 0.5:
+            penalty *= 0.3
+
+    # ── Action/outcome check ──
+    acts_a = _extract_actions(ra)
+    acts_b = _extract_actions(rb)
+    if acts_a and acts_b:
+        # If both have action verbs but share none, likely different questions
+        if not (acts_a & acts_b):
+            # Check for synonyms: win/beat, launch/release, etc.
+            _synonyms = [
+                {"win", "wins", "winning", "beat", "beats", "champion", "championship"},
+                {"launch", "launches", "release", "releases"},
+                {"resign", "resigns", "fire", "fires", "fired"},
+                {"ipo"},
+                {"elect", "elected", "win", "wins"},
+                {"leader", "head", "president"},
+                {"album", "song"},
+                {"movie", "film"},
+                {"token", "coin", "airdrop"},
+                {"attend", "attends", "visit", "visits"},
+                {"ban", "bans"},
+                {"approve", "approves", "pass", "passes"},
+            ]
+            synonym_match = False
+            for syn_group in _synonyms:
+                if (acts_a & syn_group) and (acts_b & syn_group):
+                    synonym_match = True
+                    break
+            if not synonym_match:
+                penalty *= 0.2  # heavy penalty for different actions
+
+    # ── Timeframe check ──
+    tf_a = _extract_timeframe(ra)
+    tf_b = _extract_timeframe(rb)
+    if tf_a is not None and tf_b is not None:
+        if not _timeframes_compatible(tf_a, tf_b):
+            return 0  # Different deadlines = NOT the same bet
+
+    # One has timeframe, other doesn't — mild penalty
+    if (tf_a is None) != (tf_b is None):
+        penalty *= 0.85
+
+    # ── Sports-specific check ──
+    if _is_sports_market(ra) or _is_sports_market(rb):
+        if not _sports_compatible(ra, rb):
+            return 0
+
+    # ── Base similarity scores ──
     seq = SequenceMatcher(None, a, b).ratio()
     kw = keyword_overlap(a, b)
-    if kw < 0.3:
+
+    # Stricter cutoffs
+    if kw < 0.5:
         return 0
-    if seq < 0.25:
+    if seq < 0.35:
         return 0
-    return (seq * 0.4 + kw * 0.6) * penalty
+
+    raw_score = (seq * 0.4 + kw * 0.6) * penalty
+
+    # ── Store match details for quality scoring ──
+    ent_overlap = len(ents_a & ents_b) / max(1, min(len(ents_a), len(ents_b))) if (ents_a and ents_b) else (1.0 if not ents_a and not ents_b else 0.5)
+    act_overlap = len(acts_a & acts_b) / max(1, min(len(acts_a), len(acts_b))) if (acts_a and acts_b) else (1.0 if not acts_a and not acts_b else 0.5)
+    tf_compat = 1.0 if _timeframes_compatible(tf_a, tf_b) else 0.0
+    similarity._last_match_details = {
+        "seq_ratio": round(seq, 3),
+        "kw_overlap": round(kw, 3),
+        "entity_overlap": round(ent_overlap, 3),
+        "action_overlap": round(act_overlap, 3),
+        "timeframe_compatible": tf_compat,
+        "penalty": round(penalty, 3),
+    }
+
+    return raw_score
+
+
+def match_quality_score(sim_score, details=None):
+    """Compute a 0-100 match quality score for an opportunity.
+    Uses the similarity score plus sub-component details."""
+    if details is None:
+        details = getattr(similarity, '_last_match_details', {})
+    if not details:
+        return int(min(100, sim_score * 100))
+
+    # Weighted components
+    score = 0
+    score += details.get("seq_ratio", 0) * 15         # 0-15 for sequence match
+    score += details.get("kw_overlap", 0) * 25         # 0-25 for keyword overlap
+    score += details.get("entity_overlap", 0) * 25     # 0-25 for entity match
+    score += details.get("action_overlap", 0) * 15     # 0-15 for action match
+    score += details.get("timeframe_compatible", 0) * 15  # 0-15 for timeframe
+    score += (1.0 if details.get("penalty", 1.0) >= 0.9 else 0.5) * 5  # 0-5 for no penalties
+
+    return int(min(100, max(0, score)))
 
 # ---------------------------------------------------------------------------
 # Arbitrage scanner (existing)
@@ -1312,7 +1586,7 @@ def _candidate_pairs(entries, keyword_index, min_shared=2):
                 yield i, j
 
 
-def find_opportunities(all_markets, min_similarity=0.55, max_cost=0.98):
+def find_opportunities(all_markets, min_similarity=0.85, max_cost=0.98):
     entries = []
     for m in all_markets:
         nq = normalize_question(m["question"])
@@ -1338,6 +1612,9 @@ def find_opportunities(all_markets, min_similarity=0.55, max_cost=0.98):
         sim = similarity(nq_a, nq_b, a["question"], b["question"])
         if sim < min_similarity:
             continue
+        # Capture match quality details before they get overwritten
+        details = getattr(similarity, '_last_match_details', {}).copy()
+        quality = match_quality_score(sim, details)
         seen.add(pair_key)
 
         fee_a = PLATFORM_FEES.get(a["platform"], 0)
@@ -1361,6 +1638,7 @@ def find_opportunities(all_markets, min_similarity=0.55, max_cost=0.98):
             "question_a": a["question"],
             "question_b": b["question"],
             "similarity": round(sim, 3),
+            "match_quality": quality,
             "buy_yes": {"platform": buy_yes_platform["platform"], "price": buy_yes_platform["yes"], "url": buy_yes_platform["url"]},
             "buy_no":  {"platform": buy_no_platform["platform"],  "price": buy_no_platform["no"],  "url": buy_no_platform["url"]},
             "cost": round(cost, 4),
@@ -1432,10 +1710,12 @@ def find_consensus_mispricings(all_markets):
         for idx_o in candidates:
             nq_o, om = others[idx_o]
             sim = similarity(nq_k, nq_o, km["question"], om["question"])
-            if sim >= 0.40:
+            if sim >= 0.75:
                 if om["yes"] < 0.03 or om["yes"] > 0.97:
                     continue
-                matches.append({"platform": om["platform"], "yes": om["yes"], "similarity": round(sim, 3)})
+                details = getattr(similarity, '_last_match_details', {}).copy()
+                quality = match_quality_score(sim, details)
+                matches.append({"platform": om["platform"], "yes": om["yes"], "similarity": round(sim, 3), "match_quality": quality})
 
         if len(matches) < min_plats:
             continue
@@ -1456,6 +1736,7 @@ def find_consensus_mispricings(all_markets):
             signal = "buy_no"
             price_cents = int(km["no"] * 100)
 
+        avg_quality = int(sum(m["match_quality"] for m in matches) / len(matches)) if matches else 0
         mispricings.append({
             "kalshi_ticker": km["id"],
             "kalshi_question": km["question"],
@@ -1466,6 +1747,7 @@ def find_consensus_mispricings(all_markets):
             "signal": signal,
             "price_cents": price_cents,
             "matching_platforms": matches,
+            "match_quality": avg_quality,
         })
 
     mispricings.sort(key=lambda x: x["deviation"], reverse=True)
@@ -4656,7 +4938,7 @@ def markets_all():
 
 @app.route("/opportunities")
 def opportunities():
-    min_sim = float(request.args.get("min_similarity", 0.55))
+    min_sim = float(request.args.get("min_similarity", 0.85))
     max_cost = float(request.args.get("max_cost", 0.98))
     all_markets = fetch_all_markets()
     opps = find_opportunities(all_markets, min_similarity=min_sim, max_cost=max_cost)
@@ -6393,12 +6675,15 @@ def _generate_picks():
         for idx_o in candidates:
             nq_o, om = other_markets[idx_o]
             sim = similarity(nq_k, nq_o, km["question"], om["question"])
-            if sim >= 0.40:
+            if sim >= 0.75:
                 if om["yes"] < 0.03 or om["yes"] > 0.97:
                     continue
+                details = getattr(similarity, '_last_match_details', {}).copy()
+                quality = match_quality_score(sim, details)
                 matches.append({
                     "platform": om["platform"], "yes": om["yes"], "no": om["no"],
                     "similarity": round(sim, 3), "volume": om.get("volume", 0),
+                    "match_quality": quality,
                 })
         if not matches:
             continue
@@ -6474,6 +6759,7 @@ def _generate_picks():
             "potential_profit_usd": potential,
             "confidence": confidence,
             "platform_count": len(matches),
+            "match_quality": int(sum(m.get("match_quality", 50) for m in matches) / len(matches)) if matches else 0,
             "win_probability": round(win_prob, 4),
             "real_win_likelihood": round(real_win, 4),
             "score": round(score, 4),
@@ -6487,7 +6773,7 @@ def _generate_picks():
 
     # ── Strategy 2: Arbitrage pairs ──
     existing_tickers = {p["kalshi_ticker"] for p in picks}
-    opps = find_opportunities(all_markets, min_similarity=0.50, max_cost=1.0)
+    opps = find_opportunities(all_markets, min_similarity=0.85, max_cost=1.0)
     for opp in opps[:20]:
         buy_yes = opp["buy_yes"]
         buy_no = opp["buy_no"]
@@ -6506,9 +6792,9 @@ def _generate_picks():
         # Find matching Kalshi market ticker
         ticker = ""
         for nq_k, km in kalshi_markets:
-            if similarity(nq_k, normalize_question(opp["question_a"]), km["question"], opp["question_a"]) > 0.5:
+            if similarity(nq_k, normalize_question(opp["question_a"]), km["question"], opp["question_a"]) > 0.75:
                 ticker = km["id"]; matched_km = km; break
-            if similarity(nq_k, normalize_question(opp["question_b"]), km["question"], opp["question_b"]) > 0.5:
+            if similarity(nq_k, normalize_question(opp["question_b"]), km["question"], opp["question_b"]) > 0.75:
                 ticker = km["id"]; matched_km = km; break
         if not ticker or ticker in existing_tickers:
             continue
@@ -6590,12 +6876,14 @@ def _generate_picks():
         for idx_o in candidates:
             nq_o, om = other_markets[idx_o]
             sim = similarity(nq_k, nq_o, km["question"], om["question"])
-            if sim >= 0.40:
+            if sim >= 0.75:
                 if om["yes"] < 0.03 or om["yes"] > 0.97:
                     continue
+                details = getattr(similarity, '_last_match_details', {}).copy()
+                quality = match_quality_score(sim, details)
                 xplat_matches.append({
                     "platform": om["platform"], "yes": om["yes"],
-                    "similarity": round(sim, 3),
+                    "similarity": round(sim, 3), "match_quality": quality,
                 })
 
         has_xplat = len(xplat_matches) > 0
