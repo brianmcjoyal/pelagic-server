@@ -69,6 +69,7 @@ BOT_CONFIG = {
     "scan_interval_seconds": 60,  # 60s scan interval
     "max_category_exposure": 3,   # max 3 positions per category — diversified
     "blocked_categories": ["weather"],  # categories to never trade
+    "moonshark_enabled": True,  # MoonShark longshot sniper toggle
 }
 
 BOT_STATE = {
@@ -122,6 +123,10 @@ def _save_state():
             "snipe_daily_spent": BOT_STATE.get("snipe_daily_spent", 0.0),
             "snipe_trades_today": BOT_STATE.get("snipe_trades_today", []),
             "snipe_date": BOT_STATE.get("snipe_date"),
+            # Persist MoonShark daily counters
+            "moonshark_daily_spent": BOT_STATE.get("moonshark_daily_spent", 0.0),
+            "moonshark_trades_today": BOT_STATE.get("moonshark_trades_today", []),
+            "moonshark_date": BOT_STATE.get("moonshark_date"),
             # Timestamp for date-check on load
             "save_date": datetime.datetime.utcnow().strftime("%Y-%m-%d"),
         }
@@ -154,6 +159,10 @@ def _load_state():
             BOT_STATE["snipe_daily_spent"] = data.get("snipe_daily_spent", 0.0)
             BOT_STATE["snipe_trades_today"] = data.get("snipe_trades_today", [])
             BOT_STATE["snipe_date"] = today_str
+            # Restore MoonShark counters for same-day
+            BOT_STATE["moonshark_daily_spent"] = data.get("moonshark_daily_spent", 0.0)
+            BOT_STATE["moonshark_trades_today"] = data.get("moonshark_trades_today", [])
+            BOT_STATE["moonshark_date"] = today_str
         else:
             # New day — reset all daily counters
             BOT_STATE["trades_today"] = []
@@ -162,6 +171,9 @@ def _load_state():
             BOT_STATE["snipe_daily_spent"] = 0.0
             BOT_STATE["snipe_trades_today"] = []
             BOT_STATE["snipe_date"] = today_str
+            BOT_STATE["moonshark_daily_spent"] = 0.0
+            BOT_STATE["moonshark_trades_today"] = []
+            BOT_STATE["moonshark_date"] = today_str
 
         # --- Cumulative data: always restore regardless of day ---
         saved_journal = data.get("trade_journal", [])
@@ -2026,6 +2038,17 @@ BOT_STATE["snipe_wins"] = 0
 BOT_STATE["snipe_losses"] = 0
 BOT_STATE["snipe_profit_usd"] = 0.0
 
+# MoonShark settings — longshot underdog sniper (10-30c contracts, high payout)
+MOONSHARK_MIN_PRICE = 10   # cents — buy cheap contracts at 10c+
+MOONSHARK_MAX_PRICE = 30   # cents — cap at 30c (still a longshot)
+MOONSHARK_BET_USD = 2.50   # small bets — most will lose
+MOONSHARK_MAX_DAILY = 20.0  # max $20/day on MoonShark
+MOONSHARK_MAX_TRADES = 8    # max 8 MoonShark trades per day
+
+BOT_STATE["moonshark_trades_today"] = []
+BOT_STATE["moonshark_daily_spent"] = 0.0
+BOT_STATE["moonshark_date"] = None
+
 def live_game_snipe():
     """Scan LIVE SPORTS markets for high-probability outcomes (70-90c).
     Strategy: only live sports + vetted short-term markets with volume.
@@ -2324,6 +2347,290 @@ def live_game_snipe():
         total_potential = sum(s["potential"] for s in snipes)
         _log_activity(f"🎯 Sniper round: {len(snipes)} trades, ${total_cost:.2f} invested, potential +${total_potential:.2f}", "success")
         # Persist updated journal & snipe counters after snipe round
+        _save_state()
+
+    return snipes
+
+
+# ---------------------------------------------------------------------------
+# MoonShark — Longshot Underdog Sniper (10-30c contracts)
+# ---------------------------------------------------------------------------
+
+def moonshark_snipe():
+    """Scan LIVE SPORTS markets for cheap longshot contracts (10-30c).
+    Strategy: small bets on underdog outcomes in liquid, closing-soon markets.
+    Profit: 70-90c per contract on settlement (rare but huge)."""
+    if not BOT_CONFIG.get("enabled"):
+        return []
+    if not BOT_CONFIG.get("moonshark_enabled", True):
+        return []
+
+    # Daily reset check
+    today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+    if BOT_STATE.get("moonshark_date") != today:
+        BOT_STATE["moonshark_date"] = today
+        BOT_STATE["moonshark_trades_today"] = []
+        BOT_STATE["moonshark_daily_spent"] = 0.0
+
+    if BOT_STATE["moonshark_daily_spent"] >= MOONSHARK_MAX_DAILY:
+        return []
+
+    if len(BOT_STATE.get("moonshark_trades_today", [])) >= MOONSHARK_MAX_TRADES:
+        return []
+
+    # Check balance
+    bal = 0
+    try:
+        bal_h = signed_headers("GET", "/portfolio/balance")
+        bal_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
+                             headers=bal_h, timeout=TIMEOUT)
+        if bal_r.ok:
+            bal = bal_r.json().get("balance", 0) / 100
+            if bal < BOT_CONFIG.get("min_balance_usd", 200):
+                return []
+    except Exception:
+        return []
+
+    # Get existing position tickers and events to avoid doubling down
+    existing_tickers = set()
+    existing_events = set()
+    try:
+        positions = check_position_prices()
+        for p in positions:
+            existing_tickers.add(p.get("ticker", ""))
+            parts = p.get("ticker", "").split("-")
+            if parts:
+                existing_events.add(parts[0])
+    except Exception:
+        pass
+
+    snipes = []
+
+    # Scan LIVE sports games + markets closing within 24h
+    scan_sources = []
+    for series in LIVE_GAME_SERIES:
+        scan_sources.append({"series_ticker": series})
+    close_cutoff = (datetime.datetime.utcnow() + datetime.timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    scan_sources.append({"close_time_max": close_cutoff, "status": "open"})
+
+    for source_params in scan_sources:
+        if BOT_STATE["moonshark_daily_spent"] >= MOONSHARK_MAX_DAILY:
+            break
+        if len(BOT_STATE.get("moonshark_trades_today", [])) >= MOONSHARK_MAX_TRADES:
+            break
+
+        try:
+            mh = signed_headers("GET", "/markets")
+            params = {"limit": 200, "status": "open"}
+            params.update(source_params)
+            resp = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + "/markets",
+                headers=mh,
+                params=params,
+                timeout=8,
+            )
+            if not resp.ok:
+                continue
+
+            markets = resp.json().get("markets", [])
+
+            # Sort so closing-soon markets get priority
+            def _close_sort(m):
+                ct = m.get("close_time", "")
+                if not ct:
+                    return 99999
+                try:
+                    cd = datetime.datetime.fromisoformat(ct.replace("Z", "+00:00")).replace(tzinfo=None)
+                    return max(0, (cd - datetime.datetime.utcnow()).total_seconds() / 60)
+                except Exception:
+                    return 99999
+            markets.sort(key=_close_sort)
+
+            for mkt in markets:
+                ticker = mkt.get("ticker", "")
+                title = mkt.get("title", "")
+
+                # Skip if we already hold this ticker or event
+                if ticker in existing_tickers:
+                    continue
+                event_key = ticker.split("-")[0] if ticker else ""
+                if event_key in existing_events:
+                    continue
+
+                # Block banned categories
+                blocked = BOT_CONFIG.get("blocked_categories", [])
+                mcat = classify_market_category(title, ticker)
+                if mcat in blocked:
+                    continue
+
+                # Block known junk keywords
+                title_lower = title.lower()
+                _MOONSHARK_BLOCKED_KEYWORDS = [
+                    "netflix", "spotify", "billboard", "top song", "top artist",
+                    "youtube", "subscribers", "ishowspeed", "tiktok", "instagram",
+                    "nuclear fusion", "title holder", "featherweight", "bantamweight",
+                    "flyweight", "middleweight", "welterweight", "lightweight",
+                    "heavyweight", "pga tour major", "ballon d'or", "fields medal",
+                    "temperature", "weather", "rainfall", "snow", "hurricane",
+                    "tornado", "fahrenheit", "celsius", "highest temp", "lowest temp",
+                    "gas price", "oil price", "wti", "brent",
+                    "truth social", "tweets", "followers",
+                ]
+                if any(kw in title_lower for kw in _MOONSHARK_BLOCKED_KEYWORDS):
+                    continue
+
+                # Only allow vetted categories
+                _ALLOWED_CATEGORIES = ["tennis", "nba", "nfl", "nhl", "mlb", "soccer", "mma"]
+
+                # WHITELIST: Only bet on major league ticker prefixes
+                _ALLOWED_TICKER_PREFIXES = [
+                    "KXMLBGAME", "KXNBAGAME", "KXNHLGAME", "KXNFLGAME",
+                    "KXSOCCERGAME",
+                    "KXATPMATCH", "KXWTAMATCH", "KXATPCHALLENGERMATCH",
+                    "KXUFCFIGHT",
+                    "KXAFLGAME",
+                ]
+                # BLACKLIST: Block minor/foreign leagues and esports
+                _BLOCKED_TICKER_PREFIXES = [
+                    "KXKHLGAME", "KXVTBGAME", "KXCS2GAME", "KXVALGAME",
+                    "KXDOTAGAME", "KXLOLGAME", "KXCOD",
+                    "KXCRICKET", "KXKABADDI",
+                ]
+                t_upper = ticker.upper()
+                if any(t_upper.startswith(bp) for bp in _BLOCKED_TICKER_PREFIXES):
+                    continue
+                if "series_ticker" not in source_params:
+                    is_whitelisted = any(t_upper.startswith(wp) for wp in _ALLOWED_TICKER_PREFIXES)
+                    if not is_whitelisted and mcat not in _ALLOWED_CATEGORIES:
+                        continue
+
+                # Volume check — higher minimum for MoonShark (want liquid markets)
+                mkt_volume = mkt.get("volume", 0) or 0
+                if mkt_volume < 100:
+                    continue
+
+                # Must close within 24h
+                close_time_str = mkt.get("close_time", "")
+                if close_time_str:
+                    try:
+                        close_dt_chk = datetime.datetime.fromisoformat(close_time_str.replace("Z", "+00:00")).replace(tzinfo=None)
+                        hours_to_close = (close_dt_chk - datetime.datetime.utcnow()).total_seconds() / 3600
+                        if hours_to_close > 24:
+                            continue
+                    except Exception:
+                        pass
+
+                # Parse prices
+                yes_ask = None
+                no_ask = None
+                try:
+                    ya = mkt.get("yes_ask_dollars") or mkt.get("yes_ask")
+                    if ya:
+                        yes_ask = int(round(float(str(ya)) * 100))
+                    na = mkt.get("no_ask_dollars") or mkt.get("no_ask")
+                    if na:
+                        no_ask = int(round(float(str(na)) * 100))
+                except Exception:
+                    continue
+
+                # Find the cheap longshot side (10-30c)
+                side = None
+                price = None
+                if yes_ask and MOONSHARK_MIN_PRICE <= yes_ask <= MOONSHARK_MAX_PRICE:
+                    side = "yes"
+                    price = yes_ask
+                elif no_ask and MOONSHARK_MIN_PRICE <= no_ask <= MOONSHARK_MAX_PRICE:
+                    side = "no"
+                    price = no_ask
+
+                if not side:
+                    continue
+
+                # Check daily limits
+                if BOT_STATE["moonshark_daily_spent"] >= MOONSHARK_MAX_DAILY:
+                    break
+                if len(BOT_STATE.get("moonshark_trades_today", [])) >= MOONSHARK_MAX_TRADES:
+                    break
+
+                # SAFETY: check total spending across ALL strategies vs cash
+                total_daily = (BOT_STATE.get("daily_spent_usd", 0)
+                               + BOT_STATE.get("snipe_daily_spent", 0)
+                               + BOT_STATE["moonshark_daily_spent"])
+                if total_daily >= BOT_CONFIG["max_daily_usd"]:
+                    break
+
+                # Calculate quantity — fixed small bet for longshots
+                count = max(1, int(MOONSHARK_BET_USD * 100 / price))
+                cost_usd = (price * count) / 100.0
+
+                if BOT_STATE["moonshark_daily_spent"] + cost_usd > MOONSHARK_MAX_DAILY:
+                    continue
+
+                # Potential profit — the whole point of longshots
+                profit_per = 100 - price  # cents profit per contract if we win
+                expected_profit = profit_per * count / 100.0
+
+                # Vetting log
+                reasons = []
+                reasons.append(f"cat={mcat}")
+                reasons.append(f"vol={mkt_volume}")
+                reasons.append(f"payout={profit_per}c/contract")
+                vetting = " | ".join(reasons)
+
+                _log_activity(
+                    f"MOONSHARK: {side.upper()} {ticker} @ {price}c x{count} "
+                    f"(${cost_usd:.2f}) potential +${expected_profit:.2f} | {title[:40]} [{vetting}]",
+                    "info"
+                )
+
+                result = place_kalshi_order(ticker, side, price, count=count)
+                success = "error" not in result
+
+                if success:
+                    order_data = result.get("order", {})
+                    filled = 0
+                    try:
+                        filled = int(float(str(order_data.get("filled_count_fp") or order_data.get("filled_count") or 0)))
+                    except Exception:
+                        pass
+
+                    if filled > 0:
+                        actual_cost = (price * filled) / 100.0
+                        potential = (100 - price) * filled / 100.0
+                        BOT_STATE["moonshark_daily_spent"] += actual_cost
+                        BOT_STATE["moonshark_trades_today"].append({
+                            "ticker": ticker, "title": title, "side": side,
+                            "price": price, "count": filled, "cost": actual_cost,
+                            "potential_profit": potential,
+                            "time": datetime.datetime.utcnow().isoformat(),
+                            "bot_version": BOT_VERSION,
+                            "strategy": "moonshark",
+                            "category": classify_market_category(title, ticker),
+                        })
+                        # Track in trade journal for pattern analysis
+                        _journal_trade(ticker, title, side, price, filled, actual_cost, "moonshark", is_live=True)
+                        _log_activity(
+                            f"MOONSHARK HIT! {side.upper()} {ticker} @ {price}c x{filled} "
+                            f"= ${actual_cost:.2f} (potential +${potential:.2f}) | {title[:40]}",
+                            "success"
+                        )
+                        snipes.append({"ticker": ticker, "filled": filled, "cost": actual_cost, "potential": potential})
+                        existing_tickers.add(ticker)
+                        existing_events.add(event_key)
+                    else:
+                        _log_activity(f"MOONSHARK missed: {ticker} — 0 filled at {price}c", "error")
+                else:
+                    err = result.get("error", "")[:60]
+                    _log_activity(f"MOONSHARK failed: {ticker} — {err}", "error")
+
+        except Exception as e:
+            print(f"[MOONSHARK] Error scanning source: {e}")
+            continue
+
+    if snipes:
+        total_cost = sum(s["cost"] for s in snipes)
+        total_potential = sum(s["potential"] for s in snipes)
+        _log_activity(f"MOONSHARK round: {len(snipes)} trades, ${total_cost:.2f} invested, potential +${total_potential:.2f}", "success")
         _save_state()
 
     return snipes
@@ -4056,6 +4363,9 @@ def _background_loop():
             # Live game sniper — THE winning strategy (70%+ live markets)
             live_game_snipe()
             _time.sleep(2)  # yield to web requests
+            # MoonShark — longshot underdog sniper (10-30c contracts)
+            moonshark_snipe()
+            _time.sleep(2)  # yield to web requests
             # QUANT ENGINE DISABLED — mean reversion + market making lost money
             # Keep volatility tracking for data, but don't place trades
             if cycle % 3 == 0:
@@ -5486,6 +5796,81 @@ def seventy_fivers_stats():
         "total_bets": BOT_STATE.get("sf_bets", 0),
         "win_rate": round(BOT_STATE.get("sf_wins", 0) / max(1, BOT_STATE.get("sf_wins", 0) + BOT_STATE.get("sf_losses", 0)) * 100, 1),
     })
+
+
+# ---------------------------------------------------------------------------
+# MOONSHARK API — Longshot underdog sniper stats
+# ---------------------------------------------------------------------------
+
+@app.route("/moonshark")
+def moonshark_stats():
+    """Return MoonShark strategy stats: today's trades, daily spend, lifetime stats, active positions."""
+    today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+
+    # Today's MoonShark trades
+    todays_trades = BOT_STATE.get("moonshark_trades_today", [])
+    daily_spent = BOT_STATE.get("moonshark_daily_spent", 0.0)
+
+    # Lifetime stats from trade journal
+    moonshark_journal = [t for t in _TRADE_JOURNAL if t.get("strategy") == "moonshark"]
+    settled = [t for t in moonshark_journal if t.get("result") is not None]
+    wins = [t for t in settled if t.get("result") == "win"]
+    losses = [t for t in settled if t.get("result") == "loss"]
+    total_pnl = sum(t.get("pnl_usd", 0) for t in settled)
+    best_win = max((t.get("pnl_usd", 0) for t in wins), default=0)
+
+    # Active MoonShark positions (unsettled journal entries)
+    active = [t for t in moonshark_journal if t.get("result") is None]
+
+    avg_payout = round(sum(t.get("pnl_usd", 0) for t in wins) / max(1, len(wins)), 2) if wins else 0
+
+    return jsonify({
+        "today": {
+            "trades": todays_trades,
+            "trade_count": len(todays_trades),
+            "daily_spent": round(daily_spent, 2),
+            "daily_limit": MOONSHARK_MAX_DAILY,
+            "trades_remaining": max(0, MOONSHARK_MAX_TRADES - len(todays_trades)),
+            "budget_remaining": round(max(0, MOONSHARK_MAX_DAILY - daily_spent), 2),
+        },
+        "lifetime": {
+            "total_trades": len(moonshark_journal),
+            "settled": len(settled),
+            "wins": len(wins),
+            "losses": len(losses),
+            "win_rate": round(len(wins) / max(1, len(settled)) * 100, 1),
+            "total_pnl": round(total_pnl, 2),
+            "best_win": round(best_win, 2),
+            "avg_payout_on_wins": avg_payout,
+        },
+        "active_positions": [{
+            "ticker": t.get("ticker"),
+            "title": t.get("title", ""),
+            "side": t.get("side"),
+            "price": t.get("entry_price_cents"),
+            "count": t.get("count"),
+            "cost": t.get("cost_usd"),
+            "potential_profit": round((100 - (t.get("entry_price_cents") or 0)) * (t.get("count") or 0) / 100.0, 2),
+            "entry_time": t.get("entry_time"),
+        } for t in active],
+        "settings": {
+            "min_price": MOONSHARK_MIN_PRICE,
+            "max_price": MOONSHARK_MAX_PRICE,
+            "bet_size": MOONSHARK_BET_USD,
+            "max_daily": MOONSHARK_MAX_DAILY,
+            "max_trades": MOONSHARK_MAX_TRADES,
+        },
+        "enabled": BOT_CONFIG.get("moonshark_enabled", True),
+    })
+
+
+@app.route("/moonshark/toggle", methods=["POST"])
+def moonshark_toggle():
+    """Toggle MoonShark enabled/disabled."""
+    current = BOT_CONFIG.get("moonshark_enabled", True)
+    BOT_CONFIG["moonshark_enabled"] = not current
+    _save_state()
+    return jsonify({"enabled": BOT_CONFIG["moonshark_enabled"]})
 
 
 # ---------------------------------------------------------------------------
@@ -7133,7 +7518,7 @@ a:hover { color: #7da5f5; }
   <button class="tab" onclick="switchTab('activity')">Activity</button>
   <button class="tab" onclick="switchTab('history')">History</button>
   <button class="tab" onclick="switchTab('quant')">Quant</button>
-  <button class="tab" onclick="switchTab('moonshot')" style="color:#ffb400">Moonshot</button>
+  <button class="tab" onclick="switchTab('moonshark')" style="color:#00d4ff">&#x1F988; MoonShark</button>
   <button class="tab" onclick="switchTab('analytics')" style="color:#00d4ff">Analytics</button>
 </div>
 
@@ -7257,35 +7642,55 @@ a:hover { color: #7da5f5; }
   </div>
 </div>
 
-<div class="tab-content" id="tab-moonshot">
+<div class="tab-content" id="tab-moonshark">
   <div class="section">
-    <!-- Fund Banner -->
-    <div style="display:flex;align-items:center;gap:16px;padding:12px 16px;background:linear-gradient(135deg,#1a1400,#2a1a00);border:1px solid #4a3000;border-radius:10px;margin-bottom:14px;flex-wrap:wrap">
+    <!-- Header -->
+    <div style="display:flex;align-items:center;gap:16px;padding:14px 18px;background:linear-gradient(135deg,#001a2a,#002a3a);border:1px solid #004a6a;border-radius:12px;margin-bottom:14px;flex-wrap:wrap">
       <div>
-        <div style="font-size:10px;color:#aa8800;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Moonshot Fund</div>
-        <div style="font-size:24px;font-weight:800;color:#ffb400" id="moonshot-fund-bal">$0.00</div>
+        <div style="font-size:22px;font-weight:800;color:#00d4ff">&#x1F988; MoonShark</div>
+        <div style="font-size:11px;color:#0099bb;font-weight:500">Longshot Sniper &bull; 10-30&cent; Underdogs</div>
       </div>
-      <div style="display:flex;gap:8px;align-items:center">
-        <button onclick="addToMoonshotFund(5)" style="background:none;border:1px solid #4a3000;color:#ffb400;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;font-family:inherit">+$5</button>
-        <button onclick="addToMoonshotFund(10)" style="background:none;border:1px solid #4a3000;color:#ffb400;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;font-family:inherit">+$10</button>
-        <button onclick="addToMoonshotFund(25)" style="background:none;border:1px solid #4a3000;color:#ffb400;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;font-family:inherit">+$25</button>
-      </div>
-      <div style="margin-left:auto;display:flex;gap:16px">
-        <div style="text-align:center"><div style="font-size:9px;color:#666">Bets</div><div style="font-size:14px;font-weight:700;color:#ffb400" id="ms-total-bets">0</div></div>
-        <div style="text-align:center"><div style="font-size:9px;color:#666">Wins</div><div style="font-size:14px;font-weight:700;color:#00dc5a" id="ms-wins">0</div></div>
-        <div style="text-align:center"><div style="font-size:9px;color:#666">Profit</div><div style="font-size:14px;font-weight:700;color:#00dc5a" id="ms-profit">$0</div></div>
-        <div style="text-align:center"><div style="font-size:9px;color:#666">Best Hit</div><div style="font-size:14px;font-weight:700;color:#ffb400" id="ms-best">$0</div></div>
+      <div style="margin-left:auto;display:flex;gap:18px;flex-wrap:wrap">
+        <div style="text-align:center"><div style="font-size:9px;color:#006688;text-transform:uppercase;letter-spacing:0.5px">Trades</div><div style="font-size:16px;font-weight:800;color:#00d4ff" id="mshark-today-count">0</div></div>
+        <div style="text-align:center"><div style="font-size:9px;color:#006688;text-transform:uppercase;letter-spacing:0.5px">Spent</div><div style="font-size:16px;font-weight:800;color:#00d4ff" id="mshark-today-spent">$0 / $20</div></div>
+        <div style="text-align:center"><div style="font-size:9px;color:#006688;text-transform:uppercase;letter-spacing:0.5px">Active</div><div style="font-size:16px;font-weight:800;color:#00d4ff" id="mshark-active-count">0</div></div>
       </div>
     </div>
 
-    <div style="font-size:11px;color:#666;margin-bottom:12px;padding:0 4px">
-      Underdogs in close live games. The market is slow to adjust &mdash; big payouts when the favorite slips.
-      <span style="color:#ffb400">10% of every win auto-funds this tab.</span>
-      <button class="refresh-btn" onclick="loadMoonshots()" style="margin-left:8px">Refresh</button>
+    <!-- Active Positions -->
+    <div style="margin-bottom:20px">
+      <div style="color:#00d4ff;font-size:14px;font-weight:700;margin-bottom:10px">&#x1F988; Active Positions</div>
+      <div id="mshark-positions" style="background:#0a1a22;border:1px solid #1a3a4a;border-radius:10px;padding:12px;min-height:40px">
+        <div class="loading">Loading...</div>
+      </div>
     </div>
 
-    <div id="moonshot-cards" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px">
-      <div class="loading">Scanning live games for moonshots...</div>
+    <!-- Today's Trades -->
+    <div style="margin-bottom:20px">
+      <div style="color:#00d4ff;font-size:14px;font-weight:700;margin-bottom:10px">Today's Trades</div>
+      <div id="mshark-today-trades" style="background:#0a1a22;border:1px solid #1a3a4a;border-radius:10px;padding:12px;min-height:40px">
+        <div class="loading">Loading...</div>
+      </div>
+    </div>
+
+    <!-- Lifetime Stats -->
+    <div style="margin-bottom:20px">
+      <div style="color:#00d4ff;font-size:14px;font-weight:700;margin-bottom:10px">Lifetime Stats</div>
+      <div id="mshark-lifetime" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px">
+        <div class="loading">Loading...</div>
+      </div>
+    </div>
+
+    <!-- Settings -->
+    <div style="margin-bottom:10px">
+      <div style="color:#00d4ff;font-size:14px;font-weight:700;margin-bottom:10px">Settings</div>
+      <div id="mshark-settings" style="background:#0a1a22;border:1px solid #1a3a4a;border-radius:10px;padding:14px">
+        <div class="loading">Loading...</div>
+      </div>
+    </div>
+
+    <div style="text-align:right;margin-top:8px">
+      <button class="refresh-btn" onclick="loadMoonshark()" style="border-color:#004a6a;color:#00d4ff">&#x1F504; Refresh</button>
     </div>
   </div>
 </div>
@@ -7343,7 +7748,7 @@ function switchTab(name) {
   var tabs = document.querySelectorAll('.tab');
   tabs.forEach(function(t) { if (t.getAttribute('onclick').indexOf(name) >= 0) t.classList.add('active'); });
   // Lazy-load tab data
-  if (name === 'moonshot') loadMoonshots();
+  if (name === 'moonshark') loadMoonshark();
   if (name === 'quant') loadQuantPicks();
   if (name === 'seventyfivers') loadSeventyFivers();
   if (name === 'history') loadSettled();
@@ -9033,114 +9438,122 @@ async function quantBet(ticker, side, priceCents, title, deviationPct) {
   }
 }
 
-// --- Moonshot Tab ---
-async function loadMoonshots() {
+// --- MoonShark Tab ---
+async function loadMoonshark() {
   try {
-    var data = await fetch(API + '/moonshots').then(r => r.json());
-    var picks = data.picks || [];
+    var data = await fetch(API + '/moonshark').then(r => r.json());
+    var today = data.today || {};
+    var lifetime = data.lifetime || {};
+    var positions = data.active_positions || [];
+    var settings = data.settings || {};
+    var enabled = data.enabled !== false;
 
-    // Update fund stats
-    var fundEl = document.getElementById('moonshot-fund-bal');
-    if (fundEl) fundEl.textContent = '$' + (data.fund_balance || 0).toFixed(2);
-    var betsEl = document.getElementById('ms-total-bets');
-    if (betsEl) betsEl.textContent = data.total_bets || 0;
-    var winsEl = document.getElementById('ms-wins');
-    if (winsEl) winsEl.textContent = data.total_wins || 0;
-    var profEl = document.getElementById('ms-profit');
-    if (profEl) {
-      var p = data.total_profit || 0;
-      profEl.textContent = (p >= 0 ? '+' : '-') + '$' + Math.abs(p).toFixed(2);
-      profEl.style.color = p >= 0 ? '#00dc5a' : '#ff5000';
-    }
-    var bestEl = document.getElementById('ms-best');
-    if (bestEl) bestEl.textContent = '$' + (data.biggest_win || 0).toFixed(2);
+    // Header stats
+    var countEl = document.getElementById('mshark-today-count');
+    if (countEl) countEl.textContent = today.trade_count || 0;
+    var spentEl = document.getElementById('mshark-today-spent');
+    if (spentEl) spentEl.textContent = '$' + (today.daily_spent || 0).toFixed(2) + ' / $' + (today.daily_limit || 20);
+    var activeEl = document.getElementById('mshark-active-count');
+    if (activeEl) activeEl.textContent = positions.length;
 
-    var container = document.getElementById('moonshot-cards');
-    if (picks.length === 0) {
-      container.innerHTML = '<div class="empty" style="grid-column:1/-1">No live underdog opportunities right now. Check back during game time!</div>';
-      return;
-    }
-
-    var html = '';
-    picks.forEach(function(p, i) {
-      var sideC = p.side === 'yes' ? '#00dc5a' : '#ff5000';
-      var closenessC = p.closeness === 'TIGHT' ? '#00dc5a' : p.closeness === 'COMPETITIVE' ? '#ffb400' : '#ff5000';
-      var timeC = p.time_label === 'FINAL STRETCH' ? '#ff5000' : p.time_label === 'LATE GAME' ? '#ffb400' : '#888';
-
-      html += '<div style="background:linear-gradient(135deg,#141400,#1a1400);border:1px solid #3a2a00;border-radius:12px;padding:14px;position:relative">';
-
-      // Rank badge
-      html += '<div style="position:absolute;top:10px;right:12px;font-size:18px;font-weight:800;color:#2a2000">#' + (i + 1) + '</div>';
-
-      // Sport + Time badges
-      html += '<div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap">';
-      html += '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;background:rgba(255,180,0,0.12);color:#ffb400">' + p.sport + '</span>';
-      html += '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;background:rgba(255,180,0,0.08);color:' + timeC + '">' + p.time_label + ' (' + p.time_left + ')</span>';
-      html += '<span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;background:rgba(0,220,90,0.08);color:' + closenessC + '">' + p.closeness + '</span>';
-      html += '</div>';
-
-      // Title
-      html += '<div style="font-size:13px;color:#e0e0e0;font-weight:600;margin-bottom:6px;line-height:1.3"><a href="' + p.url + '" target="_blank" style="color:#e0e0e0;text-decoration:none">' + p.title + '</a></div>';
-
-      // Price + Payout
-      html += '<div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">';
-      html += '<div><div style="font-size:9px;color:#666">Price</div><div style="font-size:20px;font-weight:800;color:' + sideC + '">' + p.price_cents + String.fromCharCode(162) + ' <span style="font-size:11px;font-weight:600">' + p.side.toUpperCase() + '</span></div></div>';
-      html += '<div><div style="font-size:9px;color:#666">Payout</div><div style="font-size:20px;font-weight:800;color:#ffb400">' + p.payout_ratio + 'x</div></div>';
-      html += '<div><div style="font-size:9px;color:#666">If you bet $' + p.suggested_bet.toFixed(0) + '</div><div style="font-size:16px;font-weight:700;color:#00dc5a">+$' + p.potential_win.toFixed(2) + '</div></div>';
-      html += '</div>';
-
-      // Volume
-      html += '<div style="font-size:10px;color:#666;margin-bottom:8px">Vol: ' + p.volume.toLocaleString() + ' contracts</div>';
-
-      // Bet button
-      html += '<div style="display:flex;gap:6px">';
-      html += '<button onclick="placeMoonshot(&quot;' + p.ticker + '&quot;, &quot;' + p.side + '&quot;, ' + p.price_cents + ', 5)" style="flex:1;background:none;border:1px solid #4a3000;color:#ffb400;padding:8px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;font-family:inherit">$5</button>';
-      html += '<button onclick="placeMoonshot(&quot;' + p.ticker + '&quot;, &quot;' + p.side + '&quot;, ' + p.price_cents + ', 10)" style="flex:1;background:none;border:1px solid #4a3000;color:#ffb400;padding:8px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;font-family:inherit">$10</button>';
-      html += '<button onclick="placeMoonshot(&quot;' + p.ticker + '&quot;, &quot;' + p.side + '&quot;, ' + p.price_cents + ', 20)" style="flex:1;background:rgba(255,180,0,0.12);border:1px solid #ffb400;color:#ffb400;padding:8px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:700;font-family:inherit">$20</button>';
-      html += '</div>';
-
-      html += '</div>';
-    });
-    container.innerHTML = html;
-  } catch(e) {
-    document.getElementById('moonshot-cards').innerHTML = '<div class="empty" style="color:#ff5000">Error: ' + e.message + '</div>';
-  }
-}
-
-async function placeMoonshot(ticker, side, priceCents, betUsd) {
-  if (!confirm('Place $' + betUsd + ' moonshot on ' + side.toUpperCase() + ' ' + ticker + ' at ' + priceCents + String.fromCharCode(162) + '?')) return;
-  try {
-    var resp = await fetch(API + '/moonshot-bet', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ticker: ticker, side: side, price_cents: priceCents, bet_usd: betUsd}),
-    });
-    var data = await resp.json();
-    if (data.success) {
-      showToast('MOONSHOT placed! $' + data.cost.toFixed(2) + ' for $' + data.potential_payout.toFixed(2) + ' potential payout', 'success');
-      loadMoonshots();
+    // Active Positions
+    var posContainer = document.getElementById('mshark-positions');
+    if (positions.length === 0) {
+      posContainer.innerHTML = '<div class="empty">No active MoonShark positions</div>';
     } else {
-      showToast('Moonshot failed: ' + (data.error || 'Unknown'), 'error');
+      var posHtml = '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="color:#006688;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">'
+        + '<th style="text-align:left;padding:6px 8px">Ticker</th>'
+        + '<th style="text-align:right;padding:6px 8px">Buy Price</th>'
+        + '<th style="text-align:right;padding:6px 8px">Contracts</th>'
+        + '<th style="text-align:right;padding:6px 8px">Cost</th>'
+        + '<th style="text-align:right;padding:6px 8px">Potential Payout</th>'
+        + '</tr></thead><tbody>';
+      positions.forEach(function(p) {
+        var payout = (p.potential_profit || 0) + (p.cost || 0);
+        posHtml += '<tr style="border-top:1px solid #1a2a33">'
+          + '<td style="padding:8px;color:#e0e0e0;font-weight:600">' + (p.ticker || '') + '<div style="font-size:10px;color:#666;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (p.title || '') + '</div></td>'
+          + '<td style="text-align:right;padding:8px;color:#00d4ff;font-weight:700">' + (p.price || 0) + String.fromCharCode(162) + ' <span style="font-size:10px;color:#888">' + (p.side || '').toUpperCase() + '</span></td>'
+          + '<td style="text-align:right;padding:8px;color:#ccc">' + (p.count || 0) + '</td>'
+          + '<td style="text-align:right;padding:8px;color:#ccc">$' + (p.cost || 0).toFixed(2) + '</td>'
+          + '<td style="text-align:right;padding:8px;color:#00dc5a;font-weight:700">$' + payout.toFixed(2) + '</td>'
+          + '</tr>';
+      });
+      posHtml += '</tbody></table>';
+      posContainer.innerHTML = posHtml;
     }
+
+    // Today's Trades
+    var todayContainer = document.getElementById('mshark-today-trades');
+    var trades = today.trades || [];
+    if (trades.length === 0) {
+      todayContainer.innerHTML = '<div class="empty">No MoonShark trades today</div>';
+    } else {
+      var tHtml = '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="color:#006688;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">'
+        + '<th style="text-align:left;padding:6px 8px">Time</th>'
+        + '<th style="text-align:left;padding:6px 8px">Ticker</th>'
+        + '<th style="text-align:right;padding:6px 8px">Price</th>'
+        + '<th style="text-align:right;padding:6px 8px">Contracts</th>'
+        + '<th style="text-align:right;padding:6px 8px">Cost</th>'
+        + '</tr></thead><tbody>';
+      trades.forEach(function(t) {
+        var timeStr = t.time ? new Date(t.time).toLocaleTimeString() : '';
+        tHtml += '<tr style="border-top:1px solid #1a2a33">'
+          + '<td style="padding:8px;color:#888;font-size:11px">' + timeStr + '</td>'
+          + '<td style="padding:8px;color:#e0e0e0;font-weight:600">' + (t.ticker || '') + '</td>'
+          + '<td style="text-align:right;padding:8px;color:#00d4ff;font-weight:700">' + (t.price_cents || t.price || 0) + String.fromCharCode(162) + '</td>'
+          + '<td style="text-align:right;padding:8px;color:#ccc">' + (t.count || t.contracts || 0) + '</td>'
+          + '<td style="text-align:right;padding:8px;color:#ccc">$' + (t.cost || t.cost_usd || 0).toFixed(2) + '</td>'
+          + '</tr>';
+      });
+      tHtml += '</tbody></table>';
+      todayContainer.innerHTML = tHtml;
+    }
+
+    // Lifetime Stats
+    var lsContainer = document.getElementById('mshark-lifetime');
+    var pnlColor = (lifetime.total_pnl || 0) >= 0 ? '#00dc5a' : '#ff5000';
+    var pnlSign = (lifetime.total_pnl || 0) >= 0 ? '+' : '-';
+    lsContainer.innerHTML = ''
+      + '<div style="background:#0a1a22;border:1px solid #1a3a4a;border-radius:10px;padding:12px;text-align:center"><div style="font-size:9px;color:#006688;text-transform:uppercase;letter-spacing:0.5px">Total Trades</div><div style="font-size:20px;font-weight:800;color:#00d4ff">' + (lifetime.total_trades || 0) + '</div></div>'
+      + '<div style="background:#0a1a22;border:1px solid #1a3a4a;border-radius:10px;padding:12px;text-align:center"><div style="font-size:9px;color:#006688;text-transform:uppercase;letter-spacing:0.5px">W / L</div><div style="font-size:20px;font-weight:800"><span style="color:#00dc5a">' + (lifetime.wins || 0) + '</span><span style="color:#444"> / </span><span style="color:#ff5000">' + (lifetime.losses || 0) + '</span></div></div>'
+      + '<div style="background:#0a1a22;border:1px solid #1a3a4a;border-radius:10px;padding:12px;text-align:center"><div style="font-size:9px;color:#006688;text-transform:uppercase;letter-spacing:0.5px">Win Rate</div><div style="font-size:20px;font-weight:800;color:#00d4ff">' + (lifetime.win_rate || 0) + '%</div></div>'
+      + '<div style="background:#0a1a22;border:1px solid #1a3a4a;border-radius:10px;padding:12px;text-align:center"><div style="font-size:9px;color:#006688;text-transform:uppercase;letter-spacing:0.5px">Total P&amp;L</div><div style="font-size:20px;font-weight:800;color:' + pnlColor + '">' + pnlSign + '$' + Math.abs(lifetime.total_pnl || 0).toFixed(2) + '</div></div>'
+      + '<div style="background:#0a1a22;border:1px solid #1a3a4a;border-radius:10px;padding:12px;text-align:center"><div style="font-size:9px;color:#006688;text-transform:uppercase;letter-spacing:0.5px">Best Win</div><div style="font-size:20px;font-weight:800;color:#00dc5a">$' + (lifetime.best_win || 0).toFixed(2) + '</div></div>'
+      + '<div style="background:#0a1a22;border:1px solid #1a3a4a;border-radius:10px;padding:12px;text-align:center"><div style="font-size:9px;color:#006688;text-transform:uppercase;letter-spacing:0.5px">Avg Win Payout</div><div style="font-size:20px;font-weight:800;color:#00d4ff">$' + (lifetime.avg_payout_on_wins || 0).toFixed(2) + '</div></div>';
+
+    // Settings
+    var setContainer = document.getElementById('mshark-settings');
+    var toggleColor = enabled ? '#00dc5a' : '#ff5000';
+    var toggleText = enabled ? 'ENABLED' : 'DISABLED';
+    setContainer.innerHTML = ''
+      + '<div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap">'
+      + '<div style="display:flex;gap:16px;flex-wrap:wrap">'
+      + '<div><span style="font-size:10px;color:#006688;text-transform:uppercase">Bet Size</span><div style="font-size:14px;font-weight:700;color:#e0e0e0">$' + (settings.bet_size || 2.5).toFixed(2) + '</div></div>'
+      + '<div><span style="font-size:10px;color:#006688;text-transform:uppercase">Daily Cap</span><div style="font-size:14px;font-weight:700;color:#e0e0e0">$' + (settings.max_daily || 20) + '</div></div>'
+      + '<div><span style="font-size:10px;color:#006688;text-transform:uppercase">Price Range</span><div style="font-size:14px;font-weight:700;color:#e0e0e0">' + (settings.min_price || 10) + '-' + (settings.max_price || 30) + String.fromCharCode(162) + '</div></div>'
+      + '<div><span style="font-size:10px;color:#006688;text-transform:uppercase">Max Trades/Day</span><div style="font-size:14px;font-weight:700;color:#e0e0e0">' + (settings.max_trades || 8) + '</div></div>'
+      + '</div>'
+      + '<div style="margin-left:auto">'
+      + '<button onclick="toggleMoonshark()" style="background:none;border:2px solid ' + toggleColor + ';color:' + toggleColor + ';padding:8px 20px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:700;font-family:inherit;min-width:120px">&#x1F988; ' + toggleText + '</button>'
+      + '</div>'
+      + '</div>';
+
   } catch(e) {
-    showToast('Moonshot error: ' + e.message, 'error');
+    document.getElementById('mshark-positions').innerHTML = '<div class="empty" style="color:#ff5000">Error loading MoonShark: ' + e.message + '</div>';
   }
 }
 
-async function addToMoonshotFund(amount) {
+async function toggleMoonshark() {
   try {
-    var resp = await fetch(API + '/moonshot-fund', {
+    var resp = await fetch(API + '/moonshark/toggle', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({amount: amount}),
     });
     var data = await resp.json();
-    if (data.success) {
-      showToast('Added $' + amount + ' to Moonshot Fund (new balance: $' + data.new_balance.toFixed(2) + ')', 'success');
-      loadMoonshots();
-    }
+    showToast('MoonShark ' + (data.enabled ? 'ENABLED' : 'DISABLED'), data.enabled ? 'success' : 'info');
+    loadMoonshark();
   } catch(e) {
-    showToast('Error: ' + e.message, 'error');
+    showToast('Toggle error: ' + e.message, 'error');
   }
 }
 
