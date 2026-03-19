@@ -59,7 +59,7 @@ BOT_VERSION_DATE = "2026-03-15"
 BOT_CONFIG = {
     "enabled": True,  # default ON — safety floor will auto-disable if needed
     "max_bet_usd": 5.0,           # max $5 per single trade — small, precise bets
-    "max_daily_usd": 75.0,        # max $75/day — scales with bankroll via smart sizing
+    "max_daily_usd": 150.0,        # max $150/day — scales with bankroll via smart sizing
     "min_balance_usd": 10.0,      # stop all trading if cash below $10
     "min_cash_reserve_pct": 0.05, # keep 5% of portfolio in cash — legacy positions skew ratio
     "max_open_positions": 150,    # high limit — legacy positions settling, bot uses daily trade cap instead
@@ -97,8 +97,17 @@ import json as _json
 
 _STATE_FILE = "/tmp/tradeshark_state.json"
 
+# Cumulative tracking — declared early so _load_state() can populate them.
+# The later sections that reference these will use the same objects (not re-assign).
+_TRADE_JOURNAL = []  # List of enriched trade records with full metadata
+_CATEGORY_STATS = {}  # {cat: {"wins": 0, "losses": 0, "pnl": 0.0}}
+
 def _save_state():
-    """Persist trade data to disk."""
+    """Persist trade data to disk.
+    NOTE: /tmp does NOT survive Railway deploys. This cache only helps within a
+    single deployment (e.g. dyno restarts).  On fresh deploy, _hydrate_from_kalshi()
+    and _rebuild_journal_from_kalshi() rebuild from the Kalshi API as source of truth.
+    """
     try:
         data = {
             "all_trades": BOT_STATE["all_trades"],
@@ -106,6 +115,15 @@ def _save_state():
             "daily_spent_usd": BOT_STATE["daily_spent_usd"],
             "trade_date": BOT_STATE["trade_date"],
             "pick_history": BOT_STATE.get("pick_history", [])[-500:],  # keep last 500
+            # Persist trade journal & category stats so they survive in-deployment restarts
+            "trade_journal": _TRADE_JOURNAL[-500:],  # keep last 500 journal entries
+            "category_stats": _CATEGORY_STATS,
+            # Persist snipe daily counters
+            "snipe_daily_spent": BOT_STATE.get("snipe_daily_spent", 0.0),
+            "snipe_trades_today": BOT_STATE.get("snipe_trades_today", []),
+            "snipe_date": BOT_STATE.get("snipe_date"),
+            # Timestamp for date-check on load
+            "save_date": datetime.datetime.utcnow().strftime("%Y-%m-%d"),
         }
         with open(_STATE_FILE, "w") as f:
             _json.dump(data, f)
@@ -114,26 +132,52 @@ def _save_state():
 
 def _load_state():
     """Restore trade data from disk, then hydrate from Kalshi fills API."""
+    global _TRADE_JOURNAL, _CATEGORY_STATS
     # First try local cache
     try:
         with open(_STATE_FILE, "r") as f:
             data = _json.load(f)
         BOT_STATE["all_trades"] = data.get("all_trades", [])
         BOT_STATE["pick_history"] = data.get("pick_history", [])
-        # Only restore today's spending if it's still the same day
-        saved_date = data.get("trade_date", None)
+
+        saved_date = data.get("save_date") or data.get("trade_date", None)
         today_str = datetime.datetime.utcnow().strftime("%Y-%m-%d")
-        if saved_date == today_str:
+        is_same_day = (saved_date == today_str)
+
+        # --- Daily counters: reset if new day, restore if same day ---
+        if is_same_day:
             BOT_STATE["trades_today"] = data.get("trades_today", [])
             # Reset daily_spent to 0 on redeploy — only count NEW trades this session
-            # Old trades are already placed, don't let them block the new strategy
             BOT_STATE["daily_spent_usd"] = 0.0
             BOT_STATE["trade_date"] = today_str
+            # Restore snipe counters for same-day
+            BOT_STATE["snipe_daily_spent"] = data.get("snipe_daily_spent", 0.0)
+            BOT_STATE["snipe_trades_today"] = data.get("snipe_trades_today", [])
+            BOT_STATE["snipe_date"] = today_str
         else:
+            # New day — reset all daily counters
             BOT_STATE["trades_today"] = []
             BOT_STATE["daily_spent_usd"] = 0.0
             BOT_STATE["trade_date"] = today_str
-        print(f"[STATE] Restored {len(BOT_STATE['all_trades'])} trades from disk, daily_spent reset to $0 for new session")
+            BOT_STATE["snipe_daily_spent"] = 0.0
+            BOT_STATE["snipe_trades_today"] = []
+            BOT_STATE["snipe_date"] = today_str
+
+        # --- Cumulative data: always restore regardless of day ---
+        saved_journal = data.get("trade_journal", [])
+        if saved_journal:
+            _TRADE_JOURNAL.clear()
+            _TRADE_JOURNAL.extend(saved_journal)
+            print(f"[STATE] Restored {len(_TRADE_JOURNAL)} trade journal entries from disk")
+
+        saved_cat_stats = data.get("category_stats", {})
+        if saved_cat_stats:
+            _CATEGORY_STATS.clear()
+            _CATEGORY_STATS.update(saved_cat_stats)
+            print(f"[STATE] Restored {len(_CATEGORY_STATS)} category stats from disk")
+
+        print(f"[STATE] Restored {len(BOT_STATE['all_trades'])} trades from disk, "
+              f"daily_spent reset to $0 for new session, same_day={is_same_day}")
     except FileNotFoundError:
         pass
     except Exception as e:
@@ -254,6 +298,178 @@ def _hydrate_from_kalshi():
         traceback.print_exc()
 
 _load_state()
+
+
+def _rebuild_journal_from_kalshi():
+    """Rebuild _TRADE_JOURNAL and _CATEGORY_STATS from Kalshi settled positions.
+
+    This is the real persistence fix: /tmp doesn't survive Railway deploys, but
+    the Kalshi API is the source of truth for all settled positions.  On every
+    startup we paginate through ALL settled positions, rebuild the trade journal,
+    and recompute category stats.  Only adds entries that aren't already in the
+    journal (by ticker), so it's safe to call after _load_state().
+    """
+    global _TRADE_JOURNAL, _CATEGORY_STATS
+    import requests as _req
+    try:
+        path = "/portfolio/positions"
+        headers = signed_headers("GET", path)
+        if not headers:
+            print("[JOURNAL-REBUILD] No API key — skipping")
+            return
+
+        # Paginate all settled positions
+        positions_list = []
+        cursor = None
+        for _ in range(10):  # max 10 pages = 2000 positions
+            params = {"limit": 200, "settlement_status": "settled"}
+            if cursor:
+                params["cursor"] = cursor
+            h = signed_headers("GET", path)
+            resp = _req.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
+                headers=h, params=params, timeout=15,
+            )
+            if not resp.ok:
+                print(f"[JOURNAL-REBUILD] API returned {resp.status_code}")
+                break
+            page = resp.json()
+            positions_list.extend(page.get("market_positions", []))
+            cursor = page.get("cursor")
+            if not cursor:
+                break
+
+        if not positions_list:
+            print("[JOURNAL-REBUILD] No settled positions found")
+            return
+
+        # Tickers already in journal — don't duplicate
+        existing_tickers = {r["ticker"] for r in _TRADE_JOURNAL if r.get("ticker")}
+        # Also build set of tickers in all_trades for bot_version lookup
+        trade_map = {}
+        for t in BOT_STATE.get("all_trades", []):
+            if t.get("ticker"):
+                trade_map[t["ticker"]] = t
+
+        new_count = 0
+        # Fetch market titles in batch (cap at 50 unique to avoid slow startup)
+        unique_tickers = list(set(
+            p.get("ticker", "") for p in positions_list
+            if p.get("ticker", "") not in existing_tickers
+        ))
+        title_map = {}
+        for tk in unique_tickers[:50]:
+            try:
+                mkt_path = f"/markets/{tk}"
+                mkt_h = signed_headers("GET", mkt_path)
+                mkt_r = _req.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + mkt_path, headers=mkt_h, timeout=5)
+                if mkt_r.ok:
+                    mkt = mkt_r.json().get("market", {})
+                    title_map[tk] = {
+                        "title": mkt.get("title", tk),
+                        "close_time": mkt.get("close_time", ""),
+                    }
+            except Exception:
+                pass
+
+        # Rebuild category stats from scratch using ALL settled positions
+        _CATEGORY_STATS.clear()
+
+        for pos in positions_list:
+            ticker = pos.get("ticker", "")
+            pnl_cents = _parse_kalshi_dollars(pos.get("realized_pnl_dollars") or pos.get("realized_pnl"))
+            pnl_usd = pnl_cents / 100
+            won = pnl_usd > 0
+
+            # Get title from cache or existing trade data
+            title = ""
+            if ticker in title_map:
+                title = title_map[ticker]["title"]
+            elif ticker in trade_map:
+                title = trade_map[ticker].get("question", "") or trade_map[ticker].get("ticker", "")
+            else:
+                title = ticker
+
+            # Update category stats for ALL settled positions
+            cat = classify_market_category(title, ticker)
+            if cat not in _CATEGORY_STATS:
+                _CATEGORY_STATS[cat] = {"wins": 0, "losses": 0, "pnl": 0.0}
+            if won:
+                _CATEGORY_STATS[cat]["wins"] += 1
+            else:
+                _CATEGORY_STATS[cat]["losses"] += 1
+            _CATEGORY_STATS[cat]["pnl"] += pnl_usd
+
+            # Add to journal if not already present
+            if ticker in existing_tickers:
+                continue
+
+            # Build journal entry from settled position data
+            side = pos.get("side", "")
+            count = 0
+            try:
+                count = int(float(str(pos.get("total_count_fp") or pos.get("total_count") or 0)))
+            except Exception:
+                pass
+            entry_cents = 0
+            try:
+                if side == "yes":
+                    entry_cents = int(round(float(str(
+                        pos.get("average_yes_price_dollars") or pos.get("average_yes_price") or 0
+                    )) * 100))
+                else:
+                    entry_cents = int(round(float(str(
+                        pos.get("average_no_price_dollars") or pos.get("average_no_price") or 0
+                    )) * 100))
+            except Exception:
+                pass
+            cost_usd = (entry_cents * count) / 100
+
+            # Determine bot version from trade history
+            trade_rec = trade_map.get(ticker, {})
+            bot_version = trade_rec.get("bot_version", "v1-legacy")
+            strategy = trade_rec.get("strategy", "unknown")
+            created = trade_rec.get("timestamp", "")
+            close_time = title_map.get(ticker, {}).get("close_time", "")
+
+            journal_entry = {
+                "ticker": ticker,
+                "title": title,
+                "side": side,
+                "price_cents": entry_cents,
+                "count": count,
+                "cost_usd": round(cost_usd, 2),
+                "strategy": strategy,
+                "category": cat,
+                "sport_type": "other",
+                "is_live": False,
+                "volatility": 0,
+                "entry_time": created or close_time or "",
+                "entry_hour": 0,
+                "entry_day": "",
+                "entry_date": (created or "")[:10] if created else "",
+                "result": "win" if won else ("loss" if pnl_usd < -0.005 else "even"),
+                "pnl_usd": round(pnl_usd, 2),
+                "settlement_time": close_time or "",
+                "hold_duration_mins": None,
+                "price_at_entry": entry_cents,
+                "bot_version": bot_version,
+                "source": "kalshi_rebuild",
+            }
+            _TRADE_JOURNAL.append(journal_entry)
+            new_count += 1
+
+        _save_state()
+        total_cats = len(_CATEGORY_STATS)
+        total_journal = len(_TRADE_JOURNAL)
+        print(f"[JOURNAL-REBUILD] Rebuilt from {len(positions_list)} settled positions: "
+              f"{new_count} new journal entries (total {total_journal}), "
+              f"{total_cats} categories tracked")
+    except Exception as e:
+        print(f"[JOURNAL-REBUILD] Error: {e}")
+        import traceback
+        traceback.print_exc()
+
 
 # ---------------------------------------------------------------------------
 # Kalshi auth helpers
@@ -1801,8 +2017,8 @@ LIVE_GAME_SERIES = [
 SNIPE_MIN_PRICE = 70   # cents — buy if price >= 70c (Brian's winning range)
 SNIPE_MAX_PRICE = 90   # cents — don't buy above 90c (too little profit margin)
 SNIPE_BET_USD = 15.0   # fallback — now uses _smart_bet_size() for bankroll scaling
-SNIPE_MAX_DAILY = 75.0  # max daily spend on snipes (scales naturally via bet sizing)
-SNIPE_MAX_TRADES = 10   # max 10 snipes per day — quality over quantity
+SNIPE_MAX_DAILY = 150.0  # max daily spend on snipes (scales naturally via bet sizing)
+SNIPE_MAX_TRADES = 20   # max 20 snipes per day — quality over quantity
 
 BOT_STATE["snipe_trades_today"] = []
 BOT_STATE["snipe_daily_spent"] = 0.0
@@ -2107,6 +2323,8 @@ def live_game_snipe():
         total_cost = sum(s["cost"] for s in snipes)
         total_potential = sum(s["potential"] for s in snipes)
         _log_activity(f"🎯 Sniper round: {len(snipes)} trades, ${total_cost:.2f} invested, potential +${total_potential:.2f}", "success")
+        # Persist updated journal & snipe counters after snipe round
+        _save_state()
 
     return snipes
 
@@ -3197,7 +3415,7 @@ _last_settlement_check = None
 _known_settled = set()  # tickers we already processed
 
 # Category win rate tracking — auto-adjust sizing based on what's winning
-_CATEGORY_STATS = {}  # {cat: {"wins": 0, "losses": 0, "pnl": 0.0}}
+# _CATEGORY_STATS declared early (near BOT_STATE) so _load_state() can populate it
 
 def _update_category_stats(ticker, title, won, pnl_usd):
     """Track win rate by category for auto-adjustment."""
@@ -3235,7 +3453,7 @@ def _category_multiplier(ticker, title):
 # Day 1 = March 16, 2026. Only count wins/losses from this date forward.
 TRADE_JOURNAL_START = "2026-03-16"
 
-_TRADE_JOURNAL = []  # List of enriched trade records with full metadata
+# _TRADE_JOURNAL declared early (near BOT_STATE) so _load_state() can populate it
 
 def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, strategy, is_live=False):
     """Create an enriched trade record with all metadata for pattern analysis."""
@@ -3489,6 +3707,8 @@ def check_settlements_and_reinvest():
                 f"P&L: ${total_pnl:+.2f} — reinvesting freed capital",
                 "success" if total_pnl >= 0 else "info"
             )
+            # Persist updated journal & category stats after processing settlements
+            _save_state()
             # Trigger immediate rescan to reinvest
             return new_settlements
 
@@ -3817,6 +4037,12 @@ def _background_loop():
                 print(f"[SETTLE] Initialized {len(_known_settled)} known settled positions")
     except Exception:
         pass
+    # Rebuild trade journal & category stats from Kalshi settled positions
+    # This is the real persistence: even if /tmp is wiped on deploy, we rebuild from API
+    try:
+        _rebuild_journal_from_kalshi()
+    except Exception as e:
+        print(f"[BG] Journal rebuild error (non-fatal): {e}")
 
     cycle = 0
     # Portfolio cache warms naturally on first background cycle — no startup delay
@@ -4425,6 +4651,135 @@ def settled_positions():
         })
     except Exception as e:
         return jsonify({"settled": [], "error": str(e)})
+
+
+@app.route("/analytics")
+def analytics_endpoint():
+    """Return processed analytics data from trade journal and category stats."""
+    try:
+        settled = [t for t in _TRADE_JOURNAL if t.get("result") is not None]
+
+        # --- Win Rate by Sport ---
+        by_sport = {}
+        for t in settled:
+            sport = t.get("sport_type") or t.get("category") or "other"
+            if sport not in by_sport:
+                by_sport[sport] = {"wins": 0, "losses": 0, "pnl": 0.0, "total": 0}
+            by_sport[sport]["total"] += 1
+            if t["result"] == "win":
+                by_sport[sport]["wins"] += 1
+            elif t["result"] == "loss":
+                by_sport[sport]["losses"] += 1
+            by_sport[sport]["pnl"] += t.get("pnl_usd") or 0
+        for k in by_sport:
+            s = by_sport[k]
+            s["pnl"] = round(s["pnl"], 2)
+            s["win_rate"] = round(s["wins"] / max(1, s["wins"] + s["losses"]) * 100, 1)
+
+        # --- Win Rate by Price Range ---
+        price_buckets = [
+            ("70-74", 70, 74),
+            ("75-79", 75, 79),
+            ("80-84", 80, 84),
+            ("85-89", 85, 89),
+            ("90-100", 90, 100),
+        ]
+        by_price = {}
+        for label, lo, hi in price_buckets:
+            by_price[label] = {"wins": 0, "losses": 0, "pnl": 0.0, "total": 0}
+        # Also capture trades outside these ranges
+        by_price["<70"] = {"wins": 0, "losses": 0, "pnl": 0.0, "total": 0}
+        for t in settled:
+            pc = t.get("price_cents") or 0
+            bucket = "<70"
+            for label, lo, hi in price_buckets:
+                if lo <= pc <= hi:
+                    bucket = label
+                    break
+            by_price[bucket]["total"] += 1
+            if t["result"] == "win":
+                by_price[bucket]["wins"] += 1
+            elif t["result"] == "loss":
+                by_price[bucket]["losses"] += 1
+            by_price[bucket]["pnl"] += t.get("pnl_usd") or 0
+        for k in by_price:
+            b = by_price[k]
+            b["pnl"] = round(b["pnl"], 2)
+            b["win_rate"] = round(b["wins"] / max(1, b["wins"] + b["losses"]) * 100, 1)
+            b["avg_pnl"] = round(b["pnl"] / max(1, b["total"]), 2)
+
+        # --- Time of Day Performance ---
+        time_periods = {
+            "Morning (6am-12pm)": {"wins": 0, "losses": 0, "pnl": 0.0, "total": 0},
+            "Afternoon (12pm-6pm)": {"wins": 0, "losses": 0, "pnl": 0.0, "total": 0},
+            "Evening (6pm-12am)": {"wins": 0, "losses": 0, "pnl": 0.0, "total": 0},
+            "Night (12am-6am)": {"wins": 0, "losses": 0, "pnl": 0.0, "total": 0},
+        }
+        for t in settled:
+            hour = t.get("entry_hour")
+            if hour is None:
+                continue
+            if 6 <= hour < 12:
+                period = "Morning (6am-12pm)"
+            elif 12 <= hour < 18:
+                period = "Afternoon (12pm-6pm)"
+            elif 18 <= hour < 24:
+                period = "Evening (6pm-12am)"
+            else:
+                period = "Night (12am-6am)"
+            time_periods[period]["total"] += 1
+            if t["result"] == "win":
+                time_periods[period]["wins"] += 1
+            elif t["result"] == "loss":
+                time_periods[period]["losses"] += 1
+            time_periods[period]["pnl"] += t.get("pnl_usd") or 0
+        for k in time_periods:
+            p = time_periods[k]
+            p["pnl"] = round(p["pnl"], 2)
+            p["win_rate"] = round(p["wins"] / max(1, p["wins"] + p["losses"]) * 100, 1)
+
+        # --- Key Insights ---
+        total_wins = sum(1 for t in settled if t["result"] == "win")
+        total_losses = sum(1 for t in settled if t["result"] == "loss")
+        overall_wr = round(total_wins / max(1, total_wins + total_losses) * 100, 1)
+        win_pnls = [t.get("pnl_usd", 0) for t in settled if t["result"] == "win"]
+        loss_pnls = [t.get("pnl_usd", 0) for t in settled if t["result"] == "loss"]
+        avg_win = round(sum(win_pnls) / max(1, len(win_pnls)), 2)
+        avg_loss = round(sum(loss_pnls) / max(1, len(loss_pnls)), 2)
+
+        best_sport = max(by_sport.items(), key=lambda x: x[1]["pnl"])[0] if by_sport else "N/A"
+        # Best price range (exclude <70 and empty)
+        valid_prices = {k: v for k, v in by_price.items() if v["total"] > 0 and k != "<70"}
+        best_price = max(valid_prices.items(), key=lambda x: x[1]["win_rate"])[0] if valid_prices else "N/A"
+
+        # Also include _CATEGORY_STATS for broader coverage
+        cat_stats_copy = {}
+        for cat, data in _CATEGORY_STATS.items():
+            cat_stats_copy[cat] = {
+                "wins": data.get("wins", 0),
+                "losses": data.get("losses", 0),
+                "pnl": round(data.get("pnl", 0), 2),
+                "win_rate": round(data.get("wins", 0) / max(1, data.get("wins", 0) + data.get("losses", 0)) * 100, 1),
+            }
+
+        return jsonify({
+            "by_sport": by_sport,
+            "by_price": by_price,
+            "by_time": time_periods,
+            "category_stats": cat_stats_copy,
+            "insights": {
+                "overall_win_rate": overall_wr,
+                "total_trades": len(settled),
+                "total_wins": total_wins,
+                "total_losses": total_losses,
+                "avg_win_profit": avg_win,
+                "avg_loss_amount": avg_loss,
+                "best_sport": best_sport,
+                "best_price_range": best_price,
+            },
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 
 _PORTFOLIO_CACHE = {"data": None, "ts": 0}
@@ -6779,6 +7134,7 @@ a:hover { color: #7da5f5; }
   <button class="tab" onclick="switchTab('history')">History</button>
   <button class="tab" onclick="switchTab('quant')">Quant</button>
   <button class="tab" onclick="switchTab('moonshot')" style="color:#ffb400">Moonshot</button>
+  <button class="tab" onclick="switchTab('analytics')" style="color:#00d4ff">Analytics</button>
 </div>
 
 <!-- Positions Tab -->
@@ -6934,6 +7290,42 @@ a:hover { color: #7da5f5; }
   </div>
 </div>
 
+<!-- Analytics Tab -->
+<div class="tab-content" id="tab-analytics">
+  <div class="section">
+    <!-- Key Insights Summary -->
+    <div id="analytics-insights" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin-bottom:20px">
+      <div class="loading">Loading analytics...</div>
+    </div>
+
+    <!-- Win Rate by Sport -->
+    <div style="margin-bottom:24px">
+      <div style="color:#00d4ff;font-size:14px;font-weight:700;margin-bottom:10px">Win Rate by Sport</div>
+      <div id="analytics-sport" style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:12px;overflow-x:auto">
+        <div class="loading">Loading...</div>
+      </div>
+    </div>
+
+    <!-- Win Rate by Price Range -->
+    <div style="margin-bottom:24px">
+      <div style="color:#00d4ff;font-size:14px;font-weight:700;margin-bottom:10px">Win Rate by Price Range</div>
+      <div id="analytics-price" style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:12px;overflow-x:auto">
+        <div class="loading">Loading...</div>
+      </div>
+    </div>
+
+    <!-- Time of Day Performance -->
+    <div style="margin-bottom:24px">
+      <div style="color:#00d4ff;font-size:14px;font-weight:700;margin-bottom:10px">Time of Day Performance</div>
+      <div id="analytics-time" style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:12px;overflow-x:auto">
+        <div class="loading">Loading...</div>
+      </div>
+    </div>
+
+    <div style="font-size:10px;color:#555;text-align:center;margin-top:12px">Data from trade journal. Updates every 30s.</div>
+  </div>
+</div>
+
 </div><!-- end container -->
 
 <div class="toast-container" id="toast-container"></div>
@@ -6955,6 +7347,7 @@ function switchTab(name) {
   if (name === 'quant') loadQuantPicks();
   if (name === 'seventyfivers') loadSeventyFivers();
   if (name === 'history') loadSettled();
+  if (name === 'analytics') loadAnalytics();
 }
 
 const API = window.location.origin;
@@ -8809,6 +9202,161 @@ async function checkForNotifications() {
     }
     _lastActivityCount = items.length;
   } catch(e) {}
+}
+
+// --- Analytics Tab ---
+async function loadAnalytics() {
+  try {
+    // Use both the /analytics endpoint and settled data
+    var data = await fetch(API + '/analytics').then(r => r.json());
+    if (data.error) { console.error('Analytics error:', data.error); return; }
+
+    var ins = data.insights || {};
+    var bySport = data.by_sport || {};
+    var byPrice = data.by_price || {};
+    var byTime = data.by_time || {};
+    var catStats = data.category_stats || {};
+
+    // Also merge settled data if available for broader coverage
+    if (window._settledData && window._settledData.length > 0 && ins.total_trades === 0) {
+      // Fallback: compute from settled data client-side
+      var sd = window._settledData;
+      var tw = 0, tl = 0, wp = 0, lp = 0;
+      var sportMap = {};
+      var priceMap = {'<70':{w:0,l:0,p:0,t:0},'70-74':{w:0,l:0,p:0,t:0},'75-79':{w:0,l:0,p:0,t:0},'80-84':{w:0,l:0,p:0,t:0},'85-89':{w:0,l:0,p:0,t:0},'90-100':{w:0,l:0,p:0,t:0}};
+      sd.forEach(function(s) {
+        var cat = s.category || 'other';
+        if (!sportMap[cat]) sportMap[cat] = {wins:0,losses:0,pnl:0,total:0,win_rate:0};
+        sportMap[cat].total++;
+        if (s.won === true) { sportMap[cat].wins++; tw++; wp += s.pnl_usd; }
+        else if (s.won === false) { sportMap[cat].losses++; tl++; lp += s.pnl_usd; }
+        sportMap[cat].pnl += s.pnl_usd;
+        // Price bucket
+        var pc = s.entry_cents || 0;
+        var bk = '<70';
+        if (pc >= 90) bk = '90-100';
+        else if (pc >= 85) bk = '85-89';
+        else if (pc >= 80) bk = '80-84';
+        else if (pc >= 75) bk = '75-79';
+        else if (pc >= 70) bk = '70-74';
+        priceMap[bk].t++;
+        if (s.won === true) priceMap[bk].w++;
+        else if (s.won === false) priceMap[bk].l++;
+        priceMap[bk].p += s.pnl_usd;
+      });
+      Object.keys(sportMap).forEach(function(k) {
+        var c = sportMap[k];
+        c.win_rate = Math.round(c.wins / Math.max(1, c.wins + c.losses) * 100 * 10) / 10;
+        c.pnl = Math.round(c.pnl * 100) / 100;
+      });
+      bySport = sportMap;
+      Object.keys(priceMap).forEach(function(k) {
+        var b = priceMap[k];
+        byPrice[k] = {wins:b.w,losses:b.l,pnl:Math.round(b.p*100)/100,total:b.t,win_rate:Math.round(b.w/Math.max(1,b.w+b.l)*100*10)/10,avg_pnl:Math.round(b.p/Math.max(1,b.t)*100)/100};
+      });
+      ins.total_trades = sd.length;
+      ins.total_wins = tw;
+      ins.total_losses = tl;
+      ins.overall_win_rate = Math.round(tw / Math.max(1, tw + tl) * 100 * 10) / 10;
+      ins.avg_win_profit = tw > 0 ? Math.round(wp / tw * 100) / 100 : 0;
+      ins.avg_loss_amount = tl > 0 ? Math.round(lp / tl * 100) / 100 : 0;
+      var bestCat = Object.keys(sportMap).sort(function(a,b){ return sportMap[b].pnl - sportMap[a].pnl; })[0] || 'N/A';
+      ins.best_sport = bestCat;
+      var validPrices = Object.keys(byPrice).filter(function(k){ return k !== '<70' && byPrice[k].total > 0; });
+      ins.best_price_range = validPrices.sort(function(a,b){ return byPrice[b].win_rate - byPrice[a].win_rate; })[0] || 'N/A';
+    }
+
+    // --- Render Key Insights ---
+    var insEl = document.getElementById('analytics-insights');
+    function insightBox(label, value, color) {
+      return '<div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:10px 12px;text-align:center">' +
+        '<div style="color:#666;font-size:9px;font-weight:500;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">' + label + '</div>' +
+        '<div style="color:' + color + ';font-size:18px;font-weight:700">' + value + '</div></div>';
+    }
+    var wrColor = ins.overall_win_rate >= 55 ? '#00dc5a' : ins.overall_win_rate >= 45 ? '#ffb400' : '#ff5000';
+    var ihtml = '';
+    ihtml += insightBox('Overall Win Rate', ins.overall_win_rate + '%', wrColor);
+    ihtml += insightBox('Total Trades', ins.total_trades || 0, '#00d4ff');
+    ihtml += insightBox('Best Sport', (ins.best_sport || 'N/A').charAt(0).toUpperCase() + (ins.best_sport || 'N/A').slice(1), '#ffb400');
+    ihtml += insightBox('Best Price Range', (ins.best_price_range || 'N/A') + String.fromCharCode(162), '#ffb400');
+    ihtml += insightBox('Avg Win', '+$' + (ins.avg_win_profit || 0).toFixed(2), '#00dc5a');
+    ihtml += insightBox('Avg Loss', '-$' + Math.abs(ins.avg_loss_amount || 0).toFixed(2), '#ff5000');
+    insEl.innerHTML = ihtml;
+
+    // --- Render Win Rate by Sport ---
+    var sportEl = document.getElementById('analytics-sport');
+    var sportKeys = Object.keys(bySport).filter(function(k){ return bySport[k].total > 0; }).sort(function(a,b){ return bySport[b].pnl - bySport[a].pnl; });
+    if (sportKeys.length === 0) {
+      sportEl.innerHTML = '<div style="color:#555;font-size:11px;padding:8px">No sport data yet. Place some trades and check back.</div>';
+    } else {
+      var shtml = '<table style="width:100%;border-collapse:collapse;font-size:11px">';
+      shtml += '<tr style="color:#888;border-bottom:1px solid #222"><th style="padding:6px 8px;text-align:left">Sport</th><th style="padding:6px 8px;text-align:center">Trades</th><th style="padding:6px 8px;text-align:center">W/L</th><th style="padding:6px 8px;text-align:center">Win Rate</th><th style="padding:6px 8px;text-align:right">P&amp;L</th></tr>';
+      sportKeys.forEach(function(k) {
+        var s = bySport[k];
+        var wrc = s.win_rate >= 55 ? '#00dc5a' : s.win_rate >= 45 ? '#ffb400' : '#ff5000';
+        var pnlc = s.pnl >= 0 ? '#00dc5a' : '#ff5000';
+        var rowBg = s.pnl >= 0 ? 'rgba(0,220,90,0.04)' : 'rgba(255,80,0,0.04)';
+        shtml += '<tr style="border-bottom:1px solid #1a1a1a;background:' + rowBg + '">';
+        shtml += '<td style="padding:8px;color:#ddd;font-weight:600;text-transform:capitalize">' + k + '</td>';
+        shtml += '<td style="padding:8px;text-align:center;color:#ccc">' + s.total + '</td>';
+        shtml += '<td style="padding:8px;text-align:center;color:#ccc">' + s.wins + '/' + s.losses + '</td>';
+        shtml += '<td style="padding:8px;text-align:center;color:' + wrc + ';font-weight:700">' + s.win_rate.toFixed(1) + '%</td>';
+        shtml += '<td style="padding:8px;text-align:right;color:' + pnlc + ';font-weight:700">' + (s.pnl >= 0 ? '+' : '') + '$' + Math.abs(s.pnl).toFixed(2) + '</td>';
+        shtml += '</tr>';
+      });
+      shtml += '</table>';
+      sportEl.innerHTML = shtml;
+    }
+
+    // --- Render Win Rate by Price Range ---
+    var priceEl = document.getElementById('analytics-price');
+    var priceOrder = ['<70','70-74','75-79','80-84','85-89','90-100'];
+    var phtml = '<table style="width:100%;border-collapse:collapse;font-size:11px">';
+    phtml += '<tr style="color:#888;border-bottom:1px solid #222"><th style="padding:6px 8px;text-align:left">Price Range</th><th style="padding:6px 8px;text-align:center">Trades</th><th style="padding:6px 8px;text-align:center">W/L</th><th style="padding:6px 8px;text-align:center">Win Rate</th><th style="padding:6px 8px;text-align:right">Avg P&amp;L</th></tr>';
+    priceOrder.forEach(function(k) {
+      var b = byPrice[k];
+      if (!b || b.total === 0) return;
+      var wrc = b.win_rate >= 55 ? '#00dc5a' : b.win_rate >= 45 ? '#ffb400' : '#ff5000';
+      var avgPnl = b.avg_pnl || (b.pnl / Math.max(1, b.total));
+      var pnlc = avgPnl >= 0 ? '#00dc5a' : '#ff5000';
+      var rowBg = avgPnl >= 0 ? 'rgba(0,220,90,0.04)' : 'rgba(255,80,0,0.04)';
+      phtml += '<tr style="border-bottom:1px solid #1a1a1a;background:' + rowBg + '">';
+      phtml += '<td style="padding:8px;color:#ddd;font-weight:600">' + k + String.fromCharCode(162) + '</td>';
+      phtml += '<td style="padding:8px;text-align:center;color:#ccc">' + b.total + '</td>';
+      phtml += '<td style="padding:8px;text-align:center;color:#ccc">' + b.wins + '/' + b.losses + '</td>';
+      phtml += '<td style="padding:8px;text-align:center;color:' + wrc + ';font-weight:700">' + b.win_rate.toFixed(1) + '%</td>';
+      phtml += '<td style="padding:8px;text-align:right;color:' + pnlc + ';font-weight:700">' + (avgPnl >= 0 ? '+' : '') + '$' + Math.abs(avgPnl).toFixed(2) + '</td>';
+      phtml += '</tr>';
+    });
+    phtml += '</table>';
+    priceEl.innerHTML = phtml;
+
+    // --- Render Time of Day Performance ---
+    var timeEl = document.getElementById('analytics-time');
+    var timeOrder = ['Morning (6am-12pm)','Afternoon (12pm-6pm)','Evening (6pm-12am)','Night (12am-6am)'];
+    var thtml = '<table style="width:100%;border-collapse:collapse;font-size:11px">';
+    thtml += '<tr style="color:#888;border-bottom:1px solid #222"><th style="padding:6px 8px;text-align:left">Time Period</th><th style="padding:6px 8px;text-align:center">Trades</th><th style="padding:6px 8px;text-align:center">W/L</th><th style="padding:6px 8px;text-align:center">Win Rate</th><th style="padding:6px 8px;text-align:right">P&amp;L</th></tr>';
+    timeOrder.forEach(function(k) {
+      var p = byTime[k];
+      if (!p || p.total === 0) return;
+      var wrc = p.win_rate >= 55 ? '#00dc5a' : p.win_rate >= 45 ? '#ffb400' : '#ff5000';
+      var pnlc = p.pnl >= 0 ? '#00dc5a' : '#ff5000';
+      var rowBg = p.pnl >= 0 ? 'rgba(0,220,90,0.04)' : 'rgba(255,80,0,0.04)';
+      thtml += '<tr style="border-bottom:1px solid #1a1a1a;background:' + rowBg + '">';
+      thtml += '<td style="padding:8px;color:#ddd;font-weight:600">' + k + '</td>';
+      thtml += '<td style="padding:8px;text-align:center;color:#ccc">' + p.total + '</td>';
+      thtml += '<td style="padding:8px;text-align:center;color:#ccc">' + p.wins + '/' + p.losses + '</td>';
+      thtml += '<td style="padding:8px;text-align:center;color:' + wrc + ';font-weight:700">' + p.win_rate.toFixed(1) + '%</td>';
+      thtml += '<td style="padding:8px;text-align:right;color:' + pnlc + ';font-weight:700">' + (p.pnl >= 0 ? '+' : '') + '$' + Math.abs(p.pnl).toFixed(2) + '</td>';
+      thtml += '</tr>';
+    });
+    thtml += '</table>';
+    timeEl.innerHTML = thtml;
+
+  } catch(e) {
+    console.error('Analytics load error', e);
+    document.getElementById('analytics-insights').innerHTML = '<div style="color:#ff5000;font-size:12px">Error loading analytics: ' + e.message + '</div>';
+  }
 }
 
 // Load everything on page load
