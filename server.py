@@ -1983,6 +1983,27 @@ def check_position_prices():
 
             vol_score = get_volatility_score(ticker)
 
+            # Determine who placed this bet: check journal & all_trades for strategy
+            placed_by = "you"  # default to manual
+            for jt in reversed(_TRADE_JOURNAL):
+                if jt.get("ticker") == ticker and jt.get("side") == side:
+                    strat = jt.get("strategy", "")
+                    if strat in ("moonshark", "live_sniper", "consensus_mispricing", "arb"):
+                        placed_by = "bot"
+                    elif strat in ("moonshark_manual", "manual", "quant"):
+                        placed_by = "you"
+                    else:
+                        placed_by = "you"
+                    break
+            if placed_by == "you":
+                for at in reversed(BOT_STATE.get("all_trades", [])):
+                    if at.get("ticker") == ticker:
+                        if at.get("manual"):
+                            placed_by = "you"
+                        elif at.get("strategy") in ("moonshark", "live_sniper", "consensus_mispricing", "arb"):
+                            placed_by = "bot"
+                        break
+
             enriched.append({
                 "ticker": ticker,
                 "title": title,
@@ -2001,6 +2022,7 @@ def check_position_prices():
                 "closing_soon": closing_soon,
                 "time_left": time_left_str,
                 "volatility": vol_score,
+                "placed_by": placed_by,
             })
         return enriched
     except Exception as e:
@@ -2119,6 +2141,7 @@ def run_bot_scan():
         BOT_STATE["trade_date"] = today
         BOT_STATE["trades_today"] = []
         BOT_STATE["daily_spent_usd"] = 0.0
+        BOT_STATE["manual_trades_today"] = []
         _log_activity("Daily reset — new trading day started")
 
     BOT_STATE["last_scan"] = now.isoformat()
@@ -2323,9 +2346,9 @@ BOT_STATE["snipe_profit_usd"] = 0.0
 # MoonShark settings — longshot underdog sniper (10-30c contracts, high payout)
 MOONSHARK_MIN_PRICE = 10   # cents — buy cheap contracts at 10c+
 MOONSHARK_MAX_PRICE = 30   # cents — cap at 30c (still a longshot)
-MOONSHARK_BET_USD = 2.50   # small bets — most will lose
-MOONSHARK_MAX_DAILY = 20.0  # max $20/day on MoonShark
-MOONSHARK_MAX_TRADES = 8    # max 8 MoonShark trades per day
+MOONSHARK_MAX_DAILY = 50.0  # max $50/day on MoonShark
+MOONSHARK_MIN_TRADES = 5    # aim for at least 5 trades per day
+MOONSHARK_MAX_TRADES = 10   # max 10 MoonShark trades per day
 
 BOT_STATE["moonshark_trades_today"] = []
 BOT_STATE["moonshark_daily_spent"] = 0.0
@@ -2841,8 +2864,24 @@ def moonshark_snipe():
                 if total_daily >= BOT_CONFIG["max_daily_usd"]:
                     break
 
-                # Calculate quantity — fixed small bet for longshots
-                count = max(1, int(MOONSHARK_BET_USD * 100 / price))
+                # Calculate quantity using Kelly Criterion
+                # For longshots, estimate win probability from price + small edge
+                # A 20c contract implies 20% chance; we think it's slightly higher
+                implied_prob = price / 100.0
+                # Assume a small edge (5-10%) — longshots are underpriced in closing markets
+                edge_estimate = 0.05 + (0.05 * (30 - price) / 20)  # more edge at cheaper prices
+                win_prob = min(implied_prob + edge_estimate, 0.45)  # cap — still a longshot
+                remaining_budget = MOONSHARK_MAX_DAILY - BOT_STATE["moonshark_daily_spent"]
+                trades_left = MOONSHARK_MAX_TRADES - len(BOT_STATE.get("moonshark_trades_today", []))
+                # Kelly sizes based on remaining daily budget (not full bankroll)
+                kelly_bankroll = min(remaining_budget, MOONSHARK_MAX_DAILY)
+                profit_if_win = (100 - price) / 100.0
+                odds_decimal = profit_if_win / (price / 100.0)
+                kelly_usd = kelly_bet_size(kelly_bankroll, win_prob, odds_decimal)
+                # Floor $3, cap at fair share of remaining budget
+                max_per_trade = remaining_budget / max(trades_left, 1)
+                bet_usd = max(3.0, min(kelly_usd, max_per_trade, remaining_budget))
+                count = max(1, int(bet_usd * 100 / price))
                 cost_usd = (price * count) / 100.0
 
                 if BOT_STATE["moonshark_daily_spent"] + cost_usd > MOONSHARK_MAX_DAILY:
@@ -2857,6 +2896,9 @@ def moonshark_snipe():
                 reasons.append(f"cat={mcat}")
                 reasons.append(f"vol={mkt_volume}")
                 reasons.append(f"payout={profit_per}c/contract")
+                reasons.append(f"kelly=${kelly_usd:.2f}")
+                reasons.append(f"edge={edge_estimate:.1%}")
+                reasons.append(f"winP={win_prob:.1%}")
                 vetting = " | ".join(reasons)
 
                 _log_activity(
@@ -6079,10 +6121,12 @@ def category_stats():
 
 @app.route("/trades-today")
 def trades_today_endpoint():
-    """Return all trades placed today (bot + sniper + quant)."""
+    """Return all trades placed today (bot + sniper + quant + moonshark + manual)."""
     bot_trades = BOT_STATE.get("trades_today", [])
     sniper_trades = BOT_STATE.get("snipe_trades_today", [])
     quant_trades = BOT_STATE.get("quant_trades", [])
+    moonshark_trades = BOT_STATE.get("moonshark_trades_today", [])
+    manual_trades = BOT_STATE.get("manual_trades_today", [])
     today_str = datetime.datetime.utcnow().strftime("%Y-%m-%d")
 
     all_today = []
@@ -6097,6 +6141,7 @@ def trades_today_endpoint():
             "time": t.get("timestamp", ""),
             "strategy": t.get("strategy", "bot"),
             "success": t.get("success", False),
+            "source": "bot",
         })
     for t in sniper_trades:
         all_today.append({
@@ -6109,6 +6154,7 @@ def trades_today_endpoint():
             "time": t.get("time", ""),
             "strategy": "sniper",
             "success": True,
+            "source": "bot",
         })
     for t in quant_trades:
         if (t.get("time", "") or "")[:10] == today_str:
@@ -6122,6 +6168,35 @@ def trades_today_endpoint():
                 "time": t.get("time", ""),
                 "strategy": "quant",
                 "success": True,
+                "source": "bot",
+            })
+
+    for t in moonshark_trades:
+        all_today.append({
+            "ticker": t.get("ticker", ""),
+            "title": t.get("title", t.get("ticker", "")),
+            "side": t.get("side", ""),
+            "price_cents": t.get("price", 0),
+            "count": t.get("count", 0),
+            "cost_usd": round(t.get("cost", 0), 2),
+            "time": t.get("time", ""),
+            "strategy": "moonshark",
+            "success": True,
+            "source": "bot",
+        })
+    for t in manual_trades:
+        if (t.get("time", "") or "")[:10] == today_str:
+            all_today.append({
+                "ticker": t.get("ticker", ""),
+                "title": t.get("title", t.get("ticker", "")),
+                "side": t.get("side", ""),
+                "price_cents": t.get("price", 0),
+                "count": t.get("count", 0),
+                "cost_usd": round(t.get("cost", 0), 2),
+                "time": t.get("time", ""),
+                "strategy": t.get("strategy", "manual"),
+                "success": True,
+                "source": "you",
             })
 
     # Sort by time descending
@@ -6639,6 +6714,14 @@ def quick_bet():
     if success:
         _log_activity(f"QUICK BET: {side.upper()} {ticker} @ {price_cents}c x{count} (${cost_usd:.2f})", "success")
         BOT_STATE["sf_bets"] += 1
+        # Track in trades-today feed so manual bets show up in Activity
+        BOT_STATE.setdefault("manual_trades_today", []).append({
+            "ticker": ticker, "title": ticker, "side": side,
+            "price": price_cents, "count": count, "cost": round(cost_usd, 2),
+            "time": datetime.datetime.utcnow().isoformat(),
+            "strategy": "manual", "source": "you",
+        })
+        _journal_trade(ticker, ticker, side, price_cents, count, cost_usd, "manual", is_live=False)
     else:
         err = result.get("error", result.get("response_body", "Unknown"))
         _log_activity(f"QUICK BET FAILED: {ticker} — {str(err)[:60]}", "error")
@@ -7126,6 +7209,14 @@ def moonshot_bet():
                 f"(${actual_cost:.2f} for ${payout:.2f} payout)",
                 "success",
             )
+            # Track in trades-today feed so manual moonshot bets show up
+            BOT_STATE.setdefault("manual_trades_today", []).append({
+                "ticker": ticker, "title": ticker, "side": side,
+                "price": price_cents, "count": count, "cost": round(actual_cost, 2),
+                "time": datetime.datetime.utcnow().isoformat(),
+                "strategy": "moonshark_manual", "source": "you",
+            })
+            _journal_trade(ticker, ticker, side, price_cents, count, actual_cost, "moonshark_manual", is_live=False)
             return jsonify({"success": True, "cost": actual_cost, "count": count, "potential_payout": payout})
         else:
             return jsonify({"error": resp.text}), 400
@@ -9246,7 +9337,8 @@ async function loadPortfolio() {
         var sparkY2 = Math.max(2, Math.min(14, 16 - (curr / 100 * 14)));
         var spark = '<svg class="sparkline" width="24" height="14" viewBox="0 0 24 14"><line x1="1" y1="' + sparkY1 + '" x2="22" y2="' + sparkY2 + '" stroke="' + sparkColor + '" stroke-width="1.5" stroke-linecap="round"/><circle cx="22" cy="' + sparkY2 + '" r="1.5" fill="' + sparkColor + '"/></svg>';
         t += '<tr>';
-        t += '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><a href="https://kalshi.com/markets/' + p.ticker + '" target="_blank" style="color:#ddd;font-size:9px">' + (p.title || p.ticker) + '</a></td>';
+        var placedTag = p.placed_by === 'bot' ? '<span style="font-size:7px;padding:1px 3px;background:#1a1a2e;border:1px solid #4a4ae0;border-radius:3px;color:#7a7aff;margin-right:4px;vertical-align:middle" title="Placed by TradeShark bot">BOT</span>' : '<span style="font-size:7px;padding:1px 3px;background:#1a2e1a;border:1px solid #3a8a3a;border-radius:3px;color:#5abf5a;margin-right:4px;vertical-align:middle" title="Placed by you">YOU</span>';
+        t += '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + placedTag + '<a href="https://kalshi.com/markets/' + p.ticker + '" target="_blank" style="color:#ddd;font-size:9px">' + (p.title || p.ticker) + '</a></td>';
         t += '<td style="color:' + sideColor + ';font-weight:700;font-size:8px">' + p.side.toUpperCase() + '</td>';
         t += '<td style="font-weight:700;font-size:8px">' + (p.current_price || '?') + 'c' + spark + '</td>';
         t += '<td style="color:' + pnlColor + ';font-weight:700;font-size:8px">' + pnlText + '</td>';
@@ -9321,15 +9413,16 @@ async function loadBetsFeed() {
         } catch(e) {}
       }
       var sideC = t.side === 'yes' ? '#00dc5a' : '#ff5000';
-      var stratColors = {sniper:'#ffb400', quant:'#00d4ff', bot:'#888'};
-      var stratLabels = {sniper:'SNIPER', quant:'QUANT', bot:'BOT'};
+      var stratColors = {sniper:'#ffb400', quant:'#00d4ff', bot:'#888', moonshark:'#e040fb', manual:'#5abf5a', moonshark_manual:'#5abf5a'};
+      var stratLabels = {sniper:'SNIPER', quant:'QUANT', bot:'BOT', moonshark:'MOONSHARK', manual:'MANUAL', moonshark_manual:'MOONSHOT'};
       var sc = stratColors[t.strategy] || '#888';
       var sl = stratLabels[t.strategy] || t.strategy.toUpperCase();
       var title = (t.title || t.ticker || '').substring(0, 40);
+      var sourceTag = t.source === 'you' ? '<span style="font-size:7px;padding:1px 3px;background:#1a2e1a;border:1px solid #3a8a3a;border-radius:3px;color:#5abf5a;margin-right:4px">YOU</span>' : '<span style="font-size:7px;padding:1px 3px;background:#1a1a2e;border:1px solid #4a4ae0;border-radius:3px;color:#7a7aff;margin-right:4px">BOT</span>';
       h += '<div class="activity-line">';
       h += '<span class="time">' + timeStr + '</span>';
       h += '<span class="dot" style="background:' + sc + '"></span>';
-      h += '<span class="msg"><span style="color:' + sc + ';font-weight:700;font-size:8px;margin-right:4px">' + sl + '</span>';
+      h += '<span class="msg">' + sourceTag + '<span style="color:' + sc + ';font-weight:700;font-size:8px;margin-right:4px">' + sl + '</span>';
       h += '<span style="color:' + sideC + ';font-weight:700">' + (t.side || '').toUpperCase() + '</span> ';
       h += '<span style="color:#ccc">' + title + '</span> ';
       h += '<span style="color:#ffb400">' + t.price_cents + '&#162; x' + (t.count || 1) + '</span> ';
