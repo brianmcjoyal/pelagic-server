@@ -9344,16 +9344,19 @@ async function loadPortfolio() {
       return bPnl - aPnl;
     });
     // Expiry breakdown
-    var now = Date.now();
-    var settlingNow = 0, today24h = 0, thisWeek = 0, thisMonth = 0, later = 0;
+    var now = new Date();
+    var nowMs = now.getTime();
+    var midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0).getTime();
+    var weekEnd = nowMs + (7 * 86400000);
+    var monthEnd = nowMs + (30 * 86400000);
+    var settlingNow = 0, closingToday = 0, thisWeek = 0, thisMonth = 0, later = 0;
     positions.forEach(function(p) {
       if (!p.close_time) { later++; return; }
       var close = new Date(p.close_time).getTime();
-      var daysLeft = (close - now) / 86400000;
-      if (daysLeft <= 0) settlingNow++;
-      else if (daysLeft <= 1) today24h++;
-      else if (daysLeft <= 7) thisWeek++;
-      else if (daysLeft <= 30) thisMonth++;
+      if (close <= nowMs) settlingNow++;
+      else if (close <= midnight) closingToday++;
+      else if (close <= weekEnd) thisWeek++;
+      else if (close <= monthEnd) thisMonth++;
       else later++;
     });
 
@@ -9367,7 +9370,7 @@ async function loadPortfolio() {
     html += '</div>';
     html += '<div style="display:flex;gap:8px;margin-bottom:6px;flex-wrap:wrap">';
     if (settlingNow > 0) html += '<span style="font-size:8px;padding:2px 6px;background:#1a1a1a;border:1px solid #ffb400;border-radius:3px;color:#ffb400">' + settlingNow + ' settling now</span>';
-    if (today24h > 0) html += '<span style="font-size:8px;padding:2px 6px;background:#1a1a1a;border:1px solid #ffcc00;border-radius:3px;color:#ffcc00">' + today24h + ' within 24h</span>';
+    if (closingToday > 0) html += '<span style="font-size:8px;padding:2px 6px;background:#1a1a1a;border:1px solid #ffcc00;border-radius:3px;color:#ffcc00">' + closingToday + ' closing today</span>';
     if (thisWeek > 0) html += '<span style="font-size:8px;padding:2px 6px;background:#1a1a1a;border:1px solid #00bfff;border-radius:3px;color:#00bfff">' + thisWeek + ' this week</span>';
     if (thisMonth > 0) html += '<span style="font-size:8px;padding:2px 6px;background:#1a1a1a;border:1px solid #888;border-radius:3px;color:#888">' + thisMonth + ' this month</span>';
     if (later > 0) html += '<span style="font-size:8px;padding:2px 6px;background:#1a1a1a;border:1px solid #444;border-radius:3px;color:#555">' + later + ' later</span>';
