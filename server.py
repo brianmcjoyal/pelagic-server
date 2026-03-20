@@ -8846,10 +8846,10 @@ a:hover { color: #7da5f5; }
 <div class="tabs">
   <button class="tab active" onclick="switchTab('positions')">Positions</button>
   <button class="tab" onclick="switchTab('activity')">Activity</button>
+  <button class="tab" onclick="switchTab('history')">History</button>
   <button class="tab" onclick="switchTab('moonshark')" style="color:#00d4ff">&#x1F988; MoonShark</button>
   <button class="tab" onclick="switchTab('seventyfivers')">75%'ers</button>
   <button class="tab" onclick="switchTab('picks')">Top Picks</button>
-  <button class="tab" onclick="switchTab('history')">History</button>
   <button class="tab" onclick="switchTab('quant')">Quant</button>
   <button class="tab" onclick="switchTab('analytics')" style="color:#00d4ff">Analytics</button>
   <button class="tab" onclick="switchTab('news')" style="color:#ccc">&#x1F4F0; News</button>
