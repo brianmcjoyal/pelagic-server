@@ -5852,6 +5852,80 @@ def insights_endpoint():
 _NEWS_FEED_CACHE = {"stories": [], "ts": 0}
 _NEWS_FEED_TTL = 900  # 15 minutes
 
+# News impact analysis — keyword-based economic impact + stock picks
+_NEWS_IMPACT_RULES = [
+    # (keywords_any, impact_text, [(ticker, reason), ...])
+    (["iran", "war", "military", "strike", "bomb", "attack", "conflict", "missile"],
+     "Geopolitical risk spikes oil prices, weighs on equities. Defense spending up, consumer confidence down.",
+     [("LMT", "Lockheed Martin — defense spending surges during conflict"),
+      ("XLE", "Energy Select ETF — oil prices spike on supply disruption")]),
+    (["tariff", "trade war", "import tax", "trade deal", "sanctions"],
+     "Trade barriers raise costs for importers, slow global growth. Domestic producers may benefit short-term.",
+     [("DBA", "Agriculture ETF — tariffs shift commodity flows"),
+      ("WMT", "Walmart — import cost pressure on retail margins")]),
+    (["fed ", "interest rate", "rate cut", "rate hike", "federal reserve", "powell", "monetary policy"],
+     "Rate changes ripple through mortgages, bonds, and growth stocks. Lower rates boost tech, higher rates favor banks.",
+     [("TLT", "20+ Year Treasury ETF — moves inversely to rate expectations"),
+      ("XLF", "Financial Select ETF — banks profit from higher rates")]),
+    (["oil", "crude", "opec", "petroleum", "gas price", "energy price", "wti", "brent"],
+     "Energy price swings affect transportation, manufacturing costs, and consumer spending power.",
+     [("XOM", "ExxonMobil — directly benefits from higher oil prices"),
+      ("DAL", "Delta Air Lines — fuel costs are major expense, lower oil = higher margins")]),
+    (["inflation", "cpi", "consumer price", "cost of living"],
+     "Rising inflation erodes purchasing power, pressures Fed to tighten. Benefits hard assets, hurts growth stocks.",
+     [("TIP", "TIPS ETF — inflation-protected treasuries outperform"),
+      ("COST", "Costco — pricing power and bulk buying hedge inflation")]),
+    (["recession", "gdp", "economic slowdown", "contraction", "unemployment"],
+     "Recession fears drive flight to safety — bonds, gold, utilities. Cyclical sectors underperform.",
+     [("GLD", "Gold ETF — classic safe haven during downturns"),
+      ("XLU", "Utilities ETF — defensive sector with stable dividends")]),
+    (["tech", "ai ", "artificial intelligence", "nvidia", "openai", "google", "apple", "microsoft", "semiconductor", "chip"],
+     "Tech sector moves drive Nasdaq. AI spending boom benefits chipmakers and cloud providers.",
+     [("NVDA", "Nvidia — dominant in AI chip market"),
+      ("MSFT", "Microsoft — Azure + OpenAI partnership drives cloud/AI revenue")]),
+    (["crypto", "bitcoin", "ethereum", "blockchain", "digital currency"],
+     "Crypto moves signal risk appetite. Institutional adoption growing but regulatory uncertainty remains.",
+     [("COIN", "Coinbase — revenue tied to crypto trading volume"),
+      ("MSTR", "MicroStrategy — large Bitcoin holdings amplify BTC moves")]),
+    (["china", "beijing", "chinese economy", "yuan", "ccp"],
+     "China's economy impacts global supply chains, commodities demand, and emerging market sentiment.",
+     [("FXI", "China Large-Cap ETF — direct exposure to Chinese equities"),
+      ("CAT", "Caterpillar — infrastructure demand tied to Chinese growth")]),
+    (["housing", "mortgage", "real estate", "home price", "home sale"],
+     "Housing market affects consumer wealth, bank balance sheets, and construction employment.",
+     [("XHB", "Homebuilders ETF — direct housing market exposure"),
+      ("LEN", "Lennar — top homebuilder benefits from strong demand")]),
+    (["bank", "banking", "credit", "loan", "financial crisis", "bank failure"],
+     "Banking stress tightens lending, slows economic growth. Contagion risk can spread across financial system.",
+     [("KRE", "Regional Bank ETF — most exposed to credit stress"),
+      ("JPM", "JPMorgan — flight to quality benefits largest banks")]),
+    (["fertilizer", "agriculture", "farm", "crop", "food price", "grain"],
+     "Agricultural supply disruptions raise food prices globally, impacting emerging markets most severely.",
+     [("MOS", "Mosaic — major fertilizer producer benefits from shortages"),
+      ("ADM", "Archer-Daniels-Midland — food commodity processing and trading")]),
+    (["japan", "yen", "nikkei", "boj", "bank of japan"],
+     "Japanese monetary policy shifts impact global bond yields and carry trades. Yen strength = risk-off signal.",
+     [("EWJ", "Japan ETF — direct Japanese equity exposure"),
+      ("FXY", "Yen ETF — benefits from yen strengthening")]),
+    (["trump", "white house", "executive order", "president"],
+     "Policy shifts create sector winners and losers. Markets price regulatory and trade uncertainty.",
+     [("SPY", "S&P 500 ETF — broad market exposure to policy shifts"),
+      ("IWM", "Russell 2000 ETF — small caps most sensitive to domestic policy")]),
+]
+
+
+def _analyze_news_impact(title, summary=""):
+    """Analyze a news headline for economic impact and suggest stock picks."""
+    text = (title + " " + summary).lower()
+    for keywords, impact, stocks in _NEWS_IMPACT_RULES:
+        if any(kw in text for kw in keywords):
+            return impact, stocks
+    # Default fallback
+    return "Market impact uncertain — monitor for follow-up developments.", [
+        ("SPY", "S&P 500 ETF — broad market barometer"),
+        ("QQQ", "Nasdaq 100 ETF — tech-heavy growth exposure"),
+    ]
+
 def _fetch_news_feed():
     """Fetch top financial news from RSS feeds. Returns list of story dicts."""
     import urllib.request
@@ -5912,6 +5986,13 @@ def _fetch_news_feed():
             return datetime.datetime.min
     all_stories.sort(key=_sort_key, reverse=True)
     result = all_stories[:10]
+
+    # Enrich each story with economic impact + stock picks
+    for story in result:
+        impact, stocks = _analyze_news_impact(story["title"], story.get("summary", ""))
+        story["economic_impact"] = impact
+        story["stock_picks"] = stocks
+
     _NEWS_FEED_CACHE["stories"] = result
     _NEWS_FEED_CACHE["ts"] = now
     return result
@@ -8851,7 +8932,7 @@ a:hover { color: #7da5f5; }
   <button class="tab" onclick="switchTab('seventyfivers')">75%'ers</button>
   <button class="tab" onclick="switchTab('picks')">Top Picks</button>
   <button class="tab" onclick="switchTab('quant')">Quant</button>
-  <button class="tab" onclick="switchTab('analytics')" style="color:#00d4ff">Analytics</button>
+  <button class="tab" onclick="switchTab('analytics')" style="color:#00d4ff">Insights</button>
   <button class="tab" onclick="switchTab('news')" style="color:#ccc">&#x1F4F0; News</button>
 </div>
 
@@ -11402,6 +11483,17 @@ async function loadNews(forceRefresh) {
       html += '</div>';
       if (s.summary) {
         html += '<div style="color:#888;font-size:11px;margin-top:6px;line-height:1.4">' + s.summary + '</div>';
+      }
+      if (s.economic_impact) {
+        html += '<div style="color:#ffb400;font-size:10px;margin-top:8px;line-height:1.4;padding:6px 8px;background:#1a1a0a;border-left:2px solid #ffb400;border-radius:0 4px 4px 0">';
+        html += '<span style="font-weight:700">&#x1F4CA; Economic Impact:</span> ' + s.economic_impact + '</div>';
+      }
+      if (s.stock_picks && s.stock_picks.length > 0) {
+        html += '<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">';
+        s.stock_picks.forEach(function(sp) {
+          html += '<span style="font-size:9px;padding:3px 7px;background:#0a1a0a;border:1px solid #1a3a1a;border-radius:4px;color:#00dc5a" title="' + sp[1] + '">&#x1F4C8; <strong>' + sp[0] + '</strong> — ' + sp[1].split(' — ')[1] + '</span>';
+        });
+        html += '</div>';
       }
       html += '</div>';
     });
