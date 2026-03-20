@@ -6511,18 +6511,30 @@ def trades_today_endpoint():
             })
             seen_tickers.add(ticker)
 
-    # Enrich with close_time from cached market data
-    close_time_map = {}
+    # Enrich with close_time and current price from cached market data
+    market_info = {}
     try:
         for m in _market_cache.get("data") or []:
             ticker = m.get("ticker", "")
-            ct = m.get("expected_expiration_time") or m.get("close_time") or ""
-            if ticker and ct:
-                close_time_map[ticker] = ct
+            if ticker:
+                market_info[ticker] = {
+                    "close_time": m.get("expected_expiration_time") or m.get("close_time") or "",
+                    "yes_price": m.get("yes_price") or m.get("last_price") or 0,
+                    "no_price": m.get("no_price") or (100 - (m.get("yes_price") or m.get("last_price") or 0)),
+                }
     except Exception:
         pass
     for t in all_today:
-        t["close_time"] = close_time_map.get(t.get("ticker", ""), "")
+        info = market_info.get(t.get("ticker", ""), {})
+        t["close_time"] = info.get("close_time", "")
+        side = t.get("side", "yes")
+        entry = t.get("price_cents", 0)
+        current = info.get("yes_price", 0) if side == "yes" else info.get("no_price", 0)
+        t["current_price"] = current
+        if entry and current:
+            t["pnl_pct"] = round((current - entry) / entry * 100, 1)
+        else:
+            t["pnl_pct"] = 0
 
     # Sort by time descending
     all_today.sort(key=lambda x: x.get("time", ""), reverse=True)
@@ -9831,6 +9843,13 @@ async function loadBetsFeed() {
       h += '<span style="color:#ccc">' + title + '</span> ';
       h += '<span style="color:#ffb400">' + t.price_cents + '&#162; x' + (t.count || 1) + '</span> ';
       h += '<span style="color:#888">$' + (t.cost_usd || 0).toFixed(2) + '</span> ';
+      // P&L indicator
+      var pnl = t.pnl_pct || 0;
+      if (t.current_price && t.price_cents) {
+        var pnlColor = pnl > 0 ? '#00dc5a' : (pnl < 0 ? '#ff5000' : '#888');
+        var pnlArrow = pnl > 0 ? '▲' : (pnl < 0 ? '▼' : '–');
+        h += '<span style="color:' + pnlColor + ';font-size:10px;font-weight:700;margin-left:4px">' + pnlArrow + ' ' + (pnl > 0 ? '+' : '') + pnl + '% (' + t.current_price + '¢)</span> ';
+      }
       // Time until settlement
       var settleStr = '';
       if (t.close_time) {
