@@ -8533,7 +8533,7 @@ input:checked + .slider:before { transform: translateX(22px); background: #fff; 
 
 /* Big portfolio value */
 .portfolio-hero { text-align: center; padding: 40px 20px 8px; }
-.portfolio-value { font-size: 48px; font-weight: 800; color: #fff; letter-spacing: -1px; line-height: 1; }
+.portfolio-value { font-size: 28px; font-weight: 700; color: #fff; letter-spacing: -0.5px; line-height: 1; }
 .portfolio-change { font-size: 16px; font-weight: 600; margin-top: 6px; }
 .portfolio-change.up { color: #00dc5a; }
 .portfolio-change.down { color: #ff5000; }
@@ -8708,7 +8708,7 @@ a:hover { color: #7da5f5; }
 /* ===== TABLET (max 900px) ===== */
 @media (max-width: 900px) {
   .container { padding: 0 8px; }
-  .portfolio-value { font-size: 32px; }
+  .portfolio-value { font-size: 24px; }
   .stats-row { grid-template-columns: repeat(2, 1fr); gap: 1px; }
   .stat-value { font-size: 14px; }
   .stat-card { padding: 10px 8px; }
@@ -8742,7 +8742,7 @@ a:hover { color: #7da5f5; }
 /* ===== MOBILE (max 480px) ===== */
 @media (max-width: 480px) {
   body { font-size: 13px; }
-  .portfolio-value { font-size: 28px; letter-spacing: -0.5px; }
+  .portfolio-value { font-size: 20px; letter-spacing: -0.5px; }
   .portfolio-change { font-size: 12px; }
   .portfolio-hero { padding: 16px 8px 4px; }
   .stats-row { grid-template-columns: 1fr 1fr; gap: 1px; border-radius: 8px; }
