@@ -6395,6 +6395,9 @@ def trades_today_endpoint():
 
     all_today = []
     for t in bot_trades:
+        ts = t.get("timestamp", "") or ""
+        if ts[:10] != today_str:
+            continue
         all_today.append({
             "ticker": t.get("ticker", ""),
             "title": t.get("question", t.get("ticker", "")),
@@ -6402,12 +6405,15 @@ def trades_today_endpoint():
             "price_cents": t.get("price_cents", 0),
             "count": t.get("count", 0),
             "cost_usd": round(t.get("cost_usd", 0), 2),
-            "time": t.get("timestamp", ""),
+            "time": ts,
             "strategy": t.get("strategy", "bot"),
             "success": t.get("success", False),
             "source": "bot",
         })
     for t in sniper_trades:
+        ts = t.get("time", "") or ""
+        if ts[:10] != today_str:
+            continue
         all_today.append({
             "ticker": t.get("ticker", ""),
             "title": t.get("title", t.get("ticker", "")),
@@ -6415,13 +6421,15 @@ def trades_today_endpoint():
             "price_cents": t.get("price", 0),
             "count": t.get("count", 0),
             "cost_usd": round(t.get("cost", 0), 2),
-            "time": t.get("time", ""),
+            "time": ts,
             "strategy": "sniper",
             "success": True,
             "source": "bot",
         })
     for t in quant_trades:
-        if (t.get("time", "") or "")[:10] == today_str:
+        if (t.get("time", "") or "")[:10] != today_str:
+            continue
+        if True:
             all_today.append({
                 "ticker": t.get("ticker", ""),
                 "title": t.get("title", t.get("ticker", "")),
@@ -6436,6 +6444,9 @@ def trades_today_endpoint():
             })
 
     for t in moonshark_trades:
+        ts = t.get("time", "") or ""
+        if ts[:10] != today_str:
+            continue
         all_today.append({
             "ticker": t.get("ticker", ""),
             "title": t.get("title", t.get("ticker", "")),
@@ -6443,7 +6454,7 @@ def trades_today_endpoint():
             "price_cents": t.get("price", 0),
             "count": t.get("count", 0),
             "cost_usd": round(t.get("cost", 0), 2),
-            "time": t.get("time", ""),
+            "time": ts,
             "strategy": "moonshark",
             "success": True,
             "source": "bot",
