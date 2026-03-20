@@ -127,6 +127,8 @@ def _save_state():
             "moonshark_daily_spent": BOT_STATE.get("moonshark_daily_spent", 0.0),
             "moonshark_trades_today": BOT_STATE.get("moonshark_trades_today", []),
             "moonshark_date": BOT_STATE.get("moonshark_date"),
+            # Persist manual trades today
+            "manual_trades_today": BOT_STATE.get("manual_trades_today", []),
             # Timestamp for date-check on load
             "save_date": datetime.datetime.utcnow().strftime("%Y-%m-%d"),
         }
@@ -163,6 +165,8 @@ def _load_state():
             BOT_STATE["moonshark_daily_spent"] = data.get("moonshark_daily_spent", 0.0)
             BOT_STATE["moonshark_trades_today"] = data.get("moonshark_trades_today", [])
             BOT_STATE["moonshark_date"] = today_str
+            # Restore manual trades for same-day
+            BOT_STATE["manual_trades_today"] = data.get("manual_trades_today", [])
         else:
             # New day — reset all daily counters
             BOT_STATE["trades_today"] = []
@@ -174,6 +178,7 @@ def _load_state():
             BOT_STATE["moonshark_daily_spent"] = 0.0
             BOT_STATE["moonshark_trades_today"] = []
             BOT_STATE["moonshark_date"] = today_str
+            BOT_STATE["manual_trades_today"] = []
 
         # --- Cumulative data: always restore regardless of day ---
         saved_journal = data.get("trade_journal", [])
@@ -6220,6 +6225,27 @@ def trades_today_endpoint():
                 "success": True,
                 "source": "you",
             })
+
+    # Fallback: also check all_trades for today's entries (survives redeploys via Kalshi hydration)
+    seen_tickers = set(t.get("ticker", "") for t in all_today)
+    for t in BOT_STATE.get("all_trades", []):
+        ticker = t.get("ticker", "")
+        ts = t.get("timestamp", "")
+        if ticker and ticker not in seen_tickers and ts[:10] == today_str and t.get("action") != "sell":
+            source = "you" if t.get("manual") else "bot"
+            all_today.append({
+                "ticker": ticker,
+                "title": t.get("question", t.get("ticker", "")),
+                "side": t.get("side", ""),
+                "price_cents": t.get("price_cents", 0),
+                "count": t.get("count", 0),
+                "cost_usd": round(t.get("cost_usd", 0), 2),
+                "time": ts,
+                "strategy": t.get("strategy", "bot"),
+                "success": t.get("success", True),
+                "source": source,
+            })
+            seen_tickers.add(ticker)
 
     # Enrich with close_time from cached market data
     close_time_map = {}
