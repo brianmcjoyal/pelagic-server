@@ -9915,9 +9915,12 @@ async function loadBetsFeed() {
       h += '<span style="color:#ccc">' + title + '</span> ';
       h += '<span style="color:#ffb400">' + t.price_cents + '&#162; x' + (t.count || 1) + '</span> ';
       h += '<span style="color:#888">$' + (t.cost_usd || 0).toFixed(2) + '</span> ';
-      // P&L indicator
+      // P&L indicator — skip if market closed (50c default = no real price)
       var pnl = t.pnl_pct || 0;
-      if (t.current_price && t.price_cents) {
+      var isSettling = t.close_time && new Date(t.close_time) <= new Date();
+      if (isSettling && t.current_price === 50) {
+        h += '<span style="color:#ffb400;font-size:10px;margin-left:4px">⏳ Awaiting result</span> ';
+      } else if (t.current_price && t.price_cents && t.current_price !== 50) {
         var pnlColor = pnl > 0 ? '#00dc5a' : (pnl < 0 ? '#ff5000' : '#888');
         var pnlArrow = pnl > 0 ? '▲' : (pnl < 0 ? '▼' : '–');
         h += '<span style="color:' + pnlColor + ';font-size:10px;font-weight:700;margin-left:4px">' + pnlArrow + ' ' + (pnl > 0 ? '+' : '') + pnl + '% (' + t.current_price + '¢)</span> ';
