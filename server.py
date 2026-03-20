@@ -6515,22 +6515,13 @@ def trades_today_endpoint():
     market_info = {}
     try:
         for m in _market_cache.get("data") or []:
-            ticker = m.get("ticker", "")
-            if ticker:
-                # Parse prices - Kalshi uses dollars (0.37) or cents depending on field
-                def _get_cents(d, keys):
-                    for k in keys:
-                        v = d.get(k)
-                        if v is not None:
-                            v = float(v)
-                            return int(round(v * 100)) if v < 1.5 else int(v)
-                    return 0
-                yp = _get_cents(m, ["yes_ask_dollars", "yes_ask", "last_price_dollars", "last_price"])
-                np = _get_cents(m, ["no_ask_dollars", "no_ask"])
-                if not np and yp:
-                    np = 100 - yp
-                market_info[ticker] = {
-                    "close_time": m.get("expected_expiration_time") or m.get("close_time") or "",
+            tid = m.get("id") or m.get("ticker") or ""
+            if tid:
+                # Cache stores yes_ask_cents (int) and yes/no as 0-1 decimals
+                yp = m.get("yes_ask_cents") or int(round(m.get("yes", 0.5) * 100))
+                np = m.get("no_ask_cents") or int(round(m.get("no", 0.5) * 100))
+                market_info[tid] = {
+                    "close_time": m.get("close_time") or "",
                     "yes_price": yp,
                     "no_price": np,
                 }
