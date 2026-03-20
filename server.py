@@ -1902,42 +1902,58 @@ def check_position_prices():
         resp.raise_for_status()
         positions_list = resp.json().get("market_positions", [])
         enriched = []
+
+        # Build market lookup from cache (fast) instead of 57 individual API calls
+        _mkt_lookup = {}
+        for m in (_market_cache.get("data") or []):
+            _mkt_lookup[m.get("ticker", "")] = m
+
+        # For tickers not in cache, batch-fetch them (max 1 API call)
+        missing_tickers = []
+        for pos in positions_list:
+            ticker = pos.get("ticker", "")
+            abs_count, _ = _parse_kalshi_position(pos)
+            if abs_count > 0 and ticker not in _mkt_lookup:
+                missing_tickers.append(ticker)
+
+        # Fetch missing tickers individually but with short timeout
+        for ticker in missing_tickers[:20]:  # cap at 20 to avoid slow loads
+            try:
+                market_path = f"/markets/{ticker}"
+                mkt_headers = signed_headers("GET", market_path)
+                mkt_resp = requests.get(
+                    KALSHI_BASE_URL + KALSHI_API_PREFIX + market_path,
+                    headers=mkt_headers, timeout=3,
+                )
+                if mkt_resp.ok:
+                    _mkt_lookup[ticker] = mkt_resp.json().get("market", {})
+            except Exception:
+                pass
+
         for pos in positions_list:
             ticker = pos.get("ticker", "")
             abs_count, side = _parse_kalshi_position(pos)
             if abs_count == 0:
                 continue  # no active position
 
-            # Get current market price
-            market_path = f"/markets/{ticker}"
-            mkt_headers = signed_headers("GET", market_path)
-            title = ticker
+            # Get current market price from lookup (fast)
+            mkt = _mkt_lookup.get(ticker, {})
+            title = mkt.get("title", ticker)
+            close_time = mkt.get("expected_expiration_time") or mkt.get("close_time")
             current_yes_price = None
             current_no_price = None
-            close_time = None
-            try:
-                mkt_resp = requests.get(
-                    KALSHI_BASE_URL + KALSHI_API_PREFIX + market_path,
-                    headers=mkt_headers, timeout=5,
-                )
-                if mkt_resp.ok:
-                    mkt = mkt_resp.json().get("market", {})
-                    title = mkt.get("title", ticker)
-                    close_time = mkt.get("expected_expiration_time") or mkt.get("close_time")
-                    yes_ask = mkt.get("yes_ask_dollars") or mkt.get("yes_ask")
-                    no_ask = mkt.get("no_ask_dollars") or mkt.get("no_ask")
-                    if yes_ask:
-                        try:
-                            current_yes_price = int(round(float(yes_ask) * 100)) if isinstance(yes_ask, str) else int(yes_ask * 100 if yes_ask < 1 else yes_ask)
-                        except Exception:
-                            pass
-                    if no_ask:
-                        try:
-                            current_no_price = int(round(float(no_ask) * 100)) if isinstance(no_ask, str) else int(no_ask * 100 if no_ask < 1 else no_ask)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+            yes_ask = mkt.get("yes_ask_dollars") or mkt.get("yes_ask")
+            no_ask = mkt.get("no_ask_dollars") or mkt.get("no_ask")
+            if yes_ask:
+                try:
+                    current_yes_price = int(round(float(yes_ask) * 100)) if isinstance(yes_ask, str) else int(yes_ask * 100 if yes_ask < 1 else yes_ask)
+                except Exception:
+                    pass
+            if no_ask:
+                try:
+                    current_no_price = int(round(float(no_ask) * 100)) if isinstance(no_ask, str) else int(no_ask * 100 if no_ask < 1 else no_ask)
+                except Exception:
+                    pass
 
             # Find our entry price from trade history
             entry_price = None
