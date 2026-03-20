@@ -154,8 +154,8 @@ def _load_state():
         # --- Daily counters: reset if new day, restore if same day ---
         if is_same_day:
             BOT_STATE["trades_today"] = data.get("trades_today", [])
-            # Reset daily_spent to 0 on redeploy — only count NEW trades this session
-            BOT_STATE["daily_spent_usd"] = 0.0
+            # Restore daily_spent on same-day redeploy so it reflects actual spending
+            BOT_STATE["daily_spent_usd"] = data.get("daily_spent_usd", 0.0)
             BOT_STATE["trade_date"] = today_str
             # Restore snipe counters for same-day
             BOT_STATE["snipe_daily_spent"] = data.get("snipe_daily_spent", 0.0)
@@ -6323,8 +6323,8 @@ def status():
         "last_scan": BOT_STATE["last_scan"],
         "last_scan_markets": markets,
         "last_scan_mispriced": mispriced,
-        "trades_today": len(BOT_STATE["trades_today"]),
-        "daily_spent_usd": BOT_STATE["daily_spent_usd"],
+        "trades_today": len(BOT_STATE["trades_today"]) + len(BOT_STATE.get("snipe_trades_today", [])) + len(BOT_STATE.get("moonshark_trades_today", [])) + len(BOT_STATE.get("manual_trades_today", [])),
+        "daily_spent_usd": BOT_STATE["daily_spent_usd"] + BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0),
         "total_trades_all_time": len(BOT_STATE["all_trades"]),
         "recent_errors": BOT_STATE["errors"][-5:],
         "scheduler_running": scheduler.running,
