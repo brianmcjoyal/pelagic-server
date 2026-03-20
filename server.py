@@ -8468,6 +8468,63 @@ def sell_position():
     return jsonify(trade_record)
 
 
+@app.route("/sell-all-losers", methods=["POST"])
+def sell_all_losers():
+    """Sell all positions that are currently underwater."""
+    positions = check_position_prices()
+    sold = []
+    skipped = []
+    errors = []
+    for p in positions:
+        count = p.get("count", 0)
+        if count <= 0:
+            continue
+        pnl_pct = p.get("pnl_pct")
+        entry_price = p.get("entry_price")
+        current_price = p.get("current_price")
+        ticker = p.get("ticker", "")
+        side = p.get("side", "")
+        title = p.get("title", ticker)
+
+        # Skip positions we can't price
+        if current_price is None or entry_price is None:
+            skipped.append({"ticker": ticker, "title": title[:40], "reason": "no price data"})
+            continue
+
+        # Only sell losers (negative P&L)
+        if pnl_pct is not None and pnl_pct >= 0:
+            skipped.append({"ticker": ticker, "title": title[:40], "reason": "winning/flat"})
+            continue
+
+        # Sell at current market price (1c below to ensure fill)
+        sell_price = max(1, current_price - 1)
+        try:
+            result = sell_kalshi_position(ticker, side, sell_price, count)
+            if "error" not in result:
+                sold.append({
+                    "ticker": ticker, "title": title[:40], "side": side,
+                    "count": count, "price": sell_price, "pnl_pct": pnl_pct,
+                })
+                _log_activity(
+                    f"SOLD LOSER: {side.upper()} {ticker} x{count} @ {sell_price}c ({pnl_pct:+.1f}%) | {title[:30]}",
+                    "warning"
+                )
+            else:
+                errors.append({"ticker": ticker, "title": title[:40], "error": str(result.get("error", ""))[:60]})
+        except Exception as e:
+            errors.append({"ticker": ticker, "title": title[:40], "error": str(e)[:60]})
+
+    _save_state()
+    return jsonify({
+        "sold": len(sold),
+        "skipped": len(skipped),
+        "errors": len(errors),
+        "sold_details": sold,
+        "skipped_details": skipped,
+        "error_details": errors,
+    })
+
+
 @app.route("/position-monitor")
 def position_monitor():
     """Get all open positions with current prices and P&L."""
@@ -8938,7 +8995,10 @@ a:hover { color: #7da5f5; }
 
 <!-- Positions Tab -->
 <div class="tab-content active" id="tab-positions">
-  <div style="display:flex;justify-content:flex-end;margin-bottom:6px"><label style="font-size:10px;color:#888;cursor:pointer"><input type="checkbox" id="hide-bot-trades" checked onchange="loadPortfolio();loadPositions()" style="margin-right:4px">Hide old bot trades</label></div>
+  <div style="display:flex;justify-content:flex-end;align-items:center;gap:12px;margin-bottom:6px">
+    <button onclick="sellAllLosers()" style="background:#2a1010;border:1px solid #ff5000;color:#ff5000;padding:4px 12px;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer">&#x1F4A3; Sell All Losers</button>
+    <label style="font-size:10px;color:#888;cursor:pointer"><input type="checkbox" id="hide-bot-trades" checked onchange="loadPortfolio();loadPositions()" style="margin-right:4px">Hide old bot trades</label>
+  </div>
   <div id="portfolio-positions"><div class="loading">Loading positions...</div></div>
   <div class="section" style="margin-top:20px">
     <div class="section-title">All Positions <span class="badge" id="pos-badge">0</span><button class="refresh-btn" onclick="loadPositions()">Refresh</button></div>
@@ -10553,6 +10613,33 @@ async function sellPosition(ticker, side, priceCents, count) {
     loadPositions();
   } catch(e) {
     showToast('Sell error: ' + e.message, 'error');
+  }
+}
+
+async function sellAllLosers() {
+  if (!confirm('⚠️ This will sell ALL losing positions at market price. Are you sure?')) return;
+  showToast('Selling all losers... this may take a minute', 'info');
+  try {
+    const resp = await fetch(API + '/sell-all-losers', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+    });
+    const data = await resp.json();
+    var msg = '💣 Sold ' + data.sold + ' losing positions';
+    if (data.skipped > 0) msg += ' | ' + data.skipped + ' kept (winning/no data)';
+    if (data.errors > 0) msg += ' | ' + data.errors + ' errors';
+    showToast(msg, data.sold > 0 ? 'success' : 'info');
+    // Show details
+    if (data.sold_details && data.sold_details.length > 0) {
+      var detail = data.sold_details.map(function(s) {
+        return s.side.toUpperCase() + ' ' + s.title + ' x' + s.count + ' @ ' + s.price + 'c (' + s.pnl_pct.toFixed(1) + '%)';
+      }).join('\n');
+      console.log('Sold losers:\n' + detail);
+    }
+    loadPositions();
+    loadPortfolio();
+  } catch(e) {
+    showToast('Error: ' + e.message, 'error');
   }
 }
 
