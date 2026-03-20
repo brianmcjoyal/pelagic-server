@@ -6495,7 +6495,7 @@ def trades_today_endpoint():
     for t in BOT_STATE.get("all_trades", []):
         ticker = t.get("ticker", "")
         ts = t.get("timestamp", "")
-        if ticker and ticker not in seen_tickers and ts[:10] == today_str and t.get("action") != "sell":
+        if ticker and ticker not in seen_tickers and _is_today_pacific(ts) and t.get("action") != "sell":
             source = "you" if t.get("manual") else "bot"
             all_today.append({
                 "ticker": ticker,
@@ -6517,10 +6517,22 @@ def trades_today_endpoint():
         for m in _market_cache.get("data") or []:
             ticker = m.get("ticker", "")
             if ticker:
+                # Parse prices - Kalshi uses dollars (0.37) or cents depending on field
+                def _get_cents(d, keys):
+                    for k in keys:
+                        v = d.get(k)
+                        if v is not None:
+                            v = float(v)
+                            return int(round(v * 100)) if v < 1.5 else int(v)
+                    return 0
+                yp = _get_cents(m, ["yes_ask_dollars", "yes_ask", "last_price_dollars", "last_price"])
+                np = _get_cents(m, ["no_ask_dollars", "no_ask"])
+                if not np and yp:
+                    np = 100 - yp
                 market_info[ticker] = {
                     "close_time": m.get("expected_expiration_time") or m.get("close_time") or "",
-                    "yes_price": m.get("yes_price") or m.get("last_price") or 0,
-                    "no_price": m.get("no_price") or (100 - (m.get("yes_price") or m.get("last_price") or 0)),
+                    "yes_price": yp,
+                    "no_price": np,
                 }
     except Exception:
         pass
