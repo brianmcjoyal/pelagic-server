@@ -4634,6 +4634,134 @@ def econ_enhanced_signal(question, current_yes_price):
 import threading
 import time as _time
 
+# Track known fill order_ids so we can detect externally placed bets
+_known_fill_ids = set()
+
+def _sync_kalshi_fills():
+    """Detect bets placed directly on kalshi.com and add them to today's feed."""
+    try:
+        today_str = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+        path = "/portfolio/fills"
+        headers = signed_headers("GET", path)
+        if not headers:
+            return
+        resp = _req.get(
+            KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
+            headers=headers,
+            params={"limit": 50},
+            timeout=15,
+        )
+        if not resp.ok:
+            return
+        fills = resp.json().get("fills", [])
+
+        # Build set of order_ids we already track (from bot + manual trades)
+        tracked_ids = set()
+        for t in BOT_STATE.get("all_trades", []):
+            if t.get("order_id"):
+                tracked_ids.add(t["order_id"])
+        for t in BOT_STATE.get("trades_today", []):
+            if t.get("order_id"):
+                tracked_ids.add(t["order_id"])
+        for t in BOT_STATE.get("snipe_trades_today", []):
+            if t.get("order_id"):
+                tracked_ids.add(t["order_id"])
+        for t in BOT_STATE.get("moonshark_trades_today", []):
+            if t.get("order_id"):
+                tracked_ids.add(t["order_id"])
+        for t in BOT_STATE.get("manual_trades_today", []):
+            if t.get("order_id"):
+                tracked_ids.add(t["order_id"])
+
+        new_external = 0
+        for fill in fills:
+            order_id = fill.get("order_id", "")
+            created = fill.get("created_time", "")
+            action = fill.get("action", "buy")
+
+            # Only care about today's buy fills not already tracked
+            if not created or created[:10] != today_str:
+                continue
+            if action != "buy":
+                continue
+            if order_id in tracked_ids or order_id in _known_fill_ids:
+                continue
+
+            _known_fill_ids.add(order_id)
+            ticker = fill.get("ticker", "")
+            side = fill.get("side", "")
+
+            count = 0
+            try:
+                count_raw = fill.get("count_fp") or fill.get("count") or 0
+                count = int(float(str(count_raw)))
+            except Exception:
+                pass
+            price_cents = 0
+            try:
+                yes_price = fill.get("yes_price_dollars") or fill.get("yes_price")
+                no_price = fill.get("no_price_dollars") or fill.get("no_price")
+                if side == "yes" and yes_price:
+                    price_cents = int(round(float(str(yes_price)) * 100))
+                elif side == "no" and no_price:
+                    price_cents = int(round(float(str(no_price)) * 100))
+            except Exception:
+                pass
+
+            cost_usd = round((price_cents * count) / 100, 2)
+
+            # Look up title
+            title = ticker
+            try:
+                mkt_path = f"/markets/{ticker}"
+                mkt_h = signed_headers("GET", mkt_path)
+                mkt_r = _req.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + mkt_path, headers=mkt_h, timeout=5)
+                if mkt_r.ok:
+                    title = mkt_r.json().get("market", {}).get("title", ticker)
+            except Exception:
+                pass
+
+            # Add to manual_trades_today so it shows in Bets Placed Today
+            BOT_STATE.setdefault("manual_trades_today", []).append({
+                "ticker": ticker, "title": title, "side": side,
+                "price": price_cents, "count": count, "cost": cost_usd,
+                "time": created,
+                "strategy": "manual",
+                "order_id": order_id,
+            })
+
+            # Also add to all_trades
+            trade_rec = {
+                "timestamp": created,
+                "ticker": ticker,
+                "question": title,
+                "side": side,
+                "action": "buy",
+                "price_cents": price_cents,
+                "count": count,
+                "cost_usd": cost_usd,
+                "order_id": order_id,
+                "source": "kalshi_fill",
+                "success": True,
+                "manual": True,
+                "bot_version": BOT_VERSION,
+            }
+            BOT_STATE["all_trades"].append(trade_rec)
+
+            new_external += 1
+            _log_activity(
+                f"External bet detected: {side.upper()} {ticker} @ {price_cents}c x{count} (${cost_usd:.2f}) | {title[:40]}",
+                "info"
+            )
+
+        if new_external > 0:
+            print(f"[SYNC] Detected {new_external} external Kalshi fill(s)")
+            _save_state()
+
+    except Exception as e:
+        print(f"[SYNC] Fill sync error: {e}")
+
+
 def _background_loop():
     """Simple background loop that runs scans, warms cache, monitors positions."""
     _time.sleep(30)  # wait 30s for server to fully start before scanning
@@ -4679,6 +4807,12 @@ def _background_loop():
     except Exception as e:
         print(f"[BG] Hydrate error (non-fatal): {e}")
     _log_activity(f"Loaded {len(BOT_STATE['all_trades'])} trades from Kalshi (${BOT_STATE['daily_spent_usd']:.2f} spent today)")
+
+    # Seed known fill IDs so sync doesn't re-detect existing trades
+    for t in BOT_STATE.get("all_trades", []):
+        if t.get("order_id"):
+            _known_fill_ids.add(t["order_id"])
+    print(f"[SYNC] Seeded {len(_known_fill_ids)} known fill IDs")
 
     # Initialize known settled positions on startup
     try:
@@ -4736,6 +4870,12 @@ def _background_loop():
                     live_game_snipe()
                 except Exception:
                     pass
+            # Sync external Kalshi fills (bets placed on kalshi.com)
+            try:
+                _sync_kalshi_fills()
+            except Exception as se:
+                print(f"[SYNC] Error: {se}")
+            _time.sleep(1)
             # Warm the 75%'ers cache every cycle
             try:
                 _generate_seventy_fivers()
