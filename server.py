@@ -9,6 +9,11 @@ import math
 import atexit
 import base64
 import datetime
+try:
+    from zoneinfo import ZoneInfo
+    _PACIFIC = ZoneInfo("America/Los_Angeles")
+except ImportError:
+    _PACIFIC = datetime.timezone(datetime.timedelta(hours=-7))  # fallback PDT
 import requests
 import xml.etree.ElementTree as ET
 from html import unescape as html_unescape
@@ -6391,12 +6396,23 @@ def trades_today_endpoint():
     quant_trades = BOT_STATE.get("quant_trades", [])
     moonshark_trades = BOT_STATE.get("moonshark_trades_today", [])
     manual_trades = BOT_STATE.get("manual_trades_today", [])
-    today_str = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+    today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+
+    def _is_today_pacific(ts_str):
+        """Check if a UTC timestamp string falls on today in Pacific time."""
+        if not ts_str or len(ts_str) < 10:
+            return False
+        try:
+            dt = datetime.datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            pacific_date = dt.astimezone(_PACIFIC).strftime("%Y-%m-%d")
+            return pacific_date == today_str
+        except Exception:
+            return ts_str[:10] == today_str
 
     all_today = []
     for t in bot_trades:
         ts = t.get("timestamp", "") or ""
-        if ts[:10] != today_str:
+        if not _is_today_pacific(ts):
             continue
         all_today.append({
             "ticker": t.get("ticker", ""),
@@ -6412,7 +6428,7 @@ def trades_today_endpoint():
         })
     for t in sniper_trades:
         ts = t.get("time", "") or ""
-        if ts[:10] != today_str:
+        if not _is_today_pacific(ts):
             continue
         all_today.append({
             "ticker": t.get("ticker", ""),
@@ -6427,7 +6443,7 @@ def trades_today_endpoint():
             "source": "bot",
         })
     for t in quant_trades:
-        if (t.get("time", "") or "")[:10] != today_str:
+        if not _is_today_pacific(t.get("time", "") or ""):
             continue
         if True:
             all_today.append({
@@ -6445,7 +6461,7 @@ def trades_today_endpoint():
 
     for t in moonshark_trades:
         ts = t.get("time", "") or ""
-        if ts[:10] != today_str:
+        if not _is_today_pacific(ts):
             continue
         all_today.append({
             "ticker": t.get("ticker", ""),
@@ -6460,7 +6476,7 @@ def trades_today_endpoint():
             "source": "bot",
         })
     for t in manual_trades:
-        if (t.get("time", "") or "")[:10] == today_str:
+        if _is_today_pacific(t.get("time", "") or ""):
             all_today.append({
                 "ticker": t.get("ticker", ""),
                 "title": t.get("title", t.get("ticker", "")),
