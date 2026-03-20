@@ -10649,8 +10649,8 @@ async function sellAllLosers() {
     if (data.sold_details && data.sold_details.length > 0) {
       var detail = data.sold_details.map(function(s) {
         return s.side.toUpperCase() + ' ' + s.title + ' x' + s.count + ' @ ' + s.price + 'c (' + s.pnl_pct.toFixed(1) + '%)';
-      }).join('\n');
-      console.log('Sold losers:\n' + detail);
+      }).join('\\n');
+      console.log('Sold losers:\\n' + detail);
     }
     loadPositions();
     loadPortfolio();
