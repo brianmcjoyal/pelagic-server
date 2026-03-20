@@ -5613,6 +5613,7 @@ def analytics_endpoint():
 @app.route("/insights")
 def insights_endpoint():
     """Generate 5 actionable daily insights from trading data."""
+    generated_at = datetime.datetime.now(tz=_PACIFIC).strftime("%b %d, %Y %I:%M %p PT")
     try:
         settled = [t for t in _TRADE_JOURNAL if t.get("result") is not None]
         pending = [t for t in _TRADE_JOURNAL if t.get("result") is None]
@@ -5659,7 +5660,7 @@ def insights_endpoint():
                 "trend": "neutral",
                 "action": "Categories with 70%+ win rate get 1.5x bet sizing boost.",
             })
-            return jsonify({"insights": insights[:5]})
+            return jsonify({"insights": insights[:5], "generated_at": generated_at})
 
         # --- Enough data: generate real insights ---
         candidates = []
@@ -5861,15 +5862,49 @@ def insights_endpoint():
             "priority": 3 if mispriced_count > 0 else 1,
         })
 
+        # 9. Portfolio value and $1M progress
+        try:
+            _bal_path = "/portfolio/balance"
+            _bal_hdrs = signed_headers("GET", _bal_path)
+            _bal_resp = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + _bal_path, headers=_bal_hdrs, timeout=3)
+            bal = _bal_resp.json().get("balance", 0) / 100 if _bal_resp.ok else 0
+            # Estimate total portfolio from settled P&L
+            total_pnl_all = sum(t.get("pnl_usd", 0) for t in settled)
+            total_val = bal  # cash available
+            if bal > 0:
+                # $1M progress
+                progress_pct = round(bal / 10000, 2)
+                candidates.append({
+                    "title": f"${bal:.0f} Cash → $1M Goal",
+                    "detail": f"Cash available: ${bal:.2f}. Realized P&L so far: ${total_pnl_all:+.2f} across {len(settled)} settled trades.",
+                    "trend": "positive" if total_pnl_all > 0 else ("negative" if total_pnl_all < -10 else "neutral"),
+                    "action": "Compound gains by reinvesting profits. Every winning trade gets us closer.",
+                    "priority": 8,
+                })
+        except Exception:
+            pass
+
+        # 10. Open positions summary
+        pending_count = len(pending)
+        if pending_count > 0:
+            pending_cost = sum(t.get("cost_usd", 0) for t in pending)
+            candidates.append({
+                "title": f"{pending_count} Bets Awaiting Results",
+                "detail": f"${pending_cost:.2f} in {pending_count} unsettled positions. Results incoming as markets close.",
+                "trend": "neutral",
+                "action": "Most positions settle within 1-7 days. Check the Positions tab for live P&L.",
+                "priority": 5,
+            })
+
         # Sort by priority descending, take top 5
         candidates.sort(key=lambda x: x.get("priority", 0), reverse=True)
         for c in candidates:
             c.pop("priority", None)
         insights = candidates[:5]
 
-        return jsonify({"insights": insights})
+        return jsonify({"insights": insights, "generated_at": generated_at})
     except Exception as e:
-        return jsonify({"error": str(e), "insights": []})
+        return jsonify({"error": str(e), "insights": [], "generated_at": generated_at})
 
 
 # ---------------------------------------------------------------------------
@@ -11414,6 +11449,9 @@ async function loadInsights() {
       return;
     }
     var html = '';
+    if (data.generated_at) {
+      html += '<div style="color:#555;font-size:10px;margin-bottom:8px;text-align:right">Updated: ' + data.generated_at + '</div>';
+    }
     data.insights.forEach(function(ins) {
       var icon = ins.trend === 'positive' ? '📈' : ins.trend === 'negative' ? '📉' : '➡️';
       var borderColor = ins.trend === 'positive' ? '#00dc5a' : ins.trend === 'negative' ? '#ff5000' : '#333';
