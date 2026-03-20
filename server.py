@@ -1944,22 +1944,27 @@ def check_position_prices():
 
             # Get current market price from lookup (fast)
             mkt = _mkt_lookup.get(ticker, {})
-            title = mkt.get("title", ticker)
+            title = mkt.get("title") or mkt.get("question") or ticker
             close_time = mkt.get("expected_expiration_time") or mkt.get("close_time")
             current_yes_price = None
             current_no_price = None
-            yes_ask = mkt.get("yes_ask_dollars") or mkt.get("yes_ask")
-            no_ask = mkt.get("no_ask_dollars") or mkt.get("no_ask")
-            if yes_ask:
-                try:
-                    current_yes_price = int(round(float(yes_ask) * 100)) if isinstance(yes_ask, str) else int(yes_ask * 100 if yes_ask < 1 else yes_ask)
-                except Exception:
-                    pass
-            if no_ask:
-                try:
-                    current_no_price = int(round(float(no_ask) * 100)) if isinstance(no_ask, str) else int(no_ask * 100 if no_ask < 1 else no_ask)
-                except Exception:
-                    pass
+            # Handle both cache format (yes_ask_cents) and raw API format (yes_ask as decimal)
+            if mkt.get("yes_ask_cents"):
+                current_yes_price = int(mkt["yes_ask_cents"])
+                current_no_price = int(mkt.get("no_ask_cents", 100 - current_yes_price))
+            else:
+                yes_ask = mkt.get("yes_ask_dollars") or mkt.get("yes_ask")
+                no_ask = mkt.get("no_ask_dollars") or mkt.get("no_ask")
+                if yes_ask:
+                    try:
+                        current_yes_price = int(round(float(yes_ask) * 100)) if isinstance(yes_ask, str) else int(yes_ask * 100 if yes_ask < 1 else yes_ask)
+                    except Exception:
+                        pass
+                if no_ask:
+                    try:
+                        current_no_price = int(round(float(no_ask) * 100)) if isinstance(no_ask, str) else int(no_ask * 100 if no_ask < 1 else no_ask)
+                    except Exception:
+                        pass
 
             # Find our entry price from trade history
             entry_price = None
