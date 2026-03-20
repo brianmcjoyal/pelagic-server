@@ -828,6 +828,7 @@ def fetch_kalshi():
             out.append({
                 "platform": "kalshi",
                 "id":       ticker,
+                "ticker":   ticker,
                 "question": m.get("title") or ticker,
                 "yes":      round(yes, 4),
                 "no":       round(no, 4),
