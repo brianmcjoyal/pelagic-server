@@ -9120,7 +9120,16 @@ a:hover { color: #7da5f5; }
   <div id="portfolio-positions"><div class="loading">Loading positions...</div></div>
   <div class="section" style="margin-top:20px">
     <div class="section-title">All Positions <span class="badge" id="pos-badge">0</span><button class="refresh-btn" onclick="loadPositions()">Refresh</button></div>
-    <div id="pos-table"><div class="loading">Loading positions...</div></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px" id="pos-split-container">
+      <div>
+        <div style="font-size:11px;font-weight:700;color:#00dc5a;margin-bottom:6px">Open <span id="pos-open-count" style="color:#888;font-weight:400">(0)</span> <span id="pos-open-pnl" style="font-size:10px;color:#888"></span></div>
+        <div id="pos-table-open"><div class="loading">Loading...</div></div>
+      </div>
+      <div>
+        <div style="font-size:11px;font-weight:700;color:#888;margin-bottom:6px">Closed <span id="pos-closed-count" style="color:#888;font-weight:400">(0)</span> <span id="pos-closed-pnl" style="font-size:10px;color:#888"></span></div>
+        <div id="pos-table-closed"><div class="loading">Loading...</div></div>
+      </div>
+    </div>
   </div>
   <div class="section">
     <div class="section-title">Mispriced Markets <span class="badge" id="opp-badge">0</span><button class="refresh-btn" onclick="loadMispriced()">Refresh</button></div>
@@ -10674,48 +10683,80 @@ async function loadPositions() {
     }
     var hiddenCount = allPositions.length - positions.length;
     document.getElementById('pos-badge').textContent = positions.length;
-    if (positions.length === 0) {
-      document.getElementById('pos-table').innerHTML = '<div class="empty">No open positions. Place a trade to get started.</div>';
-      return;
+
+    // Build open positions table
+    function buildPosRows(arr) {
+      if (arr.length === 0) return '<div style="color:#555;font-size:9px;padding:8px;text-align:center">None</div>';
+      var h = '<table style="font-size:10px"><tr><th>Market</th><th>Side</th><th>Qty</th><th>Entry</th><th>Now</th><th>P&L</th><th>EXP</th><th></th></tr>';
+      arr.forEach(function(p) {
+        var timeLeft = formatSettleTime(p.close_time);
+        var pnlText = '--';
+        var pnlColor = '#888';
+        if (p.pnl_pct !== null && p.pnl_pct !== undefined) {
+          pnlColor = p.pnl_pct >= 0 ? '#00dc5a' : '#ff5000';
+          var pnlCents = p.unrealized_pnl_cents || 0;
+          pnlText = (p.pnl_pct >= 0 ? '+' : '') + p.pnl_pct + '% (' + (pnlCents >= 0 ? '+' : '') + (pnlCents / 100).toFixed(2) + ')';
+        }
+        var sideColor = p.side === 'yes' ? '#00dc5a' : '#ff5000';
+        var sellPrice = p.current_price ? Math.max(1, p.current_price - 1) : 0;
+        h += '<tr>';
+        h += '<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (p.title || p.ticker) + '</td>';
+        h += '<td style="color:' + sideColor + ';font-weight:700">' + p.side.toUpperCase() + '</td>';
+        h += '<td>' + p.count + '</td>';
+        h += '<td>' + (p.entry_price || '?') + 'c</td>';
+        h += '<td style="font-weight:700">' + (p.current_price || '?') + 'c</td>';
+        h += '<td style="color:' + pnlColor + ';font-weight:700">' + pnlText + '</td>';
+        h += '<td style="color:#ffb400;font-size:9px">' + timeLeft + '</td>';
+        if (sellPrice > 0) {
+          h += '<td><button class="hero-execute" style="font-size:8px;padding:2px 6px" onclick="sellPosition(&quot;' + p.ticker + '&quot;,&quot;' + p.side + '&quot;,' + sellPrice + ',' + p.count + ')">SELL</button></td>';
+        } else {
+          h += '<td></td>';
+        }
+        h += '</tr>';
+      });
+      h += '</table>';
+      return h;
     }
-    let html = '<table><tr><th>Market</th><th>Side</th><th>Qty</th><th>Entry</th><th>Now</th><th>P&L</th><th>Time Left</th><th>Action</th></tr>';
-    positions.forEach(p => {
-      var timeLeft = formatSettleTime(p.close_time);
-      var pnlText = '--';
-      var pnlColor = '#888';
-      if (p.pnl_pct !== null && p.pnl_pct !== undefined) {
-        pnlColor = p.pnl_pct >= 0 ? '#00dc5a' : '#ff5000';
-        var pnlCents = p.unrealized_pnl_cents || 0;
-        pnlText = (p.pnl_pct >= 0 ? '+' : '') + p.pnl_pct + '% (' + (pnlCents >= 0 ? '+' : '') + (pnlCents / 100).toFixed(2) + ')';
-      }
-      var sideColor = p.side === 'yes' ? '#00dc5a' : '#ff5000';
-      var sellPrice = p.current_price ? Math.max(1, p.current_price - 1) : 0;
-      html += '<tr>';
-      html += '<td style="max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (p.title || p.ticker) + '</td>';
-      html += '<td style="color:' + sideColor + ';font-weight:700">' + p.side.toUpperCase() + '</td>';
-      html += '<td>' + p.count + '</td>';
-      html += '<td>' + (p.entry_price || '?') + 'c</td>';
-      html += '<td style="font-weight:700">' + (p.current_price || '?') + 'c</td>';
-      html += '<td style="color:' + pnlColor + ';font-weight:700">' + pnlText + '</td>';
-      html += '<td style="color:#ffb400">' + timeLeft + '</td>';
-      if (sellPrice > 0) {
-        html += '<td><button class="hero-execute" style="font-size:9px;padding:3px 8px" onclick="sellPosition(&quot;' + p.ticker + '&quot;,&quot;' + p.side + '&quot;,' + sellPrice + ',' + p.count + ')">SELL ' + sellPrice + 'c</button></td>';
-      } else {
-        html += '<td style="color:#555">--</td>';
-      }
-      html += '</tr>';
-    });
-    html += '</table>';
-    // Auto-exit status
-    if (data.auto_exit_enabled) {
-      html += '<div style="margin-top:6px;font-size:8px;color:#00dc5a">Auto-exit active: sell at +' + data.take_profit_pct + '% / stop at ' + data.stop_loss_pct + '%</div>';
-    } else {
-      html += '<div style="margin-top:6px;font-size:8px;color:#666">Auto-exit OFF (enable auto-trade to activate)</div>';
-    }
+
+    // Calculate open P&L
+    var openPnl = positions.reduce(function(s, p) { return s + (p.unrealized_pnl_cents || 0); }, 0);
+    var openPnlColor = openPnl >= 0 ? '#00dc5a' : '#ff5000';
+    document.getElementById('pos-open-count').textContent = '(' + positions.length + ')';
+    document.getElementById('pos-open-pnl').innerHTML = '<span style="color:' + openPnlColor + '">' + (openPnl >= 0 ? '+' : '') + '$' + (Math.abs(openPnl) / 100).toFixed(2) + '</span>';
+    document.getElementById('pos-table-open').innerHTML = buildPosRows(positions);
     if (hiddenCount > 0) {
-      html += '<div style="margin-top:6px;font-size:9px;color:#555">' + hiddenCount + ' old penny positions hidden (entry &lt;15&#162;, will settle naturally)</div>';
+      document.getElementById('pos-table-open').innerHTML += '<div style="font-size:8px;color:#555;margin-top:4px">' + hiddenCount + ' old bot positions hidden</div>';
     }
-    document.getElementById('pos-table').innerHTML = html;
+
+    // Fetch closed/settled positions
+    try {
+      var settledData = await fetch(API + '/settled').then(function(r) { return r.json(); });
+      var settled = (settledData.settled || []).slice(0, 20);
+      var closedPnl = settled.reduce(function(s, p) { return s + (p.pnl_usd || 0); }, 0);
+      var closedPnlColor = closedPnl >= 0 ? '#00dc5a' : '#ff5000';
+      document.getElementById('pos-closed-count').textContent = '(' + settled.length + ')';
+      document.getElementById('pos-closed-pnl').innerHTML = '<span style="color:' + closedPnlColor + '">' + (closedPnl >= 0 ? '+' : '') + '$' + Math.abs(closedPnl).toFixed(2) + '</span>';
+      if (settled.length === 0) {
+        document.getElementById('pos-table-closed').innerHTML = '<div style="color:#555;font-size:9px;padding:8px;text-align:center">No settled positions yet</div>';
+      } else {
+        var ch = '<table style="font-size:10px"><tr><th>Market</th><th>Side</th><th>Result</th><th>P&L</th></tr>';
+        settled.forEach(function(s) {
+          var resultColor = s.won ? '#00dc5a' : '#ff5000';
+          var resultText = s.won ? 'WON' : 'LOST';
+          var pnlUsd = s.pnl_usd || 0;
+          ch += '<tr>';
+          ch += '<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (s.title || s.ticker || '') + '</td>';
+          ch += '<td style="color:' + (s.side === 'yes' ? '#00dc5a' : '#ff5000') + '">' + (s.side || '').toUpperCase() + '</td>';
+          ch += '<td style="color:' + resultColor + ';font-weight:700">' + resultText + '</td>';
+          ch += '<td style="color:' + resultColor + ';font-weight:700">' + (pnlUsd >= 0 ? '+' : '') + '$' + Math.abs(pnlUsd).toFixed(2) + '</td>';
+          ch += '</tr>';
+        });
+        ch += '</table>';
+        document.getElementById('pos-table-closed').innerHTML = ch;
+      }
+    } catch(e) {
+      document.getElementById('pos-table-closed').innerHTML = '<div style="color:#555;font-size:9px">Error loading settled</div>';
+    }
   } catch(e) {
     document.getElementById('pos-table').innerHTML = '<div class="empty">Error: ' + e.message + '</div>';
   }
