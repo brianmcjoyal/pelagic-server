@@ -6512,13 +6512,13 @@ def trades_today_endpoint():
             })
             seen_tickers.add(ticker)
 
-    # Enrich with close_time and current price from cached market data
+    # Enrich with close_time and current price
+    # 1) Try market cache first (fast, covers open markets)
     market_info = {}
     try:
         for m in _market_cache.get("data") or []:
-            tid = m.get("id") or m.get("ticker") or ""
+            tid = m.get("ticker") or m.get("id") or ""
             if tid:
-                # Cache stores yes_ask_cents (int) and yes/no as 0-1 decimals
                 yp = m.get("yes_ask_cents") or int(round(m.get("yes", 0.5) * 100))
                 np = m.get("no_ask_cents") or int(round(m.get("no", 0.5) * 100))
                 market_info[tid] = {
@@ -6528,6 +6528,25 @@ def trades_today_endpoint():
                 }
     except Exception:
         pass
+    # 2) For tickers not in cache (live/closed markets), fetch from Kalshi API directly
+    missing = [t.get("ticker", "") for t in all_today if t.get("ticker", "") and t.get("ticker", "") not in market_info]
+    for ticker in set(missing):
+        try:
+            path = f"/markets/{ticker}"
+            sh = signed_headers("GET", path)
+            if sh:
+                resp = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + path, headers=sh, timeout=3)
+                if resp.ok:
+                    mk = resp.json().get("market", {})
+                    yp = int(round(float(mk.get("yes_ask", mk.get("last_price", 0.5))) * 100))
+                    np = 100 - yp
+                    market_info[ticker] = {
+                        "close_time": mk.get("expected_expiration_time") or mk.get("close_time") or "",
+                        "yes_price": yp,
+                        "no_price": np,
+                    }
+        except Exception:
+            pass
     for t in all_today:
         info = market_info.get(t.get("ticker", ""), {})
         t["close_time"] = info.get("close_time", "")
