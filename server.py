@@ -6548,7 +6548,10 @@ def trades_today_endpoint():
         ticker = t.get("ticker", "")
         ts = t.get("timestamp", "")
         if ticker and ticker not in seen_tickers and _is_today_pacific(ts) and t.get("action") != "sell":
-            source = "you" if t.get("manual") else "bot"
+            # kalshi_fill source = external fills (placed on kalshi.com by user)
+            # Bot trades have strategy like "moonshark", "sniper", "consensus_mispricing"
+            is_manual = t.get("manual") or t.get("source") == "kalshi_fill"
+            source = "you" if is_manual else "bot"
             all_today.append({
                 "ticker": ticker,
                 "title": t.get("question", t.get("ticker", "")),
