@@ -2400,13 +2400,13 @@ BOT_STATE["snipe_wins"] = 0
 BOT_STATE["snipe_losses"] = 0
 BOT_STATE["snipe_profit_usd"] = 0.0
 
-# MoonShark settings — longshot underdog sniper (10-30c contracts, high payout)
-MOONSHARK_MIN_PRICE = 10   # cents — buy cheap contracts at 10c+
-MOONSHARK_MAX_PRICE = 30   # cents — cap at 30c (still a longshot)
-MOONSHARK_MAX_DAILY = 50.0  # max $50/day on MoonShark
+# MoonShark settings — underdog sniper (10-45c contracts, decent chance + big payout)
+MOONSHARK_MIN_PRICE = 10   # cents — skip sub-10c lottery tickets
+MOONSHARK_MAX_PRICE = 45   # cents — widened from 30c, data shows 30-45c range wins
+MOONSHARK_MAX_DAILY = 75.0  # max $75/day on MoonShark (up from $50)
 MOONSHARK_BET_USD = 5.0     # ~$5 per MoonShark bet (Kelly-adjusted)
 MOONSHARK_MIN_TRADES = 5    # aim for at least 5 trades per day
-MOONSHARK_MAX_TRADES = 10   # max 10 MoonShark trades per day
+MOONSHARK_MAX_TRADES = 15   # max 15 MoonShark trades per day (up from 10)
 
 BOT_STATE["moonshark_trades_today"] = []
 BOT_STATE["moonshark_daily_spent"] = 0.0
