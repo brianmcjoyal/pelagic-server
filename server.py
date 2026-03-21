@@ -2054,9 +2054,15 @@ def check_position_prices():
                     if mt.get("ticker") == ticker:
                         placed_by = "you"
                         break
-            # 5) Default: unknown — label as "unknown" so we can tell
+            # 5) If it's a kalshi_fill not claimed by any bot list, it's yours
             if not placed_by:
-                placed_by = "unknown"
+                # Check if this ticker exists in all_trades as a kalshi_fill
+                is_kalshi_fill = False
+                for at in BOT_STATE.get("all_trades", []):
+                    if at.get("ticker") == ticker and at.get("source") == "kalshi_fill":
+                        is_kalshi_fill = True
+                        break
+                placed_by = "you" if is_kalshi_fill else "unknown"
 
             enriched.append({
                 "ticker": ticker,
