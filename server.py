@@ -2404,6 +2404,7 @@ BOT_STATE["snipe_profit_usd"] = 0.0
 MOONSHARK_MIN_PRICE = 10   # cents — buy cheap contracts at 10c+
 MOONSHARK_MAX_PRICE = 30   # cents — cap at 30c (still a longshot)
 MOONSHARK_MAX_DAILY = 50.0  # max $50/day on MoonShark
+MOONSHARK_BET_USD = 5.0     # ~$5 per MoonShark bet (Kelly-adjusted)
 MOONSHARK_MIN_TRADES = 5    # aim for at least 5 trades per day
 MOONSHARK_MAX_TRADES = 10   # max 10 MoonShark trades per day
 
@@ -10945,23 +10946,43 @@ async function loadSettled() {
       });
       var tbl = '<table style="width:100%;border-collapse:collapse;font-size:10px">';
       tbl += '<tr style="color:#888;border-bottom:1px solid #333;text-align:left">';
-      tbl += '<th style="padding:6px 4px">Date</th><th style="padding:6px 4px">Market</th><th style="padding:6px 4px">Side</th><th style="padding:6px 4px">Entry</th><th style="padding:6px 4px">P&amp;L</th><th style="padding:6px 4px">Result</th>';
+      tbl += '<th style="padding:6px 4px">Settled</th><th style="padding:6px 4px">Market</th><th style="padding:6px 4px">Side</th><th style="padding:6px 4px">Entry</th><th style="padding:6px 4px">P&amp;L</th><th style="padding:6px 4px">Result</th>';
       tbl += '</tr>';
+      function timeAgo(dateStr) {
+        if (!dateStr) return '';
+        try {
+          var d = new Date(dateStr);
+          var now = new Date();
+          var diffMs = now - d;
+          if (diffMs < 0) return '';
+          var mins = Math.floor(diffMs / 60000);
+          if (mins < 60) return mins + 'm ago';
+          var hrs = Math.floor(mins / 60);
+          if (hrs < 24) return hrs + 'h ago';
+          var days = Math.floor(hrs / 24);
+          if (days === 1) return 'Yesterday';
+          if (days < 7) return days + 'd ago';
+          if (days < 30) return Math.floor(days / 7) + 'w ago';
+          return Math.floor(days / 30) + 'mo ago';
+        } catch(e) { return ''; }
+      }
       settled.forEach(function(s) {
         var rc = s.won === true ? '#00dc5a' : s.won === false ? '#ff5000' : '#888';
         var rl = s.won === true ? 'WIN' : s.won === false ? 'LOSS' : 'EVEN';
         var badge = s.won === true ? 'background:rgba(0,220,90,0.12);color:#00dc5a' : s.won === false ? 'background:rgba(255,80,0,0.12);color:#ff5000' : 'background:rgba(136,136,136,0.12);color:#888';
         var sideC = s.side === 'yes' ? '#00dc5a' : s.side === 'no' ? '#ff5000' : '#888';
         var dateStr = '--';
+        var ago = '';
         if (s.close_time) {
           try {
             var dt = new Date(s.close_time);
             dateStr = dt.toLocaleDateString('en-US', {month:'short', day:'numeric'});
+            ago = timeAgo(s.close_time);
           } catch(e) { dateStr = s.close_time.substring(0, 10); }
         }
         var entryStr = s.entry_cents ? s.entry_cents + String.fromCharCode(162) + (s.count ? ' x' + s.count : '') : '--';
         tbl += '<tr style="border-bottom:1px solid #1a1a1a">';
-        tbl += '<td style="padding:6px 4px;color:#888;white-space:nowrap">' + dateStr + '</td>';
+        tbl += '<td style="padding:6px 4px;color:#888;white-space:nowrap">' + dateStr + (ago ? '<br><span style="color:#555;font-size:8px">' + ago + '</span>' : '') + '</td>';
         tbl += '<td style="padding:6px 4px;color:#ddd;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + s.title + '</td>';
         tbl += '<td style="padding:6px 4px;color:' + sideC + ';font-weight:600">' + (s.side || '--').toUpperCase() + '</td>';
         tbl += '<td style="padding:6px 4px;color:#ccc">' + entryStr + '</td>';
