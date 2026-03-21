@@ -2086,12 +2086,15 @@ def check_position_prices():
         return []
 
 
-# Auto-exit thresholds
-TAKE_PROFIT_PCT = 15   # sell when up 15%
-STOP_LOSS_PCT = -10    # cut losses at 10%
+# Auto-exit thresholds — DISABLED for event-outcome bets
+# These bets settle at $0 or $1 — mid-event price swings are noise.
+# Stop-losses caused us to sell Zakharova at 5c right before she WON (would have been +$27).
+TAKE_PROFIT_PCT = 999   # effectively disabled — let positions settle naturally
+STOP_LOSS_PCT = -999    # effectively disabled — hold to settlement
 
 def auto_exit_check():
-    """Check positions and auto-exit based on profit/loss thresholds."""
+    """Check positions and auto-exit based on profit/loss thresholds.
+    NOTE: Disabled for now — event-outcome bets should be held to settlement."""
     if not BOT_CONFIG.get("enabled"):
         return []  # only auto-exit when bot is enabled
     positions = check_position_prices()
