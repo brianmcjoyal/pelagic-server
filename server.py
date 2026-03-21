@@ -73,7 +73,7 @@ BOT_CONFIG = {
     "min_volume": 1000,           # minimum market volume — liquid markets only
     "scan_interval_seconds": 60,  # 60s scan interval
     "max_category_exposure": 3,   # max 3 positions per category — diversified
-    "blocked_categories": ["weather"],  # categories to never trade
+    "blocked_categories": ["weather", "politics", "mma"],  # categories to never trade — data shows these lose money
     "moonshark_enabled": True,  # MoonShark longshot sniper toggle
 }
 
