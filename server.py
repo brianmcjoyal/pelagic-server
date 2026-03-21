@@ -7416,8 +7416,11 @@ def moonshark_opportunities():
         debug_in_range = 0
 
         for m in markets:
-            ticker = m.get("ticker", "")
-            if ticker in existing_tickers:
+            # Only show Kalshi markets (we can only trade there)
+            if m.get("platform") != "kalshi":
+                continue
+            ticker = m.get("ticker") or m.get("id") or ""
+            if not ticker or ticker in existing_tickers:
                 continue
             # Try multiple price field names
             yes_price = 0
