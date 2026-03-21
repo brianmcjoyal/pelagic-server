@@ -11411,6 +11411,10 @@ function drawWheel(opps, highlightIdx) {
   ctx.fillText('🦈', cx, cy + 6);
 }
 
+function skipWheelPick() {
+  document.getElementById('wheel-result').innerHTML = '<div style="color:#888;font-size:11px;padding:8px">Skipped — spin again!</div>';
+}
+
 function spinWheel() {
   if (_wheelSpinning || _wheelOpps.length === 0) return;
   _wheelSpinning = true;
@@ -11434,7 +11438,7 @@ function spinWheel() {
         '<div style="color:#ffb400;font-size:12px;margin-top:6px">' + pick.side.toUpperCase() + ' @ ' + pick.price + '¢ · ' + pick.win_prob + '% implied · $' + pick.payout + ' potential payout</div>' +
         '<div style="display:flex;gap:12px;justify-content:center;margin-top:10px">' +
         '<button onclick="placeMoonsharkBet(&quot;' + pick.ticker + '&quot;,&quot;' + pick.side + '&quot;,' + pick.price + ')" style="background:#00dc5a;border:none;color:#000;padding:10px 30px;border-radius:8px;font-size:14px;font-weight:800;cursor:pointer;min-width:100px">✅ YES</button>' +
-        '<button onclick="document.getElementById(\'wheel-result\').innerHTML=\'<div style=color:#888;font-size:11px;padding:8px>Skipped — spin again!</div>\'" style="background:#ff3030;border:none;color:#fff;padding:10px 30px;border-radius:8px;font-size:14px;font-weight:800;cursor:pointer;min-width:100px">❌ NO</button>' +
+        '<button onclick="skipWheelPick()" style="background:#ff3030;border:none;color:#fff;padding:10px 30px;border-radius:8px;font-size:14px;font-weight:800;cursor:pointer;min-width:100px">❌ NO</button>' +
         '</div></div>';
       btn.disabled = false;
       btn.textContent = '🦈 SPIN AGAIN!';
