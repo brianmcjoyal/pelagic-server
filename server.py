@@ -11416,7 +11416,7 @@ function spinWheel() {
       resultEl.innerHTML = '<div style="background:#002a3a;border:1px solid #00d4ff;border-radius:8px;padding:10px;margin-top:4px">' +
         '<div style="color:#00d4ff;font-weight:700;font-size:13px">🎯 ' + pick.title + '</div>' +
         '<div style="color:#ffb400;font-size:11px;margin-top:4px">' + pick.price + '¢ entry · ' + pick.win_prob + '% chance · $' + pick.payout + ' payout</div>' +
-        '<button onclick="placeMoonsharkBet(\'' + pick.ticker + '\',\'' + pick.side + '\',' + pick.price + ')" style="margin-top:8px;background:#00dc5a;border:none;color:#000;padding:6px 16px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer">🦈 Place This Bet!</button>' +
+        '<button onclick="placeMoonsharkBet(&quot;' + pick.ticker + '&quot;,&quot;' + pick.side + '&quot;,' + pick.price + ')" style="margin-top:8px;background:#00dc5a;border:none;color:#000;padding:6px 16px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer">🦈 Place This Bet!</button>' +
         '</div>';
       btn.disabled = false;
       btn.textContent = '🦈 SPIN AGAIN!';
@@ -11451,7 +11451,7 @@ async function loadMoonsharkOpps() {
       h += '<span style="color:' + probColor + '">' + o.win_prob + '% chance</span>';
       h += '<span style="color:#00dc5a">$' + o.payout + ' payout</span>';
       h += '</div></div>';
-      h += '<button onclick="placeMoonsharkBet(\'' + o.ticker + '\',\'' + o.side + '\',' + o.price + ')" style="background:#002a3a;border:1px solid #00d4ff;color:#00d4ff;padding:4px 10px;border-radius:6px;font-size:9px;font-weight:700;cursor:pointer;white-space:nowrap">BET</button>';
+      h += '<button onclick="placeMoonsharkBet(&quot;' + o.ticker + '&quot;,&quot;' + o.side + '&quot;,' + o.price + ')" style="background:#002a3a;border:1px solid #00d4ff;color:#00d4ff;padding:4px 10px;border-radius:6px;font-size:9px;font-weight:700;cursor:pointer;white-space:nowrap">BET</button>';
       h += '</div>';
     });
     el.innerHTML = h;
