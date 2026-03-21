@@ -4671,7 +4671,7 @@ _known_fill_ids = set()
 def _sync_kalshi_fills():
     """Detect bets placed directly on kalshi.com and add them to today's feed."""
     try:
-        today_str = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+        today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
         path = "/portfolio/fills"
         headers = signed_headers("GET", path)
         if not headers:
@@ -4711,7 +4711,14 @@ def _sync_kalshi_fills():
             action = fill.get("action", "buy")
 
             # Only care about today's buy fills not already tracked
-            if not created or created[:10] != today_str:
+            if not created:
+                continue
+            try:
+                fill_dt = datetime.datetime.fromisoformat(created.replace("Z", "+00:00"))
+                fill_pacific_date = fill_dt.astimezone(_PACIFIC).strftime("%Y-%m-%d")
+            except Exception:
+                fill_pacific_date = created[:10]
+            if fill_pacific_date != today_str:
                 continue
             if action != "buy":
                 continue
