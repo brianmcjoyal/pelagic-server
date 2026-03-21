@@ -7383,6 +7383,59 @@ def moonshark_stats():
     })
 
 
+@app.route("/moonshark-opportunities")
+def moonshark_opportunities():
+    """Return top 5 MoonShark-eligible markets for the wheel."""
+    try:
+        markets = _market_cache.get("data") or []
+        opps = []
+        existing_tickers = set()
+        # Get existing position tickers to avoid duplicates
+        try:
+            positions = check_position_prices()
+            existing_tickers = {p.get("ticker", "") for p in positions}
+        except Exception:
+            pass
+
+        for m in markets:
+            ticker = m.get("ticker", "")
+            if ticker in existing_tickers:
+                continue
+            status = m.get("status", "")
+            if status != "open":
+                continue
+            yes_price = m.get("yes_ask") or m.get("yes_price") or 0
+            no_price = m.get("no_ask") or m.get("no_price") or 0
+            title = m.get("title", "") or m.get("subtitle", "") or ticker
+
+            # Check YES side
+            if MOONSHARK_MIN_PRICE <= yes_price <= MOONSHARK_MAX_PRICE:
+                implied = yes_price / 100
+                payout = round((100 - yes_price) / 100 * 5, 2)  # ~$5 bet payout
+                opps.append({
+                    "ticker": ticker, "title": title, "side": "yes",
+                    "price": yes_price, "win_prob": round(implied * 100),
+                    "payout": payout,
+                    "volume": m.get("volume", 0) or 0,
+                })
+            # Check NO side
+            elif MOONSHARK_MIN_PRICE <= no_price <= MOONSHARK_MAX_PRICE:
+                implied = no_price / 100
+                payout = round((100 - no_price) / 100 * 5, 2)
+                opps.append({
+                    "ticker": ticker, "title": title, "side": "no",
+                    "price": no_price, "win_prob": round(implied * 100),
+                    "payout": payout,
+                    "volume": m.get("volume", 0) or 0,
+                })
+
+        # Sort by volume (most liquid first), take top 5
+        opps.sort(key=lambda x: -(x.get("volume") or 0))
+        return jsonify({"opportunities": opps[:5]})
+    except Exception as e:
+        return jsonify({"opportunities": [], "error": str(e)})
+
+
 @app.route("/moonshark/toggle", methods=["POST"])
 def moonshark_toggle():
     """Toggle MoonShark enabled/disabled."""
@@ -9262,6 +9315,27 @@ a:hover { color: #7da5f5; }
       <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
         <button id="mshark-toggle-btn" onclick="toggleMoonshark()" style="background:none;border:2px solid #00dc5a;color:#00dc5a;padding:6px 14px;border-radius:8px;cursor:pointer;font-size:11px;font-weight:700;font-family:inherit">&#x1F988; ENABLED</button>
         <button class="refresh-btn" onclick="loadMoonshark()" style="border-color:#004a6a;color:#00d4ff">&#x1F504; Refresh</button>
+      </div>
+    </div>
+
+    <!-- Wheel + Opportunities -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+      <!-- Spin Wheel -->
+      <div style="background:#0a1a22;border:1px solid #1a3a4a;border-radius:12px;padding:16px;text-align:center">
+        <div style="color:#00d4ff;font-size:13px;font-weight:700;margin-bottom:12px">&#x1F3B0; Spin the Wheel</div>
+        <div style="position:relative;width:280px;height:280px;margin:0 auto">
+          <canvas id="moonshark-wheel" width="280" height="280" style="border-radius:50%"></canvas>
+          <div id="wheel-pointer" style="position:absolute;top:-10px;left:50%;transform:translateX(-50%);font-size:24px;z-index:10">&#x25BC;</div>
+        </div>
+        <button id="spin-btn" onclick="spinWheel()" style="margin-top:14px;background:linear-gradient(135deg,#00d4ff,#0088aa);border:none;color:#000;padding:10px 28px;border-radius:8px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;letter-spacing:1px">&#x1F988; SPIN!</button>
+        <div id="wheel-result" style="margin-top:10px;min-height:40px;font-size:12px;color:#ccc"></div>
+      </div>
+      <!-- Top Opportunities -->
+      <div style="background:#0a1a22;border:1px solid #1a3a4a;border-radius:12px;padding:16px">
+        <div style="color:#00d4ff;font-size:13px;font-weight:700;margin-bottom:12px">&#x1F3AF; Best MoonShark Opportunities</div>
+        <div id="moonshark-opps" style="display:flex;flex-direction:column;gap:8px">
+          <div class="loading">Scanning markets...</div>
+        </div>
       </div>
     </div>
 
@@ -11263,7 +11337,145 @@ async function quantBet(ticker, side, priceCents, title, deviationPct) {
 }
 
 // --- MoonShark Tab ---
+// MoonShark Wheel
+var _wheelOpps = [];
+var _wheelSpinning = false;
+
+function drawWheel(opps, highlightIdx) {
+  var canvas = document.getElementById('moonshark-wheel');
+  if (!canvas) return;
+  var ctx = canvas.getContext('2d');
+  var cx = 140, cy = 140, r = 130;
+  ctx.clearRect(0, 0, 280, 280);
+  var n = opps.length || 1;
+  var colors = ['#003a5a','#004a2a','#3a2a00','#2a003a','#003a3a','#3a0a0a','#1a3a00','#2a2a3a'];
+  for (var i = 0; i < n; i++) {
+    var startAngle = (i * 2 * Math.PI / n) - Math.PI / 2;
+    var endAngle = ((i + 1) * 2 * Math.PI / n) - Math.PI / 2;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, r, startAngle, endAngle);
+    ctx.closePath();
+    ctx.fillStyle = i === highlightIdx ? '#00d4ff' : colors[i % colors.length];
+    ctx.fill();
+    ctx.strokeStyle = '#0a1a22';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    // Label
+    var midAngle = (startAngle + endAngle) / 2;
+    var labelR = r * 0.65;
+    var lx = cx + Math.cos(midAngle) * labelR;
+    var ly = cy + Math.sin(midAngle) * labelR;
+    ctx.save();
+    ctx.translate(lx, ly);
+    ctx.rotate(midAngle + Math.PI / 2);
+    ctx.fillStyle = i === highlightIdx ? '#000' : '#fff';
+    ctx.font = 'bold 9px sans-serif';
+    ctx.textAlign = 'center';
+    var label = opps[i] ? (opps[i].title || '').substring(0, 18) : '';
+    ctx.fillText(label, 0, 0);
+    ctx.font = '8px sans-serif';
+    ctx.fillStyle = i === highlightIdx ? '#000' : '#ffb400';
+    var priceLabel = opps[i] ? opps[i].price + '¢ → $' + opps[i].payout : '';
+    ctx.fillText(priceLabel, 0, 12);
+    ctx.restore();
+  }
+  // Center circle
+  ctx.beginPath();
+  ctx.arc(cx, cy, 22, 0, 2 * Math.PI);
+  ctx.fillStyle = '#0a1a22';
+  ctx.fill();
+  ctx.strokeStyle = '#00d4ff';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = '#00d4ff';
+  ctx.font = 'bold 16px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('🦈', cx, cy + 6);
+}
+
+function spinWheel() {
+  if (_wheelSpinning || _wheelOpps.length === 0) return;
+  _wheelSpinning = true;
+  var btn = document.getElementById('spin-btn');
+  btn.disabled = true;
+  btn.textContent = 'Spinning...';
+  var n = _wheelOpps.length;
+  var winner = Math.floor(Math.random() * n);
+  var totalSteps = 30 + winner;
+  var step = 0;
+  var interval = setInterval(function() {
+    var idx = step % n;
+    drawWheel(_wheelOpps, idx);
+    step++;
+    if (step >= totalSteps) {
+      clearInterval(interval);
+      drawWheel(_wheelOpps, winner);
+      var pick = _wheelOpps[winner];
+      var resultEl = document.getElementById('wheel-result');
+      resultEl.innerHTML = '<div style="background:#002a3a;border:1px solid #00d4ff;border-radius:8px;padding:10px;margin-top:4px">' +
+        '<div style="color:#00d4ff;font-weight:700;font-size:13px">🎯 ' + pick.title + '</div>' +
+        '<div style="color:#ffb400;font-size:11px;margin-top:4px">' + pick.price + '¢ entry · ' + pick.win_prob + '% chance · $' + pick.payout + ' payout</div>' +
+        '<button onclick="placeMoonsharkBet(\'' + pick.ticker + '\',\'' + pick.side + '\',' + pick.price + ')" style="margin-top:8px;background:#00dc5a;border:none;color:#000;padding:6px 16px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer">🦈 Place This Bet!</button>' +
+        '</div>';
+      btn.disabled = false;
+      btn.textContent = '🦈 SPIN AGAIN!';
+      _wheelSpinning = false;
+    }
+  }, Math.min(50, 50 + step * 3));
+}
+
+async function loadMoonsharkOpps() {
+  try {
+    var data = await fetch(API + '/moonshark-opportunities').then(r => r.json());
+    var opps = data.opportunities || [];
+    _wheelOpps = opps.slice(0, 5);
+    if (_wheelOpps.length > 0) {
+      drawWheel(_wheelOpps, -1);
+    }
+    var el = document.getElementById('moonshark-opps');
+    if (!el) return;
+    if (opps.length === 0) {
+      el.innerHTML = '<div style="color:#555;font-size:10px;padding:8px;text-align:center">No opportunities right now — markets are tight. Check back soon!</div>';
+      return;
+    }
+    var h = '';
+    opps.slice(0, 5).forEach(function(o, i) {
+      var probColor = o.win_prob >= 30 ? '#ffb400' : o.win_prob >= 20 ? '#ff8800' : '#ff5000';
+      h += '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:#0d2230;border:1px solid #1a3a4a;border-radius:8px">';
+      h += '<div style="color:#00d4ff;font-size:16px;font-weight:800;min-width:20px">' + (i+1) + '</div>';
+      h += '<div style="flex:1">';
+      h += '<div style="color:#ddd;font-size:11px;font-weight:600">' + (o.title || '').substring(0, 40) + '</div>';
+      h += '<div style="display:flex;gap:8px;margin-top:3px;font-size:10px">';
+      h += '<span style="color:#ffb400">' + o.price + '¢ entry</span>';
+      h += '<span style="color:' + probColor + '">' + o.win_prob + '% chance</span>';
+      h += '<span style="color:#00dc5a">$' + o.payout + ' payout</span>';
+      h += '</div></div>';
+      h += '<button onclick="placeMoonsharkBet(\'' + o.ticker + '\',\'' + o.side + '\',' + o.price + ')" style="background:#002a3a;border:1px solid #00d4ff;color:#00d4ff;padding:4px 10px;border-radius:6px;font-size:9px;font-weight:700;cursor:pointer;white-space:nowrap">BET</button>';
+      h += '</div>';
+    });
+    el.innerHTML = h;
+  } catch(e) {
+    var el = document.getElementById('moonshark-opps');
+    if (el) el.innerHTML = '<div style="color:#555;font-size:10px;padding:8px">Error loading opportunities</div>';
+  }
+}
+
+async function placeMoonsharkBet(ticker, side, price) {
+  if (!confirm('Place MoonShark bet on ' + ticker + '?')) return;
+  try {
+    var resp = await fetch(API + '/moonshot-bet', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ticker: ticker, side: side})
+    }).then(r => r.json());
+    if (resp.error) { alert('Error: ' + resp.error); }
+    else { alert('Bet placed! 🦈'); loadMoonshark(); loadBetsFeed(); }
+  } catch(e) { alert('Error placing bet'); }
+}
+
 async function loadMoonshark() {
+  loadMoonsharkOpps();
   try {
     var data = await fetch(API + '/moonshark').then(r => r.json());
     var today = data.today || {};
