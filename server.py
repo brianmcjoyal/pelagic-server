@@ -2054,9 +2054,15 @@ def check_position_prices():
                     if mt.get("ticker") == ticker:
                         placed_by = "you"
                         break
-            # 5) If no bot strategy claimed it, it's yours (manual Kalshi bet)
+            # 5) If it's a kalshi_fill not claimed by any bot list, it's yours
             if not placed_by:
-                placed_by = "you"
+                # Check if this ticker exists in all_trades as a kalshi_fill
+                is_kalshi_fill = False
+                for at in BOT_STATE.get("all_trades", []):
+                    if at.get("ticker") == ticker and at.get("source") == "kalshi_fill":
+                        is_kalshi_fill = True
+                        break
+                placed_by = "you" if is_kalshi_fill else "unknown"
 
             enriched.append({
                 "ticker": ticker,
@@ -11052,18 +11058,9 @@ async function loadSettled() {
     if (settled.length === 0) {
       tableEl.innerHTML = '<div style="color:#555;font-size:10px;padding:8px">No settled positions yet. Place some bets and we will track every result here.</div>';
     } else {
-      // Sort by close_time: past dates first (most recent at top), future dates at bottom
-      var now = new Date();
+      // Sort by date descending (most recent first)
       settled.sort(function(a, b) {
-        var aT = new Date(a.close_time || '2000-01-01');
-        var bT = new Date(b.close_time || '2000-01-01');
-        var aFuture = aT > now;
-        var bFuture = bT > now;
-        // Past dates come before future dates
-        if (!aFuture && bFuture) return -1;
-        if (aFuture && !bFuture) return 1;
-        // Within same group: most recent first
-        return bT - aT;
+        return (b.close_time || '').localeCompare(a.close_time || '');
       });
       var tbl = '<table style="width:100%;border-collapse:collapse;font-size:10px">';
       tbl += '<tr style="color:#888;border-bottom:1px solid #333;text-align:left">';
