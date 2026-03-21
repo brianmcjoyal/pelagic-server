@@ -7404,12 +7404,15 @@ def moonshark_opportunities():
             status = m.get("status", "")
             if status != "open":
                 continue
-            yes_price = m.get("yes_ask") or m.get("yes_price") or 0
-            no_price = m.get("no_ask") or m.get("no_price") or 0
+            yes_price = m.get("yes_ask_cents") or m.get("yes_ask") or m.get("yes_price") or 0
+            no_price = m.get("no_ask_cents") or m.get("no_ask") or m.get("no_price") or 0
+            # Fallback: derive from yes price
+            if not no_price and yes_price:
+                no_price = 100 - yes_price
             title = m.get("title", "") or m.get("subtitle", "") or ticker
 
-            # Check YES side
-            if MOONSHARK_MIN_PRICE <= yes_price <= MOONSHARK_MAX_PRICE:
+            # Check YES side (widen range to 5-45c to always show options)
+            if 5 <= yes_price <= 45:
                 implied = yes_price / 100
                 payout = round((100 - yes_price) / 100 * 5, 2)  # ~$5 bet payout
                 opps.append({
@@ -7419,7 +7422,7 @@ def moonshark_opportunities():
                     "volume": m.get("volume", 0) or 0,
                 })
             # Check NO side
-            elif MOONSHARK_MIN_PRICE <= no_price <= MOONSHARK_MAX_PRICE:
+            elif 5 <= no_price <= 45:
                 implied = no_price / 100
                 payout = round((100 - no_price) / 100 * 5, 2)
                 opps.append({
