@@ -7401,17 +7401,14 @@ def moonshark_opportunities():
             ticker = m.get("ticker", "")
             if ticker in existing_tickers:
                 continue
-            status = m.get("status", "")
-            if status != "open":
-                continue
             yes_price = m.get("yes_ask_cents") or m.get("yes_ask") or m.get("yes_price") or 0
             no_price = m.get("no_ask_cents") or m.get("no_ask") or m.get("no_price") or 0
             # Fallback: derive from yes price
             if not no_price and yes_price:
                 no_price = 100 - yes_price
-            title = m.get("title", "") or m.get("subtitle", "") or ticker
+            title = m.get("question", "") or m.get("title", "") or ticker
 
-            # Check YES side (widen range to 5-45c to always show options)
+            # Check YES side (5-45c range for longshot opportunities)
             if 5 <= yes_price <= 45:
                 implied = yes_price / 100
                 payout = round((100 - yes_price) / 100 * 5, 2)  # ~$5 bet payout
