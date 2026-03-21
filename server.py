@@ -7390,50 +7390,67 @@ def moonshark_opportunities():
         markets = _market_cache.get("data") or []
         opps = []
         existing_tickers = set()
-        # Get existing position tickers to avoid duplicates
         try:
             positions = check_position_prices()
             existing_tickers = {p.get("ticker", "") for p in positions}
         except Exception:
             pass
 
+        debug_total = len(markets)
+        debug_in_range = 0
+
         for m in markets:
             ticker = m.get("ticker", "")
             if ticker in existing_tickers:
                 continue
-            yes_price = m.get("yes_ask_cents") or m.get("yes_ask") or m.get("yes_price") or 0
-            no_price = m.get("no_ask_cents") or m.get("no_ask") or m.get("no_price") or 0
-            # Fallback: derive from yes price
-            if not no_price and yes_price:
-                no_price = 100 - yes_price
+            # Try multiple price field names
+            yes_price = 0
+            no_price = 0
+            for yf in ["yes_ask_cents", "yes_ask", "yes_price"]:
+                v = m.get(yf)
+                if v and isinstance(v, (int, float)) and v > 0:
+                    yes_price = int(v) if v > 1 else int(v * 100)
+                    break
+            # Also check decimal "yes" field (0-1 range)
+            if not yes_price:
+                y = m.get("yes", 0)
+                if y and 0 < y < 1:
+                    yes_price = int(y * 100)
+            no_price = 100 - yes_price if yes_price else 0
             title = m.get("question", "") or m.get("title", "") or ticker
+            close_time = m.get("close_time") or ""
 
             # Check YES side (5-45c range for longshot opportunities)
             if 5 <= yes_price <= 45:
-                implied = yes_price / 100
-                payout = round((100 - yes_price) / 100 * 5, 2)  # ~$5 bet payout
+                debug_in_range += 1
+                payout = round((100 - yes_price) / 100 * 5, 2)
                 opps.append({
                     "ticker": ticker, "title": title, "side": "yes",
-                    "price": yes_price, "win_prob": round(implied * 100),
-                    "payout": payout,
+                    "price": yes_price, "win_prob": yes_price,
+                    "payout": payout, "close_time": close_time,
                     "volume": m.get("volume", 0) or 0,
                 })
             # Check NO side
             elif 5 <= no_price <= 45:
-                implied = no_price / 100
+                debug_in_range += 1
                 payout = round((100 - no_price) / 100 * 5, 2)
                 opps.append({
                     "ticker": ticker, "title": title, "side": "no",
-                    "price": no_price, "win_prob": round(implied * 100),
-                    "payout": payout,
+                    "price": no_price, "win_prob": no_price,
+                    "payout": payout, "close_time": close_time,
                     "volume": m.get("volume", 0) or 0,
                 })
 
-        # Sort by volume (most liquid first), take top 5
+        # Sort by volume (most liquid first), take top 10
         opps.sort(key=lambda x: -(x.get("volume") or 0))
-        return jsonify({"opportunities": opps[:5]})
+        return jsonify({
+            "opportunities": opps[:10],
+            "total_scanned": debug_total,
+            "in_range": debug_in_range,
+        })
     except Exception as e:
-        return jsonify({"opportunities": [], "error": str(e)})
+        import traceback
+        return jsonify({"opportunities": [], "error": str(e), "trace": traceback.format_exc()})
 
 
 @app.route("/moonshark/toggle", methods=["POST"])
@@ -11402,27 +11419,34 @@ function spinWheel() {
   btn.textContent = 'Spinning...';
   var n = _wheelOpps.length;
   var winner = Math.floor(Math.random() * n);
-  var totalSteps = 30 + winner;
+  var totalSteps = 40 + Math.floor(Math.random() * 20) + winner;
   var step = 0;
-  var interval = setInterval(function() {
+  function spinStep() {
     var idx = step % n;
     drawWheel(_wheelOpps, idx);
     step++;
     if (step >= totalSteps) {
-      clearInterval(interval);
       drawWheel(_wheelOpps, winner);
       var pick = _wheelOpps[winner];
       var resultEl = document.getElementById('wheel-result');
-      resultEl.innerHTML = '<div style="background:#002a3a;border:1px solid #00d4ff;border-radius:8px;padding:10px;margin-top:4px">' +
-        '<div style="color:#00d4ff;font-weight:700;font-size:13px">🎯 ' + pick.title + '</div>' +
-        '<div style="color:#ffb400;font-size:11px;margin-top:4px">' + pick.price + '¢ entry · ' + pick.win_prob + '% chance · $' + pick.payout + ' payout</div>' +
-        '<button onclick="placeMoonsharkBet(&quot;' + pick.ticker + '&quot;,&quot;' + pick.side + '&quot;,' + pick.price + ')" style="margin-top:8px;background:#00dc5a;border:none;color:#000;padding:6px 16px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer">🦈 Place This Bet!</button>' +
-        '</div>';
+      resultEl.innerHTML = '<div style="background:#002a3a;border:1px solid #00d4ff;border-radius:8px;padding:12px;margin-top:4px">' +
+        '<div style="color:#00d4ff;font-weight:700;font-size:14px">🎯 ' + pick.title + '</div>' +
+        '<div style="color:#ffb400;font-size:12px;margin-top:6px">' + pick.side.toUpperCase() + ' @ ' + pick.price + '¢ · ' + pick.win_prob + '% implied · $' + pick.payout + ' potential payout</div>' +
+        '<div style="display:flex;gap:12px;justify-content:center;margin-top:10px">' +
+        '<button onclick="placeMoonsharkBet(&quot;' + pick.ticker + '&quot;,&quot;' + pick.side + '&quot;,' + pick.price + ')" style="background:#00dc5a;border:none;color:#000;padding:10px 30px;border-radius:8px;font-size:14px;font-weight:800;cursor:pointer;min-width:100px">✅ YES</button>' +
+        '<button onclick="document.getElementById(\'wheel-result\').innerHTML=\'<div style=color:#888;font-size:11px;padding:8px>Skipped — spin again!</div>\'" style="background:#ff3030;border:none;color:#fff;padding:10px 30px;border-radius:8px;font-size:14px;font-weight:800;cursor:pointer;min-width:100px">❌ NO</button>' +
+        '</div></div>';
       btn.disabled = false;
       btn.textContent = '🦈 SPIN AGAIN!';
       _wheelSpinning = false;
+      return;
     }
-  }, Math.min(50, 50 + step * 3));
+    // Decelerate: start fast, slow down near the end
+    var remaining = totalSteps - step;
+    var delay = remaining > 20 ? 50 : remaining > 10 ? 100 : remaining > 5 ? 180 : 300;
+    setTimeout(spinStep, delay);
+  }
+  spinStep();
 }
 
 async function loadMoonsharkOpps() {
