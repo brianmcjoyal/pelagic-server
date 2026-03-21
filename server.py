@@ -9953,6 +9953,17 @@ async function loadPortfolio() {
     if (hiddenCount > 0) {
       html += '<div style="margin-top:6px;font-size:9px;color:#555">' + hiddenCount + ' old bot positions hidden (uncheck toggle to show all)</div>';
     }
+
+    // Split by placed_by: YOU vs BOT
+    var myBets = positions.filter(function(p) { return p.placed_by === 'you'; });
+    var botBets = positions.filter(function(p) { return p.placed_by !== 'you'; });
+    var myPnl = myBets.reduce(function(s, p) { return s + (p.unrealized_pnl_cents || 0); }, 0);
+    var botPnl = botBets.reduce(function(s, p) { return s + (p.unrealized_pnl_cents || 0); }, 0);
+    html += '<div style="margin-top:16px;display:grid;grid-template-columns:1fr 1fr;gap:16px">';
+    html += buildPosTable(myBets, '👤 My Bets', '#5abf5a', myPnl);
+    html += buildPosTable(botBets, '🤖 Bot Bets', '#7a7aff', botPnl);
+    html += '</div>';
+
     posEl.innerHTML = html;
   } catch(e) {
     console.error('Portfolio load error:', e);
