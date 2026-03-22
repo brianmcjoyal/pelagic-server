@@ -233,7 +233,7 @@ def _hydrate_from_kalshi():
             print("[HYDRATE] No fills found")
             return
 
-        today_str = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+        today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
         existing_ids = {t.get("order_id") for t in BOT_STATE["all_trades"] if t.get("order_id")}
 
         new_count = 0
@@ -6761,7 +6761,7 @@ def ticker_prices():
     """Proxy for CoinGecko + Yahoo Finance quotes."""
     import requests as _req
     result = {}
-    # Crypto
+    # Crypto — try CoinGecko first, fallback to Coinbase
     try:
         cg = _req.get(
             "https://api.coingecko.com/api/v3/simple/price",
@@ -6770,8 +6770,16 @@ def ticker_prices():
         ).json()
         result["btc"] = {"price": cg["bitcoin"]["usd"], "change": cg["bitcoin"].get("usd_24h_change")}
         result["eth"] = {"price": cg["ethereum"]["usd"], "change": cg["ethereum"].get("usd_24h_change")}
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[TICKER] CoinGecko failed: {e}, trying Coinbase fallback")
+        # Fallback: Coinbase public API (no auth needed)
+        for coin, key in [("BTC", "btc"), ("ETH", "eth")]:
+            try:
+                cb = _req.get(f"https://api.coinbase.com/v2/prices/{coin}-USD/spot", timeout=5).json()
+                price = float(cb["data"]["amount"])
+                result[key] = {"price": price, "change": None}
+            except Exception:
+                pass
     # Stocks via Yahoo v8 chart endpoint (v7 quote requires auth now)
     for sym in ("VOO", "TSLA", "GOOG"):
         try:
@@ -6958,10 +6966,12 @@ def trades_today_endpoint():
         ticker = t.get("ticker", "")
         ts = t.get("timestamp", "")
         if ticker and ticker not in seen_tickers and _is_today_pacific(ts) and t.get("action") != "sell":
-            # kalshi_fill source = external fills (placed on kalshi.com by user)
             # Bot trades have strategy like "moonshark", "sniper", "consensus_mispricing"
-            is_manual = t.get("manual") or t.get("source") == "kalshi_fill"
-            source = "you" if is_manual else "bot"
+            # After restart, hydrated fills have source=kalshi_fill but may have inferred strategy
+            strat = t.get("strategy", "")
+            is_bot = strat in ("moonshark", "live_sniper", "consensus_mispricing", "arb", "sniper")
+            is_manual = t.get("manual") or (t.get("source") == "kalshi_fill" and not is_bot)
+            source = "bot" if is_bot else ("you" if is_manual else "bot")
             all_today.append({
                 "ticker": ticker,
                 "title": t.get("question", t.get("ticker", "")),
