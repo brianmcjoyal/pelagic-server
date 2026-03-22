@@ -92,13 +92,17 @@ BOT_STATE = {
 }
 
 def _log_activity(msg, level="info"):
-    """Add a timestamped message to the activity log."""
-    BOT_STATE["activity_log"].append({
+    """Add a timestamped message to the activity log. Deduplicates consecutive identical messages."""
+    log = BOT_STATE["activity_log"]
+    # Skip if last message is identical (prevents duplicates from concurrent threads)
+    if log and log[-1].get("msg") == msg:
+        return
+    log.append({
         "time": datetime.datetime.utcnow().isoformat(),
         "msg": msg,
         "level": level,
     })
-    BOT_STATE["activity_log"] = BOT_STATE["activity_log"][-50:]
+    BOT_STATE["activity_log"] = log[-50:]
 
 import json as _json
 
@@ -6997,6 +7001,25 @@ def trades_today_endpoint():
                 "source": source,
             })
             seen_tickers.add(ticker)
+
+    # Consolidate duplicate fills: group by ticker+side, sum count/cost
+    _consolidated = {}
+    for t in all_today:
+        key = (t.get("ticker", ""), t.get("side", ""))
+        if key in _consolidated:
+            c = _consolidated[key]
+            c["count"] += t.get("count", 0)
+            c["cost_usd"] = round(c["cost_usd"] + t.get("cost_usd", 0), 2)
+            # Keep earliest time
+            if t.get("time", "") and (not c.get("time") or t["time"] < c["time"]):
+                c["time"] = t["time"]
+            # Weighted average price
+            total_count = c["count"]
+            if total_count > 0:
+                c["price_cents"] = round(c["cost_usd"] * 100 / total_count)
+        else:
+            _consolidated[key] = dict(t)
+    all_today = list(_consolidated.values())
 
     # Enrich with close_time and current price
     # 1) Try market cache first (fast, covers open markets)
