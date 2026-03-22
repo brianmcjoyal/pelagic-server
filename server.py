@@ -6653,6 +6653,213 @@ def trades_today_endpoint():
     return jsonify({"trades": all_today, "count": len(all_today), "total_spent": round(total_spent, 2)})
 
 
+# ── Live Scores (ESPN) ────────────────────────────────────────────────
+_live_scores_cache = {"data": {}, "ts": 0}
+_LIVE_SCORES_TTL = 60  # seconds
+
+_ESPN_ENDPOINTS = {
+    "nba": "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard",
+    "mlb": "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard",
+    "nhl": "https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard",
+    "ncaab": "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard",
+}
+
+# Common team name aliases: display name → ESPN short name / location variants
+_TEAM_ALIASES = {
+    # NBA
+    "milwaukee": ["mil", "bucks"], "phoenix": ["phx", "suns"], "los angeles": ["la", "lal", "lac"],
+    "golden state": ["gs", "gsw", "warriors"], "new york": ["ny", "nyk", "knicks"],
+    "san antonio": ["sa", "sas", "spurs"], "oklahoma city": ["okc", "thunder"],
+    "portland": ["por", "trail blazers", "blazers"], "minnesota": ["min", "timberwolves", "wolves"],
+    "new orleans": ["no", "nop", "pelicans"], "sacramento": ["sac", "kings"],
+    "indiana": ["ind", "pacers"], "cleveland": ["cle", "cavaliers", "cavs"],
+    "boston": ["bos", "celtics"], "denver": ["den", "nuggets"], "miami": ["mia", "heat"],
+    "dallas": ["dal", "mavericks", "mavs"], "memphis": ["mem", "grizzlies"],
+    "philadelphia": ["phi", "phl", "76ers", "sixers"], "toronto": ["tor", "raptors"],
+    "chicago": ["chi", "bulls"], "atlanta": ["atl", "hawks"], "brooklyn": ["bkn", "nets"],
+    "detroit": ["det", "pistons"], "houston": ["hou", "rockets"], "charlotte": ["cha", "hornets"],
+    "orlando": ["orl", "magic"], "washington": ["wsh", "was", "wizards"],
+    "utah": ["uta", "jazz"], "lakers": ["lal", "la lakers"], "clippers": ["lac", "la clippers"],
+    # NHL extras
+    "pittsburgh": ["pit", "penguins"], "tampa bay": ["tb", "tbl", "lightning"],
+    "colorado": ["col", "avalanche"], "carolina": ["car", "hurricanes"],
+    "st. louis": ["stl", "blues"], "st louis": ["stl", "blues"],
+    "vegas": ["vgk", "golden knights"], "las vegas": ["vgk", "golden knights"],
+    "edmonton": ["edm", "oilers"], "winnipeg": ["wpg", "jets"],
+    "vancouver": ["van", "canucks"], "calgary": ["cgy", "flames"],
+    "ottawa": ["ott", "senators"], "montreal": ["mtl", "canadiens"],
+    "seattle": ["sea", "kraken"], "nashville": ["nsh", "predators"],
+    "florida": ["fla", "panthers"], "buffalo": ["buf", "sabres"],
+    "columbus": ["cbj", "blue jackets"], "arizona": ["ari", "coyotes"],
+    "anaheim": ["ana", "ducks"], "new jersey": ["nj", "njd", "devils"],
+    "ny rangers": ["nyr", "rangers"], "ny islanders": ["nyi", "islanders"],
+}
+
+
+def _fetch_all_espn_scores():
+    """Fetch today's scores from all ESPN endpoints. Returns dict of normalized_team_key -> game info."""
+    games = {}
+    for league, url in _ESPN_ENDPOINTS.items():
+        try:
+            resp = requests.get(url, timeout=5)
+            if not resp.ok:
+                continue
+            data = resp.json()
+            for event in data.get("events", []):
+                competition = (event.get("competitions") or [{}])[0]
+                competitors = competition.get("competitors", [])
+                if len(competitors) < 2:
+                    continue
+                status_obj = competition.get("status") or event.get("status", {})
+                status_type = (status_obj.get("type") or {})
+                state = status_type.get("state", "")  # pre, in, post
+                detail = status_obj.get("type", {}).get("shortDetail", "") or status_obj.get("type", {}).get("detail", "")
+                # Get short detail from the status directly
+                detail = status_obj.get("displayClock", "")
+                period = status_obj.get("period", 0)
+
+                teams = []
+                for c in competitors:
+                    team_obj = c.get("team", {})
+                    teams.append({
+                        "abbrev": team_obj.get("abbreviation", "").upper(),
+                        "name": team_obj.get("displayName", ""),
+                        "short": team_obj.get("shortDisplayName", ""),
+                        "location": team_obj.get("location", ""),
+                        "score": c.get("score", "0"),
+                        "home": c.get("homeAway", "") == "home",
+                    })
+
+                if state == "pre":
+                    clock_str = "Pregame"
+                elif state == "post":
+                    clock_str = "Final"
+                else:
+                    # In-progress
+                    if league == "nba" or league == "ncaab":
+                        qtr_names = {1: "Q1", 2: "Q2", 3: "Q3", 4: "Q4"}
+                        clock_str = qtr_names.get(period, f"OT{period-4}" if period > 4 else f"Q{period}")
+                        if detail:
+                            clock_str = f"{detail} {clock_str}"
+                    elif league == "nhl":
+                        p_names = {1: "P1", 2: "P2", 3: "P3"}
+                        clock_str = p_names.get(period, f"OT{period-3}" if period > 3 else f"P{period}")
+                        if detail:
+                            clock_str = f"{detail} {clock_str}"
+                    elif league == "mlb":
+                        half = "Top" if status_obj.get("type", {}).get("shortDetail", "").lower().startswith("top") else "Bot"
+                        clock_str = f"{half} {period}"
+                    else:
+                        clock_str = detail or f"Period {period}"
+
+                # away team is usually index 1, home index 0 — ESPN uses homeAway field
+                away = next((t for t in teams if not t["home"]), teams[1] if len(teams) > 1 else teams[0])
+                home = next((t for t in teams if t["home"]), teams[0])
+
+                game_info = {
+                    "away_abbrev": away["abbrev"],
+                    "home_abbrev": home["abbrev"],
+                    "away_score": away["score"],
+                    "home_score": home["score"],
+                    "away_name": away["name"],
+                    "home_name": home["name"],
+                    "away_location": away["location"],
+                    "home_location": home["location"],
+                    "away_short": away["short"],
+                    "home_short": home["short"],
+                    "clock": clock_str,
+                    "state": state,
+                    "league": league.upper(),
+                }
+
+                # Index by multiple keys for fuzzy matching
+                for team in [away, home]:
+                    for key in [team["abbrev"].lower(), team["name"].lower(),
+                                team["short"].lower(), team["location"].lower()]:
+                        if key:
+                            games[key] = game_info
+        except Exception:
+            continue
+    return games
+
+
+def _extract_teams_from_title(title):
+    """Extract team names from bet titles like 'Milwaukee at Phoenix Winner?' or 'MIL vs PHX'."""
+    if not title:
+        return []
+    # Clean up title
+    title_clean = title.replace("Winner?", "").replace("winner?", "").replace("Winner", "")
+    title_clean = title_clean.replace("Over/Under", "").replace("Spread", "").strip()
+    # Try "Team at/vs/v Team" pattern
+    m = re.match(r'^(.+?)\s+(?:at|vs\.?|v\.?|@)\s+(.+?)(?:\s*[-\(].*)?$', title_clean, re.IGNORECASE)
+    if m:
+        return [m.group(1).strip().lower(), m.group(2).strip().lower()]
+    # Try to find any known team name in the title
+    title_lower = title.lower()
+    found = []
+    for team_name in _TEAM_ALIASES:
+        if team_name in title_lower:
+            found.append(team_name)
+    return found[:2]
+
+
+def _find_game_for_teams(team_names, scores_map):
+    """Try to match extracted team names against the scores map."""
+    for name in team_names:
+        # Direct match
+        if name in scores_map:
+            return scores_map[name]
+        # Check aliases
+        if name in _TEAM_ALIASES:
+            for alias in _TEAM_ALIASES[name]:
+                if alias in scores_map:
+                    return scores_map[alias]
+        # Check if any alias maps to this name
+        for canonical, aliases in _TEAM_ALIASES.items():
+            if name in aliases and canonical in scores_map:
+                return scores_map[canonical]
+    return None
+
+
+def _format_score_string(game):
+    """Format game info into a display string like 'MIL 45 - PHX 52 Q3'."""
+    if not game:
+        return ""
+    return f"{game['away_abbrev']} {game['away_score']} - {game['home_abbrev']} {game['home_score']} {game['clock']}"
+
+
+@app.route("/live-scores")
+def live_scores_endpoint():
+    """Return live scores matched to active bet tickers."""
+    now = _time.time()
+    if now - _live_scores_cache["ts"] > _LIVE_SCORES_TTL or not _live_scores_cache["data"]:
+        try:
+            _live_scores_cache["data"] = _fetch_all_espn_scores()
+            _live_scores_cache["ts"] = now
+        except Exception:
+            pass
+
+    scores_map = _live_scores_cache["data"]
+    tickers_param = request.args.get("tickers", "")
+    titles_param = request.args.get("titles", "")
+    tickers = [t.strip() for t in tickers_param.split("|") if t.strip()] if tickers_param else []
+    titles = [t.strip() for t in titles_param.split("|") if t.strip()] if titles_param else []
+
+    result = {}
+    for i, title in enumerate(titles):
+        ticker = tickers[i] if i < len(tickers) else title
+        team_names = _extract_teams_from_title(title)
+        game = _find_game_for_teams(team_names, scores_map)
+        if game:
+            result[ticker] = {
+                "display": _format_score_string(game),
+                "state": game["state"],
+                "league": game["league"],
+            }
+
+    return jsonify({"scores": result, "game_count": len(scores_map) // 4})
+
+
 @app.route("/quant-status")
 def quant_status():
     """Real-time quant engine dashboard — shows all strategy performance."""
@@ -10069,6 +10276,14 @@ async function loadBetsFeed() {
       el.innerHTML = '<div class="activity-line"><span class="time">--:--</span><span class="dot info"></span><span class="msg" style="color:#666">No bets placed today</span></div>';
       return;
     }
+    // Fetch live scores for all trades in parallel
+    var scoreMap = {};
+    try {
+      var tickers = trades.map(function(t){ return t.ticker || ''; }).join('|');
+      var titles = trades.map(function(t){ return t.title || t.ticker || ''; }).join('|');
+      var scData = await fetch(API + '/live-scores?tickers=' + encodeURIComponent(tickers) + '&titles=' + encodeURIComponent(titles)).then(function(r){ return r.json(); });
+      scoreMap = scData.scores || {};
+    } catch(e) {}
     var h = '';
     trades.forEach(function(t) {
       var timeStr = '--:--';
@@ -10118,6 +10333,13 @@ async function loadBetsFeed() {
         } catch(e) {}
       }
       if (settleStr) h += '<span style="color:#555;font-size:10px;margin-left:4px">⏱ ' + settleStr + '</span>';
+      // Live score display
+      var scoreInfo = scoreMap[t.ticker];
+      if (scoreInfo && scoreInfo.display) {
+        var scoreColor = scoreInfo.state === 'in' ? '#00d4ff' : (scoreInfo.state === 'post' ? '#888' : '#ffb400');
+        var scoreIcon = scoreInfo.state === 'in' ? '⚡' : (scoreInfo.state === 'post' ? '✓' : '🏀');
+        h += '<span style="color:' + scoreColor + ';font-size:10px;margin-left:4px">' + scoreIcon + ' ' + scoreInfo.display + '</span>';
+      }
       h += '</span></div>';
     });
     el.innerHTML = h;
