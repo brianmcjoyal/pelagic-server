@@ -10771,7 +10771,7 @@ async function loadBetsFeed() {
       var stratColors = {sniper:'#ffb400', quant:'#00d4ff', bot:'#888', moonshark:'#e040fb', manual:'#5abf5a', moonshark_manual:'#5abf5a'};
       var stratLabels = {sniper:'SNIPER', quant:'QUANT', bot:'BOT', moonshark:'MOONSHARK', manual:'MANUAL', moonshark_manual:'MOONSHOT'};
       var sc = stratColors[t.strategy] || '#888';
-      var sl = stratLabels[t.strategy] || t.strategy.toUpperCase();
+      var sl = stratLabels[t.strategy] || (t.strategy || 'bot').toUpperCase();
       var title = (t.title || t.ticker || '').substring(0, 40);
       var sourceTag = t.source === 'you' ? '<span style="font-size:7px;padding:1px 3px;background:#1a2e1a;border:1px solid #3a8a3a;border-radius:3px;color:#5abf5a;margin-right:4px">YOU</span>' : '<span style="font-size:7px;padding:1px 3px;background:#1a1a2e;border:1px solid #4a4ae0;border-radius:3px;color:#7a7aff;margin-right:4px">BOT</span>';
       h += '<div class="activity-line">';
