@@ -11118,17 +11118,17 @@ async function loadSettled() {
     if (settled.length === 0) {
       tableEl.innerHTML = '<div style="color:#555;font-size:10px;padding:8px">No settled positions yet. Place some bets and we will track every result here.</div>';
     } else {
-      // Sort by settlement: most recently settled first
-      // Sort newest first — use settlement_time if available, else close_time
+      // Sort: recently settled (past close_time) first, then future close_times at bottom
+      var now = new Date().toISOString();
       settled.sort(function(a, b) {
-        var aTime = a.settlement_time || a.close_time || '';
-        var bTime = b.settlement_time || b.close_time || '';
-        // Future close_times go to the end (haven't settled yet)
-        var now = new Date().toISOString();
-        var aFuture = aTime > now;
-        var bFuture = bTime > now;
-        if (aFuture && !bFuture) return 1;
-        if (!aFuture && bFuture) return -1;
+        var aTime = a.close_time || '9999';
+        var bTime = b.close_time || '9999';
+        var aPast = aTime <= now;
+        var bPast = bTime <= now;
+        // Past close_times first (these actually settled)
+        if (aPast && !bPast) return -1;
+        if (!aPast && bPast) return 1;
+        // Within same group, sort by close_time descending (most recent first)
         return bTime.localeCompare(aTime);
       });
       var tbl = '<table style="width:100%;border-collapse:collapse;font-size:10px">';
