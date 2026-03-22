@@ -11660,19 +11660,8 @@ async function loadSettled() {
     if (settled.length === 0) {
       tableEl.innerHTML = '<div style="color:#555;font-size:10px;padding:8px">No settled positions yet. Place some bets and we will track every result here.</div>';
     } else {
-      // Sort: recently settled (past close_time) first, then future close_times at bottom
-      var now = new Date().toISOString();
-      settled.sort(function(a, b) {
-        var aTime = a.close_time || '9999';
-        var bTime = b.close_time || '9999';
-        var aPast = aTime <= now;
-        var bPast = bTime <= now;
-        // Past close_times first (these actually settled)
-        if (aPast && !bPast) return -1;
-        if (!aPast && bPast) return 1;
-        // Within same group, sort by close_time descending (most recent first)
-        return bTime.localeCompare(aTime);
-      });
+      // Server already sorts: past close_times first (newest), future at bottom
+      // No client-side re-sort needed
       var tbl = '<table style="width:100%;border-collapse:collapse;font-size:10px">';
       tbl += '<tr style="color:#888;border-bottom:1px solid #333;text-align:left">';
       tbl += '<th style="padding:6px 4px">Settled</th><th style="padding:6px 4px">Market</th><th style="padding:6px 4px">Side</th><th style="padding:6px 4px">Entry</th><th style="padding:6px 4px">P&amp;L</th><th style="padding:6px 4px">Result</th>';
