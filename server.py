@@ -9131,7 +9131,13 @@ a:hover { color: #7da5f5; }
 </head>
 <body>
 <!-- Ticker bar -->
-<!-- Stock ticker removed for cleaner UI -->
+<div class="ticker-bar" id="ticker-bar">
+  <div class="ticker-item"><span class="ticker-symbol">BTC</span> <span class="ticker-price" id="tk-btc">--</span> <span class="ticker-chg" id="tk-btc-chg"></span></div>
+  <div class="ticker-item"><span class="ticker-symbol">ETH</span> <span class="ticker-price" id="tk-eth">--</span> <span class="ticker-chg" id="tk-eth-chg"></span></div>
+  <div class="ticker-item"><span class="ticker-symbol">VOO</span> <span class="ticker-price" id="tk-voo">--</span> <span class="ticker-chg" id="tk-voo-chg"></span></div>
+  <div class="ticker-item"><span class="ticker-symbol">TSLA</span> <span class="ticker-price" id="tk-tsla">--</span> <span class="ticker-chg" id="tk-tsla-chg"></span></div>
+  <div class="ticker-item"><span class="ticker-symbol">GOOG</span> <span class="ticker-price" id="tk-goog">--</span> <span class="ticker-chg" id="tk-goog-chg"></span></div>
+</div>
 
 <div class="header">
   <div class="header-left">
