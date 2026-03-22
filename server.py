@@ -2695,7 +2695,7 @@ def live_game_snipe():
                             "category": classify_market_category(title, ticker),
                         })
                         # Track in trade journal for pattern analysis
-                        _journal_trade(ticker, title, side, price, filled, actual_cost, "live_sniper", is_live=True)
+                        _journal_trade(ticker, title, side, price, filled, actual_cost, "live_sniper", is_live=True, close_time=mkt.get("close_time", ""))
                         _log_activity(
                             f"🎯 SNIPED! {side.upper()} {ticker} @ {price}c x{filled} "
                             f"= ${actual_cost:.2f} (potential +${potential:.2f}) | {title[:40]}",
@@ -3025,7 +3025,7 @@ def moonshark_snipe():
                             "category": classify_market_category(title, ticker),
                         })
                         # Track in trade journal for pattern analysis
-                        _journal_trade(ticker, title, side, price, filled, actual_cost, "moonshark", is_live=True)
+                        _journal_trade(ticker, title, side, price, filled, actual_cost, "moonshark", is_live=True, close_time=mkt.get("close_time", ""))
                         _log_activity(
                             f"MOONSHARK HIT! {side.upper()} {ticker} @ {price}c x{filled} "
                             f"= ${actual_cost:.2f} (potential +${potential:.2f}) | {title[:40]}",
@@ -4194,7 +4194,7 @@ TRADE_JOURNAL_START = "2026-03-16"
 
 # _TRADE_JOURNAL declared early (near BOT_STATE) so _load_state() can populate it
 
-def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, strategy, is_live=False):
+def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, strategy, is_live=False, close_time=None):
     """Create an enriched trade record with all metadata for pattern analysis."""
     now = datetime.datetime.utcnow()
     cat = classify_market_category(title or "", ticker or "")
@@ -4232,6 +4232,38 @@ def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, stra
     hour = now.hour
     day_of_week = now.strftime("%A")
 
+    # --- New enrichment fields ---
+    # Entry odds: implied probability at entry
+    entry_odds = round(price_cents / 100.0, 4) if price_cents else 0
+
+    # Hours to close and market type classification
+    hours_to_close = None
+    market_type = "unknown"
+    if close_time:
+        try:
+            ct_dt = datetime.datetime.fromisoformat(str(close_time).replace("Z", "+00:00")).replace(tzinfo=None)
+            hours_to_close = round((ct_dt - now).total_seconds() / 3600, 2)
+            if hours_to_close is not None:
+                if hours_to_close <= 0:
+                    market_type = "live_sports"
+                elif hours_to_close <= 12:
+                    market_type = "same_day"
+                elif hours_to_close <= 72:
+                    market_type = "multi_day"
+                else:
+                    market_type = "long_dated"
+        except Exception:
+            pass
+
+    # Underdog / favorite flags
+    is_underdog = price_cents < 40 if price_cents else False
+    is_favorite = price_cents > 60 if price_cents else False
+
+    # Bet sizing and payout
+    bet_size_usd = round(cost_usd, 2)
+    potential_payout_usd = round((100 * count) / 100.0, 2) if count else 0
+    risk_reward_ratio = round(potential_payout_usd / cost_usd, 3) if cost_usd > 0 else 0
+
     return {
         "ticker": ticker,
         "title": title,
@@ -4253,12 +4285,21 @@ def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, stra
         "settlement_time": None,
         "hold_duration_mins": None,
         "price_at_entry": price_cents,
+        # --- New fields for pattern analysis ---
+        "entry_odds": entry_odds,
+        "market_type": market_type,
+        "hours_to_close": hours_to_close,
+        "is_underdog": is_underdog,
+        "is_favorite": is_favorite,
+        "bet_size_usd": bet_size_usd,
+        "potential_payout_usd": potential_payout_usd,
+        "risk_reward_ratio": risk_reward_ratio,
     }
 
 
-def _journal_trade(ticker, title, side, price_cents, count, cost_usd, strategy, is_live=False):
+def _journal_trade(ticker, title, side, price_cents, count, cost_usd, strategy, is_live=False, close_time=None):
     """Add a trade to the journal."""
-    rec = _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, strategy, is_live)
+    rec = _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, strategy, is_live, close_time=close_time)
     _TRADE_JOURNAL.append(rec)
     return rec
 
@@ -5675,6 +5716,204 @@ def analytics_endpoint():
                 "avg_loss_amount": avg_loss,
                 "best_sport": best_sport,
                 "best_price_range": best_price,
+            },
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+@app.route("/analytics/patterns")
+def analytics_patterns_endpoint():
+    """Deep pattern analysis of trade journal — win rates sliced by every dimension."""
+    try:
+        settled = [t for t in _TRADE_JOURNAL if t.get("result") is not None]
+        if not settled:
+            return jsonify({"message": "No settled trades in journal yet", "total_settled": 0})
+
+        wins = [t for t in settled if t["result"] == "win"]
+        losses = [t for t in settled if t["result"] == "loss"]
+        total_decided = len(wins) + len(losses)
+
+        def _wr(w, l):
+            return round(w / max(1, w + l) * 100, 1)
+
+        def _avg(vals):
+            return round(sum(vals) / max(1, len(vals)), 2) if vals else 0
+
+        # --- Win rate by hour of day (0-23) ---
+        by_hour = {}
+        for t in settled:
+            h = t.get("entry_hour")
+            if h is None:
+                continue
+            key = str(h)
+            if key not in by_hour:
+                by_hour[key] = {"hour": h, "wins": 0, "losses": 0, "pnl": 0.0}
+            if t["result"] == "win":
+                by_hour[key]["wins"] += 1
+            elif t["result"] == "loss":
+                by_hour[key]["losses"] += 1
+            by_hour[key]["pnl"] += t.get("pnl_usd") or 0
+        for k in by_hour:
+            b = by_hour[k]
+            b["pnl"] = round(b["pnl"], 2)
+            b["win_rate"] = _wr(b["wins"], b["losses"])
+            b["total"] = b["wins"] + b["losses"]
+
+        # --- Win rate by day of week ---
+        by_day = {}
+        for t in settled:
+            d = t.get("entry_day", "Unknown")
+            if d not in by_day:
+                by_day[d] = {"wins": 0, "losses": 0, "pnl": 0.0}
+            if t["result"] == "win":
+                by_day[d]["wins"] += 1
+            elif t["result"] == "loss":
+                by_day[d]["losses"] += 1
+            by_day[d]["pnl"] += t.get("pnl_usd") or 0
+        for k in by_day:
+            b = by_day[k]
+            b["pnl"] = round(b["pnl"], 2)
+            b["win_rate"] = _wr(b["wins"], b["losses"])
+            b["total"] = b["wins"] + b["losses"]
+
+        # --- Win rate by market_type ---
+        by_market_type = {}
+        for t in settled:
+            mt = t.get("market_type", "unknown")
+            if mt not in by_market_type:
+                by_market_type[mt] = {"wins": 0, "losses": 0, "pnl": 0.0}
+            if t["result"] == "win":
+                by_market_type[mt]["wins"] += 1
+            elif t["result"] == "loss":
+                by_market_type[mt]["losses"] += 1
+            by_market_type[mt]["pnl"] += t.get("pnl_usd") or 0
+        for k in by_market_type:
+            b = by_market_type[k]
+            b["pnl"] = round(b["pnl"], 2)
+            b["win_rate"] = _wr(b["wins"], b["losses"])
+            b["total"] = b["wins"] + b["losses"]
+
+        # --- Win rate by price range (5c buckets from 5-45c) ---
+        price_range_buckets = [
+            ("5-15c", 5, 15), ("15-25c", 15, 25), ("25-35c", 25, 35), ("35-45c", 35, 45),
+            ("45-55c", 45, 55), ("55-65c", 55, 65), ("65-75c", 65, 75), ("75-85c", 75, 85),
+            ("85-95c", 85, 95), ("95-100c", 95, 100),
+        ]
+        by_price_range = {}
+        for label, lo, hi in price_range_buckets:
+            by_price_range[label] = {"wins": 0, "losses": 0, "pnl": 0.0, "total": 0}
+        by_price_range["<5c"] = {"wins": 0, "losses": 0, "pnl": 0.0, "total": 0}
+        for t in settled:
+            pc = t.get("price_cents") or 0
+            bucket = "<5c"
+            for label, lo, hi in price_range_buckets:
+                if lo <= pc <= hi:
+                    bucket = label
+                    break
+            by_price_range[bucket]["total"] += 1
+            if t["result"] == "win":
+                by_price_range[bucket]["wins"] += 1
+            elif t["result"] == "loss":
+                by_price_range[bucket]["losses"] += 1
+            by_price_range[bucket]["pnl"] += t.get("pnl_usd") or 0
+        # Remove empty buckets, compute win rates
+        by_price_range = {k: v for k, v in by_price_range.items() if v["total"] > 0}
+        for k in by_price_range:
+            b = by_price_range[k]
+            b["pnl"] = round(b["pnl"], 2)
+            b["win_rate"] = _wr(b["wins"], b["losses"])
+            b["avg_pnl"] = round(b["pnl"] / max(1, b["total"]), 2)
+
+        # --- Win rate by category ---
+        by_category = {}
+        for t in settled:
+            cat = t.get("category", "unknown")
+            if cat not in by_category:
+                by_category[cat] = {"wins": 0, "losses": 0, "pnl": 0.0}
+            if t["result"] == "win":
+                by_category[cat]["wins"] += 1
+            elif t["result"] == "loss":
+                by_category[cat]["losses"] += 1
+            by_category[cat]["pnl"] += t.get("pnl_usd") or 0
+        for k in by_category:
+            b = by_category[k]
+            b["total"] = b["wins"] + b["losses"]
+            b["pnl"] = round(b["pnl"], 2)
+            b["win_rate"] = _wr(b["wins"], b["losses"])
+            b["avg_pnl"] = round(b["pnl"] / max(1, b["total"]), 2)
+
+        # --- Average P&L by category ---
+        avg_pnl_by_category = {k: v["avg_pnl"] for k, v in by_category.items() if v["total"] > 0}
+
+        # --- Win rate by risk/reward ratio bucket ---
+        rr_buckets = [("1-2x", 1, 2), ("2-3x", 2, 3), ("3-5x", 3, 5), ("5-10x", 5, 10), ("10x+", 10, 1000)]
+        by_risk_reward = {}
+        for label, lo, hi in rr_buckets:
+            by_risk_reward[label] = {"wins": 0, "losses": 0, "pnl": 0.0, "total": 0}
+        for t in settled:
+            rr = t.get("risk_reward_ratio") or 0
+            bucket = None
+            for label, lo, hi in rr_buckets:
+                if lo <= rr < hi:
+                    bucket = label
+                    break
+            if not bucket:
+                continue
+            by_risk_reward[bucket]["total"] += 1
+            if t["result"] == "win":
+                by_risk_reward[bucket]["wins"] += 1
+            elif t["result"] == "loss":
+                by_risk_reward[bucket]["losses"] += 1
+            by_risk_reward[bucket]["pnl"] += t.get("pnl_usd") or 0
+        by_risk_reward = {k: v for k, v in by_risk_reward.items() if v["total"] > 0}
+        for k in by_risk_reward:
+            b = by_risk_reward[k]
+            b["pnl"] = round(b["pnl"], 2)
+            b["win_rate"] = _wr(b["wins"], b["losses"])
+
+        # --- Underdog vs Favorite ---
+        underdog_trades = [t for t in settled if t.get("is_underdog")]
+        favorite_trades = [t for t in settled if t.get("is_favorite")]
+        underdog_wins = sum(1 for t in underdog_trades if t["result"] == "win")
+        underdog_losses = sum(1 for t in underdog_trades if t["result"] == "loss")
+        fav_wins = sum(1 for t in favorite_trades if t["result"] == "win")
+        fav_losses = sum(1 for t in favorite_trades if t["result"] == "loss")
+
+        # --- Best-of insights ---
+        # Most profitable hour
+        best_hour = max(by_hour.values(), key=lambda x: x["pnl"]) if by_hour else None
+        # Most profitable price range
+        best_price_range = max(by_price_range.items(), key=lambda x: x[1]["pnl"])[0] if by_price_range else None
+        # Best risk/reward that wins
+        winning_rr = {k: v for k, v in by_risk_reward.items() if v["wins"] > 0}
+        best_rr = max(winning_rr.items(), key=lambda x: x[1]["win_rate"])[0] if winning_rr else None
+
+        return jsonify({
+            "total_settled": len(settled),
+            "total_wins": len(wins),
+            "total_losses": len(losses),
+            "overall_win_rate": _wr(len(wins), len(losses)),
+            "by_hour": by_hour,
+            "by_day_of_week": by_day,
+            "by_market_type": by_market_type,
+            "by_price_range": by_price_range,
+            "by_category": by_category,
+            "avg_pnl_by_category": avg_pnl_by_category,
+            "by_risk_reward": by_risk_reward,
+            "underdog_vs_favorite": {
+                "underdog": {"wins": underdog_wins, "losses": underdog_losses,
+                             "win_rate": _wr(underdog_wins, underdog_losses),
+                             "pnl": round(sum(t.get("pnl_usd") or 0 for t in underdog_trades), 2)},
+                "favorite": {"wins": fav_wins, "losses": fav_losses,
+                             "win_rate": _wr(fav_wins, fav_losses),
+                             "pnl": round(sum(t.get("pnl_usd") or 0 for t in favorite_trades), 2)},
+            },
+            "best_insights": {
+                "most_profitable_hour": best_hour["hour"] if best_hour else None,
+                "most_profitable_hour_pnl": best_hour["pnl"] if best_hour else None,
+                "most_profitable_price_range": best_price_range,
+                "best_risk_reward_bucket": best_rr,
             },
         })
     except Exception as e:
