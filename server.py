@@ -9206,6 +9206,8 @@ a:hover { color: #7da5f5; }
   <div class="stat-card" style="flex:1.5"><div class="stat-label">Portfolio</div><div class="stat-value" id="pf-total" style="color:#fff;font-size:18px">--</div></div>
   <div class="stat-card"><div class="stat-label">Cash</div><div class="stat-value" id="pf-cash">--</div></div>
   <div class="stat-card"><div class="stat-label">Invested</div><div class="stat-value" id="pf-invested">--</div></div>
+  <div class="stat-card"><div class="stat-label">Daily P&L</div><div class="stat-value" id="pf-daily-pl">--</div></div>
+  <div class="stat-card"><div class="stat-label">Total P&L</div><div class="stat-value" id="pf-total-pl">--</div></div>
   <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-value" id="pf-winrate">--</div></div>
   <div class="stat-card" style="cursor:pointer;position:relative" onclick="toggleTodayTrades()"><div class="stat-label">Trades Today</div><div class="stat-value" id="trades-today" style="text-decoration:underline;text-decoration-style:dotted">--</div><div id="today-trades-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;min-width:350px;max-width:500px;background:#111;border:1px solid #333;border-radius:10px;padding:12px;z-index:100;box-shadow:0 8px 24px rgba(0,0,0,0.6);max-height:400px;overflow-y:auto;font-size:10px"></div></div>
 </div>
@@ -9837,6 +9839,21 @@ async function loadPortfolio() {
     if (totalEl) totalEl.textContent = '$' + pfVal.toFixed(2);
     document.getElementById('pf-cash').textContent = '$' + (data.balance_usd || 0).toFixed(2);
     document.getElementById('pf-invested').textContent = '$' + Math.max(0, investedVal).toFixed(2);
+
+    // Daily P&L
+    var dailyPl = data.total_unrealized_usd || 0;
+    var dailyEl = document.getElementById('pf-daily-pl');
+    if (dailyEl) {
+      dailyEl.textContent = (dailyPl >= 0 ? '+' : '') + '$' + Math.abs(dailyPl).toFixed(2);
+      dailyEl.style.color = dailyPl >= 0 ? '#00dc5a' : '#ff5000';
+    }
+    // Total P&L
+    var totalPl = data.total_realized_usd || 0;
+    var totalPlEl = document.getElementById('pf-total-pl');
+    if (totalPlEl) {
+      totalPlEl.textContent = (totalPl >= 0 ? '+' : '') + '$' + Math.abs(totalPl).toFixed(2);
+      totalPlEl.style.color = totalPl >= 0 ? '#00dc5a' : '#ff5000';
+    }
 
     var uPnl = data.total_unrealized_usd || 0;
     var uEl = document.getElementById('pf-unrealized');
