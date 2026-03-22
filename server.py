@@ -266,6 +266,16 @@ def _hydrate_from_kalshi():
 
             created = fill.get("created_time", "")
             cost_usd = (price_cents * count) / 100
+            # Infer strategy from ticker prefix for bot attribution after restart
+            _inferred_strategy = None
+            _tk_upper = ticker.upper()
+            _bot_prefixes = ["KXKBL", "KXATP", "KXWTA", "KXNCAA", "KXNBA",
+                             "KXNHL", "KXMLB", "KXUFC", "KXMMA", "KXEPL",
+                             "KXNFL", "KXMLS", "KXWNBA", "KXSOCCER", "KXPGA"]
+            for _bp in _bot_prefixes:
+                if _tk_upper.startswith(_bp):
+                    _inferred_strategy = "moonshark"
+                    break
             trade_rec = {
                 "timestamp": created,
                 "ticker": ticker,
@@ -276,6 +286,7 @@ def _hydrate_from_kalshi():
                 "cost_usd": round(cost_usd, 2),
                 "order_id": order_id,
                 "source": "kalshi_fill",
+                "strategy": _inferred_strategy,
                 "bot_version": "v1-legacy" if created and created[:10] < BOT_VERSION_DATE else BOT_VERSION,
             }
             all_trades_rebuilt.append(trade_rec)
