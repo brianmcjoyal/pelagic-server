@@ -8006,9 +8006,47 @@ def moonshark_stats():
 def moonshark_opportunities():
     """Return top 5 MoonShark-eligible markets for the wheel."""
     try:
-        # Use shared market cache (fetch_all_markets) which already has Kalshi + others
-        # The ticker filter below (startswith "KX") ensures only Kalshi markets are used
-        markets = fetch_all_markets()
+        # Direct lightweight Kalshi fetch for MoonShark — fetch_kalshi() fails in
+        # thread pool (timing/rate-limit), so we do a simple paginated fetch here
+        import time as _t
+        _now = _t.time()
+        if not hasattr(moonshark_opportunities, '_kalshi_cache'):
+            moonshark_opportunities._kalshi_cache = {"data": [], "ts": 0}
+        kc = moonshark_opportunities._kalshi_cache
+        if kc["data"] and (_now - kc["ts"]) < 120:
+            markets = kc["data"]
+        else:
+            _ms_markets = []
+            _ms_cursor = None
+            for _ms_page in range(5):
+                try:
+                    _msh = signed_headers("GET", "/markets")
+                    _msp = {"limit": 200, "status": "open"}
+                    if _ms_cursor:
+                        _msp["cursor"] = _ms_cursor
+                    _msr = requests.get(
+                        KALSHI_BASE_URL + KALSHI_API_PREFIX + "/markets",
+                        headers=_msh, params=_msp, timeout=10,
+                    )
+                    if _msr.ok:
+                        _ms_page_data = _msr.json().get("markets", [])
+                        _ms_markets.extend(_ms_page_data)
+                        _ms_cursor = _msr.json().get("cursor")
+                        if not _ms_cursor or len(_ms_page_data) < 200:
+                            break
+                    else:
+                        break
+                except Exception:
+                    break
+            # Normalize to match expected format (add ticker field from raw data)
+            markets = []
+            for m in _ms_markets:
+                tk = m.get("ticker", "")
+                if tk:
+                    markets.append(m)
+            if markets:
+                kc["data"] = markets
+                kc["ts"] = _now
         opps = []
         existing_tickers = set()
         try:
@@ -8041,14 +8079,25 @@ def moonshark_opportunities():
             if ticker in existing_tickers:
                 debug_in_position += 1
                 continue
-            # Try multiple price field names
+            # Try multiple price field names (raw Kalshi API uses _dollars string fields)
             yes_price = 0
             no_price = 0
-            for yf in ["yes_ask_cents", "yes_ask", "yes_price"]:
+            # First try dollar string fields (raw Kalshi v2 API)
+            for yf in ["yes_ask_dollars", "last_price_dollars"]:
                 v = m.get(yf)
-                if v and isinstance(v, (int, float)) and v > 0:
-                    yes_price = int(v) if v > 1 else int(v * 100)
-                    break
+                if v is not None:
+                    try:
+                        yes_price = max(0, int(round(float(v) * 100)))
+                        break
+                    except (ValueError, TypeError):
+                        continue
+            # Then try cents/numeric fields (normalized data)
+            if not yes_price:
+                for yf in ["yes_ask_cents", "yes_ask", "yes_price"]:
+                    v = m.get(yf)
+                    if v and isinstance(v, (int, float)) and v > 0:
+                        yes_price = int(v) if v > 1 else int(v * 100)
+                        break
             # Also check decimal "yes" field (0-1 range)
             if not yes_price:
                 y = m.get("yes", 0)
@@ -8056,7 +8105,7 @@ def moonshark_opportunities():
                     yes_price = int(y * 100)
             no_price = 100 - yes_price if yes_price else 0
             title = m.get("question", "") or m.get("title", "") or ticker
-            close_time = m.get("close_time") or ""
+            close_time = m.get("close_time") or m.get("expected_expiration_time") or ""
 
             if yes_price > 0:
                 debug_has_price += 1
