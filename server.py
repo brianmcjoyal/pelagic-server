@@ -73,7 +73,8 @@ BOT_CONFIG = {
     "min_volume": 100,            # minimum market volume — include smaller markets
     "scan_interval_seconds": 60,  # 60s scan interval
     "max_category_exposure": 3,   # max 3 positions per category — diversified
-    "blocked_categories": ["weather", "politics", "mma"],  # categories to never trade — data shows these lose money
+    "blocked_categories": ["weather"],  # only block weather — UFC live fights are good, politics can have edges
+    "blocked_keywords": ["title holder", "title on dec", "prime minister", "next president"],  # block long-dated prediction markets
     "moonshark_enabled": True,  # MoonShark longshot sniper toggle
 }
 
@@ -2295,6 +2296,11 @@ def run_bot_scan():
                 )
                 if market_cat in blocked:
                     continue
+            # Block specific keywords (long-dated predictions that lose money)
+            blocked_kw = BOT_CONFIG.get("blocked_keywords", [])
+            q_lower = (opp.get("kalshi_question", "") or "").lower()
+            if any(kw in q_lower for kw in blocked_kw):
+                continue
 
             # CORRELATION CHECK: don't over-concentrate in one category
             cat_allowed, cat_name, cat_count = check_category_limit(
