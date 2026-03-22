@@ -2097,11 +2097,10 @@ TAKE_PROFIT_PCT = 999   # effectively disabled — let positions settle naturall
 STOP_LOSS_PCT = -999    # effectively disabled — hold to settlement
 
 def auto_exit_check():
-    """Check positions and auto-exit based on profit/loss thresholds.
-    NOTE: Disabled for now — event-outcome bets should be held to settlement."""
-    if not BOT_CONFIG.get("enabled"):
-        return []  # only auto-exit when bot is enabled
-    positions = check_position_prices()
+    """DISABLED — event-outcome bets should be held to settlement.
+    Auto-exit was selling winners mid-game (e.g. Zakharova at 5c before she won).
+    These bets pay $0 or $1 — price swings during events are noise."""
+    return []  # fully disabled — hold everything to settlement
     exits = []
     for pos in positions:
         pnl_pct = pos.get("pnl_pct")
