@@ -2894,16 +2894,23 @@ def moonshark_snipe():
                 if mkt_volume < 100:
                     continue
 
-                # Must close within 24h
+                # Must close TODAY (same-day settlement only)
                 close_time_str = mkt.get("close_time", "")
-                if close_time_str:
-                    try:
-                        close_dt_chk = datetime.datetime.fromisoformat(close_time_str.replace("Z", "+00:00")).replace(tzinfo=None)
-                        hours_to_close = (close_dt_chk - datetime.datetime.utcnow()).total_seconds() / 3600
-                        if hours_to_close > 24:
-                            continue
-                    except Exception:
-                        pass
+                if not close_time_str:
+                    continue
+                try:
+                    close_dt_chk = datetime.datetime.fromisoformat(close_time_str.replace("Z", "+00:00")).replace(tzinfo=None)
+                    # Reject if closing more than 18h from now (covers overnight games)
+                    hours_to_close = (close_dt_chk - datetime.datetime.utcnow()).total_seconds() / 3600
+                    if hours_to_close > 18 or hours_to_close < 0:
+                        continue
+                except Exception:
+                    continue
+
+                # Must be a GAME or MATCH (binary outcome, not futures/props)
+                _tk_upper = ticker.upper()
+                if not any(kw in _tk_upper for kw in ["GAME", "MATCH", "FIGHT"]):
+                    continue
 
                 # Parse prices
                 yes_ask = None
@@ -8119,6 +8126,22 @@ def moonshark_opportunities():
             # Only Kalshi markets (tickers start with KX)
             ticker = m.get("ticker") or m.get("id") or ""
             if not ticker or not ticker.upper().startswith("KX"):
+                continue
+            # Must be a GAME/MATCH/FIGHT (binary outcome, not futures/props)
+            _tk_upper = ticker.upper()
+            if not any(kw in _tk_upper for kw in ["GAME", "MATCH", "FIGHT"]):
+                continue
+            # Must close within 18h (same-day settlement only)
+            _ct = m.get("close_time") or m.get("expected_expiration_time") or ""
+            if _ct:
+                try:
+                    _cd = datetime.datetime.fromisoformat(_ct.replace("Z", "+00:00")).replace(tzinfo=None)
+                    _htc = (_cd - datetime.datetime.utcnow()).total_seconds() / 3600
+                    if _htc > 18 or _htc < 0:
+                        continue
+                except Exception:
+                    continue
+            else:
                 continue
             debug_kalshi += 1
             if ticker in existing_tickers:
