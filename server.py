@@ -7935,7 +7935,20 @@ def moonshark_stats():
 def moonshark_opportunities():
     """Return top 5 MoonShark-eligible markets for the wheel."""
     try:
-        markets = _market_cache.get("data") or []
+        # Use Kalshi data directly — the shared _market_cache only has Polymarket
+        # Cache Kalshi data separately for 120 seconds
+        import time as _t
+        _now = _t.time()
+        if not hasattr(moonshark_opportunities, '_kalshi_cache'):
+            moonshark_opportunities._kalshi_cache = {"data": [], "ts": 0}
+        kc = moonshark_opportunities._kalshi_cache
+        if kc["data"] and (_now - kc["ts"]) < 120:
+            markets = kc["data"]
+        else:
+            markets = fetch_kalshi()
+            if markets:
+                kc["data"] = markets
+                kc["ts"] = _now
         opps = []
         existing_tickers = set()
         try:
