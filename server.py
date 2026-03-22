@@ -7949,6 +7949,15 @@ def moonshark_opportunities():
         debug_kalshi = 0
         debug_has_price = 0
         debug_in_position = 0
+        # Debug: sample first 3 markets to see field names
+        debug_samples = []
+        for dm in markets[:3]:
+            debug_samples.append({
+                "ticker": dm.get("ticker", ""),
+                "id": dm.get("id", ""),
+                "platform": dm.get("platform", ""),
+                "question": (dm.get("question") or dm.get("title") or "")[:30],
+            })
 
         for m in markets:
             # Only Kalshi markets (tickers start with KX)
@@ -8015,6 +8024,7 @@ def moonshark_opportunities():
             "debug_has_price": debug_has_price,
             "debug_in_position": debug_in_position,
             "in_range": debug_in_range,
+            "debug_samples": debug_samples,
         })
     except Exception as e:
         import traceback
