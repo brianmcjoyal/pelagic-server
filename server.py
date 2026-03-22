@@ -4925,8 +4925,37 @@ def _background_loop():
             "wins": 0, "losses": 0, "breakeven": 0, "win_rate": 0,
             "total_realized_usd": 0, "settled_history": [],
         }
+        # Warm realized P&L on startup so Total P&L doesn't flash $0.00
+        _early_realized = 0.0
+        _early_wins = 0
+        _early_losses = 0
+        try:
+            for _esf in ["settled", "unsettled"]:
+                _esh = signed_headers("GET", "/portfolio/positions")
+                _esr = requests.get(
+                    KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/positions",
+                    headers=_esh, params={"limit": 200, "settlement_status": _esf},
+                    timeout=10,
+                )
+                if _esr.ok:
+                    for _esp in _esr.json().get("market_positions", []):
+                        _epnl = _parse_kalshi_dollars(_esp.get("realized_pnl_dollars") or _esp.get("realized_pnl"))
+                        _epnl_usd = _epnl / 100
+                        if _esf == "unsettled" and abs(_epnl_usd) < 0.005:
+                            continue
+                        _early_realized += _epnl_usd
+                        if _epnl_usd > 0.005:
+                            _early_wins += 1
+                        elif _epnl_usd < -0.005:
+                            _early_losses += 1
+            _PORTFOLIO_CACHE["data"]["total_realized_usd"] = round(_early_realized, 2)
+            _PORTFOLIO_CACHE["data"]["wins"] = _early_wins
+            _PORTFOLIO_CACHE["data"]["losses"] = _early_losses
+            _PORTFOLIO_CACHE["data"]["win_rate"] = round(_early_wins / max(1, _early_wins + _early_losses) * 100, 1)
+        except Exception:
+            pass
         _PORTFOLIO_CACHE["ts"] = _time.time()
-        print(f"[BG] Early cache warm: ${_bal_early:.2f} cash, {len(_pos_early)} positions")
+        print(f"[BG] Early cache warm: ${_bal_early:.2f} cash, {len(_pos_early)} positions, P&L ${_early_realized:+.2f}")
     except Exception as e:
         print(f"[BG] Early cache warm failed (non-fatal): {e}")
     # Hydrate trade history from Kalshi on startup
@@ -5261,6 +5290,48 @@ def debug_markets():
 @app.route("/markets")
 def markets_kalshi():
     return jsonify({"markets": fetch_kalshi()})
+
+
+@app.route("/debug-kalshi-fetch")
+def debug_kalshi_fetch():
+    """Debug why fetch_kalshi() returns 0 markets."""
+    import traceback
+    results = {"events_api": None, "markets_api": None, "auth_test": None}
+    try:
+        # Test 1: Can we sign headers?
+        h = signed_headers("GET", "/events")
+        results["auth_test"] = "OK" if h else "FAILED - no headers"
+        # Test 2: Events API
+        try:
+            eh = signed_headers("GET", "/events")
+            resp = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + "/events",
+                headers=eh, params={"limit": 5, "status": "open"}, timeout=10,
+            )
+            results["events_api"] = {
+                "status": resp.status_code,
+                "count": len(resp.json().get("events", [])) if resp.ok else 0,
+                "sample": [e.get("event_ticker", "") for e in resp.json().get("events", [])[:3]] if resp.ok else resp.text[:200],
+            }
+        except Exception as e:
+            results["events_api"] = {"error": str(e)}
+        # Test 3: Markets API (direct, no event filter)
+        try:
+            mh = signed_headers("GET", "/markets")
+            resp2 = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + "/markets",
+                headers=mh, params={"limit": 5, "status": "open"}, timeout=10,
+            )
+            results["markets_api"] = {
+                "status": resp2.status_code,
+                "count": len(resp2.json().get("markets", [])) if resp2.ok else 0,
+                "sample_tickers": [m.get("ticker", "") for m in resp2.json().get("markets", [])[:3]] if resp2.ok else resp2.text[:200],
+            }
+        except Exception as e:
+            results["markets_api"] = {"error": str(e)}
+    except Exception as e:
+        results["fatal"] = traceback.format_exc()
+    return jsonify(results)
 
 
 @app.route("/polymarket")
@@ -9751,7 +9822,7 @@ a:hover { color: #7da5f5; }
 <div class="tab-content active" id="tab-positions">
   <div style="display:flex;justify-content:flex-end;align-items:center;gap:12px;margin-bottom:6px">
     <button onclick="sellAllLosers()" style="background:#2a1010;border:1px solid #ff5000;color:#ff5000;padding:4px 12px;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer">&#x1F4A3; Sell All Losers</button>
-    <label style="font-size:10px;color:#888;cursor:pointer"><input type="checkbox" id="hide-bot-trades" checked onchange="loadPortfolio();loadPositions()" style="margin-right:4px">Hide old bot trades</label>
+    <label style="font-size:10px;color:#888;cursor:pointer"><input type="checkbox" id="hide-bot-trades" checked onchange="loadPortfolio();loadPositions()" style="margin-right:4px">Hide old bot trades &amp; penny positions</label>
   </div>
   <div id="portfolio-positions"><div class="loading">Loading positions...</div></div>
   <div class="section" style="margin-top:20px">
@@ -9828,7 +9899,7 @@ a:hover { color: #7da5f5; }
 <div class="tab-content" id="tab-history">
   <div class="section">
     <div class="section-title">Scorecard <button class="refresh-btn" onclick="loadSettled()">Refresh</button></div>
-    <div style="text-align:right;margin-bottom:6px"><label style="font-size:11px;color:#888;cursor:pointer"><input type="checkbox" id="hide-history-junk" checked onchange="loadSettled()" style="margin-right:4px"> Hide old bot trades</label></div>
+    <div style="text-align:right;margin-bottom:6px"><label style="font-size:11px;color:#888;cursor:pointer"><input type="checkbox" id="hide-history-junk" checked onchange="loadSettled()" style="margin-right:4px"> Hide old bot trades &amp; penny positions</label></div>
     <div id="settled-stats" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
       <span style="color:#666">Loading...</span>
     </div>
@@ -10417,10 +10488,11 @@ async function loadPortfolio() {
     var positions = allPos;
     if (hidePenny) {
       positions = allPos.filter(function(p) {
-        // Never hide manually-placed bets
-        if (p.placed_by === 'you') return true;
+        // Hide any position currently worth 1c or less (dead money, can't sell)
+        var nowPrice = p.current_price || p.entry_price || 0;
+        if (nowPrice <= 1) return false;
         // Hide penny bot bets under 5c entry
-        if ((p.entry_price || 0) < 5) return false;
+        if (p.placed_by !== 'you' && (p.entry_price || 0) < 5) return false;
         var t = ((p.title || p.ticker) + '').toLowerCase();
         for (var i = 0; i < _botJunk.length; i++) { if (t.indexOf(_botJunk[i]) >= 0) return false; }
         return true;
@@ -11390,8 +11462,11 @@ async function loadPositions() {
     var positions = allPositions;
     if (hidePenny) {
       positions = allPositions.filter(function(p) {
-        if (p.placed_by === 'you') return true;
-        if ((p.entry_price || 0) < 5) return false;
+        // Hide any position currently worth 1c or less (dead money, can't sell)
+        var nowPrice = p.current_price || p.entry_price || 0;
+        if (nowPrice <= 1) return false;
+        // Hide penny bot bets under 5c entry
+        if (p.placed_by !== 'you' && (p.entry_price || 0) < 5) return false;
         var t = ((p.title || p.ticker) + '').toLowerCase();
         for (var i = 0; i < botJunk.length; i++) { if (t.indexOf(botJunk[i]) >= 0) return false; }
         return true;
