@@ -7426,13 +7426,20 @@ def moonshark_opportunities():
 
         debug_total = len(markets)
         debug_in_range = 0
+        debug_kalshi = 0
+        debug_has_price = 0
+        debug_in_position = 0
 
         for m in markets:
             # Only show Kalshi markets (we can only trade there)
             if m.get("platform") != "kalshi":
                 continue
+            debug_kalshi += 1
             ticker = m.get("ticker") or m.get("id") or ""
-            if not ticker or ticker in existing_tickers:
+            if not ticker:
+                continue
+            if ticker in existing_tickers:
+                debug_in_position += 1
                 continue
             # Try multiple price field names
             yes_price = 0
@@ -7451,6 +7458,8 @@ def moonshark_opportunities():
             title = m.get("question", "") or m.get("title", "") or ticker
             close_time = m.get("close_time") or ""
 
+            if yes_price > 0:
+                debug_has_price += 1
             # Check YES side (5-45c range for longshot opportunities)
             if 5 <= yes_price <= 45:
                 debug_in_range += 1
@@ -7472,11 +7481,22 @@ def moonshark_opportunities():
                     "volume": m.get("volume", 0) or 0,
                 })
 
-        # Sort by volume (most liquid first), take top 10
-        opps.sort(key=lambda x: -(x.get("volume") or 0))
+        # Split into general and WTA tennis
+        wta_opps = [o for o in opps if 'wta' in (o.get('ticker') or '').lower() or
+                    'wtamatch' in (o.get('ticker') or '').lower() or
+                    ('win the' in (o.get('title') or '').lower() and any(w in (o.get('title') or '').lower() for w in ['vs', 'v ']))]
+        general_opps = [o for o in opps if o not in wta_opps]
+
+        # Sort by volume (most liquid first), take top 10 each
+        general_opps.sort(key=lambda x: -(x.get("volume") or 0))
+        wta_opps.sort(key=lambda x: -(x.get("volume") or 0))
         return jsonify({
-            "opportunities": opps[:10],
+            "opportunities": general_opps[:10],
+            "wta_opportunities": wta_opps[:10],
             "total_scanned": debug_total,
+            "debug_kalshi": debug_kalshi,
+            "debug_has_price": debug_has_price,
+            "debug_in_position": debug_in_position,
             "in_range": debug_in_range,
         })
     except Exception as e:
@@ -9378,11 +9398,19 @@ a:hover { color: #7da5f5; }
         <button id="spin-btn" onclick="spinWheel()" style="margin-top:14px;background:linear-gradient(135deg,#00d4ff,#0088aa);border:none;color:#000;padding:10px 28px;border-radius:8px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;letter-spacing:1px">&#x1F988; SPIN!</button>
         <div id="wheel-result" style="margin-top:10px;min-height:40px;font-size:12px;color:#ccc"></div>
       </div>
-      <!-- Top Opportunities -->
-      <div style="background:#0a1a22;border:1px solid #1a3a4a;border-radius:12px;padding:16px">
-        <div style="color:#00d4ff;font-size:13px;font-weight:700;margin-bottom:12px">&#x1F3AF; Best MoonShark Opportunities</div>
-        <div id="moonshark-opps" style="display:flex;flex-direction:column;gap:8px">
-          <div class="loading">Scanning markets...</div>
+      <!-- Top Opportunities - 2 columns -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div style="background:#0a1a22;border:1px solid #1a3a4a;border-radius:12px;padding:16px">
+          <div style="color:#00d4ff;font-size:13px;font-weight:700;margin-bottom:12px">&#x1F3AF; Best Opportunities</div>
+          <div id="moonshark-opps" style="display:flex;flex-direction:column;gap:8px">
+            <div class="loading">Scanning markets...</div>
+          </div>
+        </div>
+        <div style="background:#0a1a22;border:1px solid #e040fb;border-radius:12px;padding:16px">
+          <div style="color:#e040fb;font-size:13px;font-weight:700;margin-bottom:12px">&#x1F3BE; Live WTA Tennis</div>
+          <div id="wta-opps" style="display:flex;flex-direction:column;gap:8px">
+            <div class="loading">Scanning WTA markets...</div>
+          </div>
         </div>
       </div>
     </div>
@@ -11532,9 +11560,35 @@ async function loadMoonsharkOpps() {
       h += '</div>';
     });
     el.innerHTML = h;
+    // WTA Tennis column
+    var wtaOpps = data.wta_opportunities || [];
+    var wtaEl = document.getElementById('wta-opps');
+    if (!wtaEl) return;
+    if (wtaOpps.length === 0) {
+      wtaEl.innerHTML = '<div style="color:#555;font-size:10px;padding:8px;text-align:center">No live WTA matches right now. Check back during match hours!</div>';
+      return;
+    }
+    var wh = '';
+    wtaOpps.slice(0, 5).forEach(function(o, i) {
+      var probColor = o.win_prob >= 30 ? '#e040fb' : o.win_prob >= 20 ? '#ff8800' : '#ff5000';
+      wh += '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:#1a0a22;border:1px solid #3a1a4a;border-radius:8px">';
+      wh += '<div style="color:#e040fb;font-size:16px;font-weight:800;min-width:20px">🎾</div>';
+      wh += '<div style="flex:1">';
+      wh += '<div style="color:#ddd;font-size:11px;font-weight:600">' + (o.title || '').substring(0, 40) + '</div>';
+      wh += '<div style="display:flex;gap:8px;margin-top:3px;font-size:10px">';
+      wh += '<span style="color:#e040fb">' + o.price + '¢ entry</span>';
+      wh += '<span style="color:' + probColor + '">' + o.win_prob + '% chance</span>';
+      wh += '<span style="color:#00dc5a">$' + o.payout + ' payout</span>';
+      wh += '</div></div>';
+      wh += '<button onclick="placeMoonsharkBet(&quot;' + o.ticker + '&quot;,&quot;' + o.side + '&quot;,' + o.price + ')" style="background:#2a0a3a;border:1px solid #e040fb;color:#e040fb;padding:4px 10px;border-radius:6px;font-size:9px;font-weight:700;cursor:pointer;white-space:nowrap">BET</button>';
+      wh += '</div>';
+    });
+    wtaEl.innerHTML = wh;
   } catch(e) {
     var el = document.getElementById('moonshark-opps');
     if (el) el.innerHTML = '<div style="color:#555;font-size:10px;padding:8px">Error loading opportunities</div>';
+    var wtaEl = document.getElementById('wta-opps');
+    if (wtaEl) wtaEl.innerHTML = '<div style="color:#555;font-size:10px;padding:8px">Error loading WTA</div>';
   }
 }
 
