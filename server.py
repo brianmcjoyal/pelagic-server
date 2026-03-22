@@ -68,10 +68,10 @@ BOT_CONFIG = {
     "min_balance_usd": 10.0,      # stop all trading if cash below $10
     "min_cash_reserve_pct": 0.05, # keep 5% of portfolio in cash — legacy positions skew ratio
     "max_open_positions": 150,    # high limit — legacy positions settling, bot uses daily trade cap instead
-    "min_deviation": 0.10,        # 10% mispricing vs consensus — catch more edges
-    "min_platforms": 2,           # must appear on 2+ platforms
-    "min_volume": 100,            # minimum market volume — include smaller markets
-    "scan_interval_seconds": 60,  # 60s scan interval
+    "min_deviation": 0.08,        # 8% mispricing — catch more edges
+    "min_platforms": 1,           # single platform OK — MoonShark is our main strategy
+    "min_volume": 50,             # include smaller markets
+    "scan_interval_seconds": 45,  # faster scanning during game hours
     "max_category_exposure": 3,   # max 3 positions per category — diversified
     "blocked_categories": ["weather"],  # only block weather — UFC live fights are good, politics can have edges
     "blocked_keywords": ["title holder", "title on dec", "prime minister", "next president", "ipo first", "gas price", "billboard", "netflix", "spotify"],  # block long-dated prediction markets
