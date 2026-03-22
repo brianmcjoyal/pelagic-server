@@ -11061,9 +11061,16 @@ async function loadSettled() {
     if (settled.length === 0) {
       tableEl.innerHTML = '<div style="color:#555;font-size:10px;padding:8px">No settled positions yet. Place some bets and we will track every result here.</div>';
     } else {
-      // Sort by date descending (most recent first)
+      // Sort by settlement: most recently settled first
+      // Use close_time but cap future dates to today (markets that settled early)
+      var nowStr = new Date().toISOString();
       settled.sort(function(a, b) {
-        return (b.close_time || '').localeCompare(a.close_time || '');
+        var aTime = (a.close_time || '');
+        var bTime = (b.close_time || '');
+        // If close_time is in the future, it settled early — use today's date
+        if (aTime > nowStr) aTime = nowStr;
+        if (bTime > nowStr) bTime = nowStr;
+        return bTime.localeCompare(aTime);
       });
       var tbl = '<table style="width:100%;border-collapse:collapse;font-size:10px">';
       tbl += '<tr style="color:#888;border-bottom:1px solid #333;text-align:left">';
