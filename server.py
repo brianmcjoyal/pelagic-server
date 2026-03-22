@@ -68,9 +68,9 @@ BOT_CONFIG = {
     "min_balance_usd": 10.0,      # stop all trading if cash below $10
     "min_cash_reserve_pct": 0.05, # keep 5% of portfolio in cash — legacy positions skew ratio
     "max_open_positions": 150,    # high limit — legacy positions settling, bot uses daily trade cap instead
-    "min_deviation": 0.25,        # 25% mispricing vs consensus required — only big edges
-    "min_platforms": 3,           # must appear on 3+ platforms — stronger validation
-    "min_volume": 1000,           # minimum market volume — liquid markets only
+    "min_deviation": 0.10,        # 10% mispricing vs consensus — catch more edges
+    "min_platforms": 2,           # must appear on 2+ platforms
+    "min_volume": 100,            # minimum market volume — include smaller markets
     "scan_interval_seconds": 60,  # 60s scan interval
     "max_category_exposure": 3,   # max 3 positions per category — diversified
     "blocked_categories": ["weather", "politics", "mma"],  # categories to never trade — data shows these lose money
