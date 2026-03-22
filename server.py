@@ -9486,7 +9486,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans
 .breakdown-label { font-size: 11px; color: #666; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
 .breakdown-val { font-size: 16px; color: #ccc; font-weight: 600; }
 .breakdown-dot { width: 3px; height: 3px; border-radius: 50%; background: #333; }
-.header { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; position: sticky; top: 28px; z-index: 100; background: rgba(13,13,13,0.95); backdrop-filter: blur(12px); border-bottom: 1px solid #1a1a1a; margin: 0 -20px 0; }
+.header { display: flex; align-items: center; justify-content: space-between; padding: 12px 24px; position: sticky; top: 28px; z-index: 100; background: rgba(13,13,13,0.95); backdrop-filter: blur(12px); border-bottom: 1px solid #1a1a1a; margin: 0 -20px 0; overflow: visible; }
 .header-left { display: flex; align-items: center; gap: 12px; }
 .logo { width: 44px; height: 44px; filter: drop-shadow(0 0 8px rgba(200,160,50,0.6)); flex-shrink: 0; }
 h1 { font-size: 24px; color: #fff; font-weight: 800; letter-spacing: -0.5px; margin: 0; }
@@ -11680,7 +11680,11 @@ async function loadSettled() {
     // Filter: hide penny bot trades (entry < 20c, or $0 P&L with unknown side, or bot_version v1-legacy with tiny P&L)
     var filtered = allSettled;
     if (hideJunk) {
+      var _historyJunk = ['truth social', 'truthsocial', 'canadian team win', 'groomsman', 'kelce', 'title holder', 'nuclear fusion', 'billboard', 'netflix', 'spotify', 'top song', 'top artist', 'featherweight', 'bantamweight', 'flyweight', 'middleweight', 'welterweight', 'lightweight', 'heavyweight', 'pga tour major', 'ballon d', 'gas prices', 'trillionaire', 'next uk pm', 'nextukpm'];
       filtered = allSettled.filter(function(s) {
+        // Hide known junk categories by ticker/title
+        var t = ((s.title || '') + ' ' + (s.ticker || '')).toLowerCase();
+        for (var i = 0; i < _historyJunk.length; i++) { if (t.indexOf(_historyJunk[i]) >= 0) return false; }
         // Keep if P&L is significant (> $0.10 win or loss)
         if (Math.abs(s.pnl_usd) > 0.10) return true;
         // Keep if entry was >= 20c (not a penny bet)
