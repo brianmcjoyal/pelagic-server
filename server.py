@@ -63,7 +63,7 @@ BOT_VERSION_DATE = "2026-03-15"
 # ---------------------------------------------------------------------------
 BOT_CONFIG = {
     "enabled": True,  # default ON — safety floor will auto-disable if needed
-    "max_bet_usd": 5.0,           # max $5 per single trade — small, precise bets
+    "max_bet_usd": 12.0,          # max $12 per single trade — higher ceiling for Kelly sizing
     "max_daily_usd": 150.0,        # max $150/day — scales with bankroll via smart sizing
     "min_balance_usd": 10.0,      # stop all trading if cash below $10
     "min_cash_reserve_pct": 0.05, # keep 5% of portfolio in cash — legacy positions skew ratio
@@ -74,7 +74,7 @@ BOT_CONFIG = {
     "scan_interval_seconds": 60,  # 60s scan interval
     "max_category_exposure": 3,   # max 3 positions per category — diversified
     "blocked_categories": ["weather"],  # only block weather — UFC live fights are good, politics can have edges
-    "blocked_keywords": ["title holder", "title on dec", "prime minister", "next president"],  # block long-dated prediction markets
+    "blocked_keywords": ["title holder", "title on dec", "prime minister", "next president", "ipo first", "gas price", "billboard", "netflix", "spotify"],  # block long-dated prediction markets
     "moonshark_enabled": True,  # MoonShark longshot sniper toggle
 }
 
@@ -2401,7 +2401,7 @@ SNIPE_MIN_PRICE = 70   # cents — buy if price >= 70c (Brian's winning range)
 SNIPE_MAX_PRICE = 90   # cents — don't buy above 90c (too little profit margin)
 SNIPE_BET_USD = 15.0   # fallback — now uses _smart_bet_size() for bankroll scaling
 SNIPE_MAX_DAILY = 150.0  # max daily spend on snipes (scales naturally via bet sizing)
-SNIPE_MAX_TRADES = 20   # max 20 snipes per day — quality over quantity
+SNIPE_MAX_TRADES = 10   # max 10 snipes per day — fewer, bigger, higher-conviction bets
 
 BOT_STATE["snipe_trades_today"] = []
 BOT_STATE["snipe_daily_spent"] = 0.0
@@ -2415,7 +2415,7 @@ MOONSHARK_MAX_PRICE = 45   # cents — widened from 30c, data shows 30-45c range
 MOONSHARK_MAX_DAILY = 75.0  # max $75/day on MoonShark (up from $50)
 MOONSHARK_BET_USD = 5.0     # ~$5 per MoonShark bet (Kelly-adjusted)
 MOONSHARK_MIN_TRADES = 5    # aim for at least 5 trades per day
-MOONSHARK_MAX_TRADES = 15   # max 15 MoonShark trades per day (up from 10)
+MOONSHARK_MAX_TRADES = 10   # max 10 MoonShark trades per day — fewer, bigger bets
 
 BOT_STATE["moonshark_trades_today"] = []
 BOT_STATE["moonshark_daily_spent"] = 0.0
@@ -2840,13 +2840,14 @@ def moonshark_snipe():
                 _MOONSHARK_BLOCKED_KEYWORDS = [
                     "netflix", "spotify", "billboard", "top song", "top artist",
                     "youtube", "subscribers", "ishowspeed", "tiktok", "instagram",
-                    "nuclear fusion", "title holder", "featherweight", "bantamweight",
+                    "nuclear fusion", "title holder", "title on dec", "featherweight", "bantamweight",
                     "flyweight", "middleweight", "welterweight", "lightweight",
                     "heavyweight", "pga tour major", "ballon d'or", "fields medal",
                     "temperature", "weather", "rainfall", "snow", "hurricane",
                     "tornado", "fahrenheit", "celsius", "highest temp", "lowest temp",
                     "gas price", "oil price", "wti", "brent",
                     "truth social", "tweets", "followers",
+                    "prime minister", "next president", "ipo first",
                 ]
                 if any(kw in title_lower for kw in _MOONSHARK_BLOCKED_KEYWORDS):
                     continue
@@ -2947,7 +2948,28 @@ def moonshark_snipe():
                 kelly_usd = kelly_bet_size(kelly_bankroll, win_prob, odds_decimal)
                 # Floor $3, cap at fair share of remaining budget
                 max_per_trade = remaining_budget / max(trades_left, 1)
-                bet_usd = max(3.0, min(kelly_usd, max_per_trade, remaining_budget))
+                # Category multiplier — bet bigger on proven winners
+                cat_mult = _category_multiplier(ticker, title)
+                if cat_mult <= 0:
+                    continue  # blocked category
+
+                # Live sports priority — same-day events get 2x, >12h gets 1x
+                live_boost = 1.0
+                close_time_str2 = mkt.get("close_time", "")
+                if close_time_str2:
+                    try:
+                        close_dt2 = datetime.datetime.fromisoformat(close_time_str2.replace("Z", "+00:00")).replace(tzinfo=None)
+                        hours_left = (close_dt2 - datetime.datetime.utcnow()).total_seconds() / 3600
+                        if 0 < hours_left <= 6:
+                            live_boost = 2.0  # live/imminent — highest priority
+                        elif hours_left <= 12:
+                            live_boost = 1.5  # same-day
+                        # >12h stays at 1.0x
+                    except Exception:
+                        pass
+
+                bet_usd = max(3.0, min(kelly_usd, max_per_trade, remaining_budget)) * cat_mult * live_boost
+                bet_usd = min(bet_usd, BOT_CONFIG["max_bet_usd"], remaining_budget)  # respect ceiling
                 count = max(1, int(bet_usd * 100 / price))
                 cost_usd = (price * count) / 100.0
 
@@ -2966,6 +2988,10 @@ def moonshark_snipe():
                 reasons.append(f"kelly=${kelly_usd:.2f}")
                 reasons.append(f"edge={edge_estimate:.1%}")
                 reasons.append(f"winP={win_prob:.1%}")
+                if cat_mult != 1.0:
+                    reasons.append(f"cat_mult={cat_mult}x")
+                if live_boost > 1.0:
+                    reasons.append(f"LIVE BOOST {live_boost}x")
                 vetting = " | ".join(reasons)
 
                 _log_activity(
@@ -4127,22 +4153,37 @@ def _update_category_stats(ticker, title, won, pnl_usd):
     _CATEGORY_STATS[cat]["pnl"] += pnl_usd
 
 def _category_multiplier(ticker, title):
-    """Get bet size multiplier based on category performance.
-    Winners get bigger bets, losers get smaller bets."""
+    """Get bet size multiplier based on PROVEN category performance.
+
+    Based on actual trading data (5W/10L, -$24.71 P&L):
+    - Tennis: 100% WR (1W/0L, +$0.18) -> 2.0x
+    - NHL: 100% WR (1W/0L) -> 1.5x
+    - MLB: 100% WR (1W/0L) -> 1.5x
+    - NBA/NCAA Basketball: decent liquidity -> 1.2x / 1.0x
+    - MMA (live fights): 20% WR but live fights are fine -> 1.0x
+    - Politics: 0% WR (0W/2L, -$1.51) -> 0.3x
+    - Other/unknown: 20% WR -> 0.5x
+    """
     cat = classify_market_category(title or "", ticker or "")
-    stats = _CATEGORY_STATS.get(cat)
-    if not stats or (stats["wins"] + stats["losses"]) < 2:
-        return 1.0  # Not enough data — neutral
-    total = stats["wins"] + stats["losses"]
-    wr = stats["wins"] / total
-    if wr >= 0.7:
-        return 1.5  # 50% bigger bets on hot categories
-    elif wr >= 0.5:
-        return 1.2  # 20% boost
-    elif wr >= 0.3:
-        return 0.8  # 20% smaller
-    else:
-        return 0.5  # 50% smaller on losing categories
+
+    # Hardcoded multipliers from real trading data
+    _CATEGORY_MULTIPLIERS = {
+        "tennis": 2.0,   # best category — 100% win rate
+        "nhl": 1.5,      # 100% win rate
+        "mlb": 1.5,      # 100% win rate
+        "nba": 1.0,      # decent liquidity, includes NCAA basketball
+        "nfl": 1.0,      # standard
+        "soccer": 1.0,   # standard
+        "mma": 1.0,      # live fights only (title holders blocked by keywords)
+        "tech": 1.2,     # 100% win rate (1W/0L, +$0.40)
+        "economics": 0.5, # long-dated, avoid
+        "politics": 0.3, # 0% win rate — minimize exposure
+        "weather": 0.0,  # blocked category, but just in case
+        "crypto": 0.5,   # volatile, low conviction
+        "entertainment": 0.3, # long-dated, low conviction
+        "golf": 0.5,     # not enough data
+    }
+    return _CATEGORY_MULTIPLIERS.get(cat, 0.5)  # default 0.5x for unknown categories
 
 
 # ---------------------------------------------------------------------------
