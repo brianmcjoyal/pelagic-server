@@ -9131,13 +9131,7 @@ a:hover { color: #7da5f5; }
 </head>
 <body>
 <!-- Ticker bar -->
-<div class="ticker-bar" id="ticker-bar">
-  <div class="ticker-item"><span class="ticker-symbol">BTC</span> <span class="ticker-price" id="tk-btc">--</span> <span class="ticker-chg" id="tk-btc-chg"></span></div>
-  <div class="ticker-item"><span class="ticker-symbol">ETH</span> <span class="ticker-price" id="tk-eth">--</span> <span class="ticker-chg" id="tk-eth-chg"></span></div>
-  <div class="ticker-item"><span class="ticker-symbol">VOO</span> <span class="ticker-price" id="tk-voo">--</span> <span class="ticker-chg" id="tk-voo-chg"></span></div>
-  <div class="ticker-item"><span class="ticker-symbol">TSLA</span> <span class="ticker-price" id="tk-tsla">--</span> <span class="ticker-chg" id="tk-tsla-chg"></span></div>
-  <div class="ticker-item"><span class="ticker-symbol">GOOG</span> <span class="ticker-price" id="tk-goog">--</span> <span class="ticker-chg" id="tk-goog-chg"></span></div>
-</div>
+<!-- Stock ticker removed for cleaner UI -->
 
 <div class="header">
   <div class="header-left">
@@ -9183,48 +9177,27 @@ a:hover { color: #7da5f5; }
   </div>
 </div>
 
-<!-- Progress to $1M -->
-<div class="progress-section" id="progress-section" style="margin:0 0 8px;padding:10px 20px;border-radius:0;border-top:none;background:rgba(13,13,13,0.92)">
-  <div style="display:flex;justify-content:space-between;align-items:center">
-    <span style="font-size:11px;color:#999;font-weight:600">Progress to $1M</span>
-    <span style="font-size:11px;color:#00dc5a;font-weight:700" id="progress-label">0%</span>
-  </div>
-  <div class="progress-bar-bg" style="height:5px;margin-top:4px"><div class="progress-bar-fill" id="progress-fill" style="width:0%"></div></div>
-  <div style="display:flex;justify-content:space-between;margin-top:3px">
-    <span style="font-size:9px;color:#555" id="progress-balance">$0</span>
-    <span style="font-size:9px;color:#555">$1,000,000</span>
-  </div>
-</div>
+<!-- Progress bar hidden until meaningful -->
 
 <div class="container">
 
-<!-- Big portfolio value -->
-<div class="portfolio-hero">
-  <div class="portfolio-value" id="pf-value">$0.00</div>
-  <div class="portfolio-change flat" id="pf-change">$0.00 today</div>
-  <div class="portfolio-breakdown">
-    <div class="breakdown-item"><span class="breakdown-label">Cash Available</span><span class="breakdown-val" id="pf-cash-hero">--</span></div>
-    <div class="breakdown-dot"></div>
-    <div class="breakdown-item"><span class="breakdown-label">Invested</span><span class="breakdown-val" id="pf-invested-hero">--</span></div>
-  </div>
-</div>
-
-<!-- Hidden elements needed by loadStatus -->
+<!-- Hidden elements needed by JS -->
 <div style="display:none">
   <span id="balance">--</span>
   <span id="markets-scanned">--</span>
   <span id="mispriced-count">--</span>
   <span id="auto-trade-btn">--</span>
+  <div id="pf-value">$0.00</div>
+  <div id="pf-change">$0.00</div>
+  <span id="pf-cash-hero">--</span>
+  <span id="pf-invested-hero">--</span>
+  <span id="chart-pl"></span>
+  <canvas id="pl-chart"></canvas>
 </div>
 
-<!-- P&L Chart -->
-<div class="chart-section">
-  <span id="chart-pl" style="display:none"></span>
-  <div class="chart-canvas"><canvas id="pl-chart"></canvas></div>
-</div>
-
-<!-- Quick stats -->
-<div class="stats-row">
+<!-- Slim stat bar -->
+<div class="stats-row" style="margin-bottom:8px">
+  <div class="stat-card" style="flex:1.5"><div class="stat-label">Portfolio</div><div class="stat-value" id="pf-total" style="color:#fff;font-size:18px">--</div></div>
   <div class="stat-card"><div class="stat-label">Cash</div><div class="stat-value" id="pf-cash">--</div></div>
   <div class="stat-card"><div class="stat-label">Invested</div><div class="stat-value" id="pf-invested">--</div></div>
   <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-value" id="pf-winrate">--</div></div>
@@ -9854,6 +9827,8 @@ async function loadPortfolio() {
     if (invHero) invHero.textContent = '$' + Math.max(0, investedVal).toFixed(2);
 
     // Quick stats
+    var totalEl = document.getElementById('pf-total');
+    if (totalEl) totalEl.textContent = '$' + pfVal.toFixed(2);
     document.getElementById('pf-cash').textContent = '$' + (data.balance_usd || 0).toFixed(2);
     document.getElementById('pf-invested').textContent = '$' + Math.max(0, investedVal).toFixed(2);
 
