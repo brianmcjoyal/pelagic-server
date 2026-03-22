@@ -266,16 +266,13 @@ def _hydrate_from_kalshi():
 
             created = fill.get("created_time", "")
             cost_usd = (price_cents * count) / 100
-            # Infer strategy from ticker prefix for bot attribution after restart
+            # Infer strategy for bot attribution after restart
+            # Today's trades at MoonShark prices (≤30c) are almost certainly bot trades.
+            # Older trades or higher-price trades default to manual ("you").
             _inferred_strategy = None
-            _tk_upper = ticker.upper()
-            _bot_prefixes = ["KXKBL", "KXATP", "KXWTA", "KXNCAA", "KXNBA",
-                             "KXNHL", "KXMLB", "KXUFC", "KXMMA", "KXEPL",
-                             "KXNFL", "KXMLS", "KXWNBA", "KXSOCCER", "KXPGA"]
-            for _bp in _bot_prefixes:
-                if _tk_upper.startswith(_bp):
-                    _inferred_strategy = "moonshark"
-                    break
+            _is_today = created and created[:10] == today_str
+            if _is_today and action == "buy" and price_cents <= 30:
+                _inferred_strategy = "moonshark"
             trade_rec = {
                 "timestamp": created,
                 "ticker": ticker,
