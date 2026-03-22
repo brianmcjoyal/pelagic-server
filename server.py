@@ -5075,6 +5075,12 @@ def _background_loop():
                         _d1_losses += _cs.get("losses", 0)
                 _d1_wr = round(_d1_wins / max(1, _d1_wins + _d1_losses) * 100, 1) if (_d1_wins + _d1_losses) > 0 else 0
 
+                # 7-day win rate — only trades settled in last 7 days
+                _7d_cutoff = (datetime.datetime.utcnow() - datetime.timedelta(days=7)).isoformat() + "Z"
+                _7d_wins = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "win" and (t.get("settlement_time") or "") >= _7d_cutoff)
+                _7d_losses = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "loss" and (t.get("settlement_time") or "") >= _7d_cutoff)
+                _7d_wr = round(_7d_wins / max(1, _7d_wins + _7d_losses) * 100, 1) if (_7d_wins + _7d_losses) > 0 else 0
+
                 _PORTFOLIO_CACHE["data"] = {
                     "balance_usd": round(_bal2, 2),
                     "portfolio_value_usd": round(_bal2 + _mv2, 2),
@@ -5090,6 +5096,7 @@ def _background_loop():
                     "breakeven": 0,
                     "win_rate": _d1_wr,
                     "win_rate_all_time": _wr2,
+                    "win_rate_7d": _7d_wr,
                     "total_realized_usd": round(_realized2, 2),
                     "settled_history": _settled_list2[-20:],
                 }
@@ -5105,7 +5112,11 @@ def _background_loop():
             _log_activity(f"Background error: {str(e)[:80]}", "error")
             print(f"[BG] Error in background loop: {e}")
             traceback.print_exc()
-        _time.sleep(BOT_CONFIG.get("scan_interval_seconds", 10))  # dynamic scan interval
+        # Dynamic scan interval — aggressive during game hours
+        _now_pt = datetime.datetime.now(tz=_PACIFIC)
+        _is_game_hours = 10 <= _now_pt.hour <= 23
+        _sleep_time = 30 if _is_game_hours else 300
+        _time.sleep(_sleep_time)
 
 _bg_thread = None
 
@@ -5522,6 +5533,13 @@ def settled_positions():
                 "count": count,
                 "entry_cents": entry_cents,
             })
+
+        # Sort: most recently settled (past close_times) first, future at bottom
+        now_str = datetime.datetime.utcnow().isoformat() + "Z"
+        settled_past = [s for s in settled if (s.get("close_time") or "9999") <= now_str]
+        settled_future = [s for s in settled if (s.get("close_time") or "9999") > now_str]
+        settled_past.sort(key=lambda s: s.get("close_time") or "", reverse=True)
+        settled = settled_past + settled_future
 
         total_bets = wins + losses + breakeven
         roi = round(total_pnl / max(0.01, total_wagered) * 100, 1) if total_wagered > 0 else 0
@@ -6651,7 +6669,7 @@ def portfolio_summary():
         "balance_usd": 0, "portfolio_value_usd": 0, "positions_value_usd": 0,
         "open_positions": [], "open_count": 0, "total_invested_usd": 0,
         "total_unrealized_usd": 0, "wins": 0, "losses": 0, "breakeven": 0,
-        "win_rate": 0, "total_realized_usd": 0, "settled_history": [],
+        "win_rate": 0, "win_rate_7d": 0, "total_realized_usd": 0, "settled_history": [],
     })
 
 
@@ -9695,6 +9713,7 @@ a:hover { color: #7da5f5; }
   <div class="stat-card"><div class="stat-label">Daily P&L</div><div class="stat-value" id="pf-daily-pl">--</div></div>
   <div class="stat-card"><div class="stat-label">Total P&L</div><div class="stat-value" id="pf-total-pl">--</div></div>
   <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-value" id="pf-winrate">--</div></div>
+  <div class="stat-card"><div class="stat-label">7d Win Rate</div><div class="stat-value" id="pf-winrate-7d">--</div></div>
   <div class="stat-card" style="cursor:pointer;position:relative" onclick="toggleTodayTrades()"><div class="stat-label">Trades Today</div><div class="stat-value" id="trades-today" style="text-decoration:underline;text-decoration-style:dotted">--</div><div id="today-trades-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;min-width:350px;max-width:500px;background:#111;border:1px solid #333;border-radius:10px;padding:12px;z-index:100;box-shadow:0 8px 24px rgba(0,0,0,0.6);max-height:400px;overflow-y:auto;font-size:10px"></div></div>
 </div>
 
@@ -10369,6 +10388,11 @@ async function loadPortfolio() {
     var wrEl = document.getElementById('pf-winrate');
     wrEl.textContent = wr.toFixed(0) + '%';
     wrEl.style.color = wr >= 60 ? '#00dc5a' : wr >= 40 ? '#ffb400' : '#ff5000';
+    var wr7d = document.getElementById('pf-winrate-7d');
+    if (wr7d && data.win_rate_7d !== undefined) {
+        wr7d.textContent = data.win_rate_7d + '%';
+        wr7d.style.color = data.win_rate_7d >= 50 ? '#00dc5a' : (data.win_rate_7d >= 30 ? '#ffb400' : '#ff5000');
+    }
     var wrBar = document.getElementById('pf-wrbar');
     if (wrBar) {
       wrBar.style.width = Math.max(2, wr) + '%';
