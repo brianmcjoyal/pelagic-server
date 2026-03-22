@@ -5287,9 +5287,16 @@ def positions():
         return jsonify({"positions": [], "error": str(e)})
 
 
+_SETTLED_CACHE = {"data": None, "ts": 0}
+_SETTLED_CACHE_TTL = 120  # 2 minutes
+
 @app.route("/settled")
 def settled_positions():
-    """Get settled positions with full scorecard data."""
+    """Get settled positions with full scorecard data. Cached for 2 min."""
+    import time as _t
+    now = _t.time()
+    if _SETTLED_CACHE["data"] and (now - _SETTLED_CACHE["ts"]) < _SETTLED_CACHE_TTL:
+        return jsonify(_SETTLED_CACHE["data"])
     path = "/portfolio/positions"
     headers = signed_headers("GET", path)
     if not headers:
@@ -5465,7 +5472,7 @@ def settled_positions():
             c["win_rate"] = round(c["wins"] / max(1, c["wins"] + c["losses"]) * 100, 1)
             c["pnl_usd"] = round(c["pnl_usd"], 2)
 
-        return jsonify({
+        result = {
             "settled": settled,
             "wins": wins,
             "losses": losses,
@@ -5496,7 +5503,10 @@ def settled_positions():
                     "total_bets": len(legacy_settled),
                 },
             },
-        })
+        }
+        _SETTLED_CACHE["data"] = result
+        _SETTLED_CACHE["ts"] = now
+        return jsonify(result)
     except Exception as e:
         return jsonify({"settled": [], "error": str(e)})
 
