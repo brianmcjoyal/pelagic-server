@@ -7951,14 +7951,11 @@ def moonshark_opportunities():
         debug_in_position = 0
 
         for m in markets:
-            # Only show Kalshi markets (we can only trade there)
-            plat = m.get("platform", "")
-            if plat and plat != "kalshi":
+            # Only Kalshi markets (tickers start with KX)
+            ticker = m.get("ticker") or m.get("id") or ""
+            if not ticker or not ticker.upper().startswith("KX"):
                 continue
             debug_kalshi += 1
-            ticker = m.get("ticker") or m.get("id") or ""
-            if not ticker:
-                continue
             if ticker in existing_tickers:
                 debug_in_position += 1
                 continue
@@ -8003,9 +8000,8 @@ def moonshark_opportunities():
                 })
 
         # Split into general and WTA tennis
-        wta_opps = [o for o in opps if 'wta' in (o.get('ticker') or '').lower() or
-                    'wtamatch' in (o.get('ticker') or '').lower() or
-                    ('win the' in (o.get('title') or '').lower() and any(w in (o.get('title') or '').lower() for w in ['vs', 'v ']))]
+        wta_opps = [o for o in opps if 'KXWTA' in (o.get('ticker') or '').upper() or
+                    'KXWTAMATCH' in (o.get('ticker') or '').upper()]
         general_opps = [o for o in opps if o not in wta_opps]
 
         # Sort by volume (most liquid first), take top 10 each
