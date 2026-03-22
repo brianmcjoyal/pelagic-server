@@ -8006,8 +8006,9 @@ def moonshark_stats():
 def moonshark_opportunities():
     """Return top 5 MoonShark-eligible markets for the wheel."""
     try:
-        # Direct lightweight Kalshi fetch for MoonShark — fetch_kalshi() fails in
-        # thread pool (timing/rate-limit), so we do a simple paginated fetch here
+        # Fetch Kalshi sport markets directly for MoonShark
+        # fetch_kalshi() is too heavy (80+ API calls, 20s timeout) — instead we
+        # fetch events, pick sport-relevant ones, then get their markets
         import time as _t
         _now = _t.time()
         if not hasattr(moonshark_opportunities, '_kalshi_cache'):
@@ -8016,37 +8017,58 @@ def moonshark_opportunities():
         if kc["data"] and (_now - kc["ts"]) < 120:
             markets = kc["data"]
         else:
-            _ms_markets = []
-            _ms_cursor = None
-            for _ms_page in range(5):
-                try:
-                    _msh = signed_headers("GET", "/markets")
-                    _msp = {"limit": 200, "status": "open"}
-                    if _ms_cursor:
-                        _msp["cursor"] = _ms_cursor
-                    _msr = requests.get(
-                        KALSHI_BASE_URL + KALSHI_API_PREFIX + "/markets",
-                        headers=_msh, params=_msp, timeout=10,
+            markets = []
+            _sport_prefixes = ["KXATP", "KXWTA", "KXKBL", "KXNCAA", "KXNBA",
+                               "KXNHL", "KXMLB", "KXUFC", "KXMMA", "KXSOCCER",
+                               "KXEPL", "KXNFL", "KXMLS", "KXWNBA", "KXPGA"]
+            try:
+                # Step 1: Get events
+                _ev_tickers = []
+                _ev_cursor = None
+                for _evp in range(3):
+                    _evh = signed_headers("GET", "/events")
+                    _evparams = {"limit": 200, "status": "open"}
+                    if _ev_cursor:
+                        _evparams["cursor"] = _ev_cursor
+                    _evr = requests.get(
+                        KALSHI_BASE_URL + KALSHI_API_PREFIX + "/events",
+                        headers=_evh, params=_evparams, timeout=10,
                     )
-                    if _msr.ok:
-                        _ms_page_data = _msr.json().get("markets", [])
-                        _ms_markets.extend(_ms_page_data)
-                        _ms_cursor = _msr.json().get("cursor")
-                        if not _ms_cursor or len(_ms_page_data) < 200:
+                    if _evr.ok:
+                        for ev in _evr.json().get("events", []):
+                            et = ev.get("event_ticker", "")
+                            # Keep non-parlay events (sport + general)
+                            if et and not et.upper().startswith("KXMVE"):
+                                _ev_tickers.append(et)
+                        _ev_cursor = _evr.json().get("cursor")
+                        if not _ev_cursor:
                             break
                     else:
                         break
-                except Exception:
-                    break
-            # Normalize to match expected format (add ticker field from raw data)
-            markets = []
-            for m in _ms_markets:
-                tk = m.get("ticker", "")
-                if tk:
-                    markets.append(m)
+                # Step 2: Fetch markets for sport events first, then others
+                # Prioritize sports (what MoonShark bets on)
+                _sport_evts = [e for e in _ev_tickers if any(e.upper().startswith(p) for p in _sport_prefixes)]
+                _other_evts = [e for e in _ev_tickers if e not in _sport_evts]
+                _fetch_evts = _sport_evts + _other_evts[:30]  # all sports + up to 30 others
+                for et in _fetch_evts:
+                    try:
+                        _mh = signed_headers("GET", "/markets")
+                        _mr = requests.get(
+                            KALSHI_BASE_URL + KALSHI_API_PREFIX + "/markets",
+                            headers=_mh,
+                            params={"limit": 200, "event_ticker": et, "status": "open"},
+                            timeout=5,
+                        )
+                        if _mr.ok:
+                            markets.extend(_mr.json().get("markets", []))
+                    except Exception:
+                        continue
+            except Exception as _ms_err:
+                print(f"[MOONSHARK] Fetch error: {_ms_err}")
             if markets:
                 kc["data"] = markets
                 kc["ts"] = _now
+            print(f"[MOONSHARK] Fetched {len(markets)} markets from {len(_fetch_evts) if '_fetch_evts' in dir() else 0} events")
         opps = []
         existing_tickers = set()
         try:
