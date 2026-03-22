@@ -7432,7 +7432,8 @@ def moonshark_opportunities():
 
         for m in markets:
             # Only show Kalshi markets (we can only trade there)
-            if m.get("platform") != "kalshi":
+            plat = m.get("platform", "")
+            if plat and plat != "kalshi":
                 continue
             debug_kalshi += 1
             ticker = m.get("ticker") or m.get("id") or ""
@@ -11102,14 +11103,16 @@ async function loadSettled() {
       tableEl.innerHTML = '<div style="color:#555;font-size:10px;padding:8px">No settled positions yet. Place some bets and we will track every result here.</div>';
     } else {
       // Sort by settlement: most recently settled first
-      // Use close_time but cap future dates to today (markets that settled early)
-      var nowStr = new Date().toISOString();
+      // Sort newest first — use settlement_time if available, else close_time
       settled.sort(function(a, b) {
-        var aTime = (a.close_time || '');
-        var bTime = (b.close_time || '');
-        // If close_time is in the future, it settled early — use today's date
-        if (aTime > nowStr) aTime = nowStr;
-        if (bTime > nowStr) bTime = nowStr;
+        var aTime = a.settlement_time || a.close_time || '';
+        var bTime = b.settlement_time || b.close_time || '';
+        // Future close_times go to the end (haven't settled yet)
+        var now = new Date().toISOString();
+        var aFuture = aTime > now;
+        var bFuture = bTime > now;
+        if (aFuture && !bFuture) return 1;
+        if (!aFuture && bFuture) return -1;
         return bTime.localeCompare(aTime);
       });
       var tbl = '<table style="width:100%;border-collapse:collapse;font-size:10px">';
