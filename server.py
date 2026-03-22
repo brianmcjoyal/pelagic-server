@@ -267,11 +267,16 @@ def _hydrate_from_kalshi():
             created = fill.get("created_time", "")
             cost_usd = (price_cents * count) / 100
             # Infer strategy for bot attribution after restart
-            # Today's trades at MoonShark prices (≤30c) are almost certainly bot trades.
-            # Older trades or higher-price trades default to manual ("you").
             _inferred_strategy = None
             _is_today = created and created[:10] == today_str
-            if _is_today and action == "buy" and price_cents <= 30:
+            _tk_upper = ticker.upper()
+            # Sport/event tickers are bot trades (MoonShark)
+            _bot_prefixes = ("KXKBL", "KXATP", "KXWTA", "KXNCAA", "KXNBA",
+                             "KXNHL", "KXMLB", "KXUFC", "KXMMA", "KXEPL",
+                             "KXNFL", "KXMLS", "KXWNBA", "KXSOCCER", "KXPGA")
+            if any(_tk_upper.startswith(p) for p in _bot_prefixes):
+                _inferred_strategy = "moonshark"
+            elif _is_today and action == "buy" and price_cents <= 30:
                 _inferred_strategy = "moonshark"
             trade_rec = {
                 "timestamp": created,
@@ -6968,7 +6973,7 @@ def trades_today_endpoint():
         if ticker and ticker not in seen_tickers and _is_today_pacific(ts) and t.get("action") != "sell":
             # Bot trades have strategy like "moonshark", "sniper", "consensus_mispricing"
             # After restart, hydrated fills have source=kalshi_fill but may have inferred strategy
-            strat = t.get("strategy", "")
+            strat = t.get("strategy") or ""
             is_bot = strat in ("moonshark", "live_sniper", "consensus_mispricing", "arb", "sniper")
             is_manual = t.get("manual") or (t.get("source") == "kalshi_fill" and not is_bot)
             source = "bot" if is_bot else ("you" if is_manual else "bot")
@@ -6980,7 +6985,7 @@ def trades_today_endpoint():
                 "count": t.get("count", 0),
                 "cost_usd": round(t.get("cost_usd", 0), 2),
                 "time": ts,
-                "strategy": t.get("strategy", "bot"),
+                "strategy": strat or "bot",
                 "success": t.get("success", True),
                 "source": source,
             })
