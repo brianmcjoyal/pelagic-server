@@ -5624,10 +5624,17 @@ def analytics_endpoint():
         return jsonify({"error": str(e)})
 
 
+_insights_cache = {"data": None, "date": None}
+
 @app.route("/insights")
 def insights_endpoint():
-    """Generate 5 actionable daily insights from trading data."""
-    generated_at = datetime.datetime.now(tz=_PACIFIC).strftime("%b %d, %Y %I:%M %p PT")
+    """Generate 5 actionable daily insights from trading data. Refreshes daily at 6am PT."""
+    now_pt = datetime.datetime.now(tz=_PACIFIC)
+    # Cache key: date string, but only after 6am PT
+    cache_date = now_pt.strftime("%Y-%m-%d") if now_pt.hour >= 6 else (now_pt - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+    if _insights_cache["data"] and _insights_cache["date"] == cache_date:
+        return jsonify(_insights_cache["data"])
+    generated_at = now_pt.strftime("%b %d, %Y %I:%M %p PT")
     try:
         settled = [t for t in _TRADE_JOURNAL if t.get("result") is not None]
         pending = [t for t in _TRADE_JOURNAL if t.get("result") is None]
@@ -5916,7 +5923,10 @@ def insights_endpoint():
             c.pop("priority", None)
         insights = candidates[:5]
 
-        return jsonify({"insights": insights, "generated_at": generated_at})
+        result = {"insights": insights, "generated_at": generated_at}
+        _insights_cache["data"] = result
+        _insights_cache["date"] = cache_date
+        return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e), "insights": [], "generated_at": generated_at})
 
@@ -5925,8 +5935,8 @@ def insights_endpoint():
 # News Feed — top financial headlines from RSS
 # ---------------------------------------------------------------------------
 
-_NEWS_FEED_CACHE = {"stories": [], "ts": 0}
-_NEWS_FEED_TTL = 900  # 15 minutes
+_NEWS_FEED_CACHE = {"stories": [], "ts": 0, "date": None}
+_NEWS_FEED_TTL = 86400  # 24 hours — refreshes daily at 6am PT
 
 # News impact analysis — keyword-based economic impact + stock picks
 _NEWS_IMPACT_RULES = [
@@ -6008,7 +6018,11 @@ def _fetch_news_feed():
     import time as _time
 
     now = _time.time()
-    if _NEWS_FEED_CACHE["stories"] and (now - _NEWS_FEED_CACHE["ts"]) < _NEWS_FEED_TTL:
+    # Daily refresh at 6am PT
+    now_pt = datetime.datetime.now(tz=_PACIFIC)
+    news_date = now_pt.strftime("%Y-%m-%d") if now_pt.hour >= 6 else (now_pt - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+    cache_fresh = _NEWS_FEED_CACHE["stories"] and _NEWS_FEED_CACHE.get("date") == news_date
+    if cache_fresh:
         return _NEWS_FEED_CACHE["stories"]
 
     feeds = [
@@ -6071,6 +6085,7 @@ def _fetch_news_feed():
 
     _NEWS_FEED_CACHE["stories"] = result
     _NEWS_FEED_CACHE["ts"] = now
+    _NEWS_FEED_CACHE["date"] = news_date
     return result
 
 
@@ -6101,8 +6116,8 @@ def news_refresh():
 # ---------------------------------------------------------------------------
 # News Ideas — market analysis from top global headlines
 # ---------------------------------------------------------------------------
-_NEWS_IDEAS_CACHE = {"ideas": [], "ts": 0}
-_NEWS_IDEAS_TTL = 1800  # 30 minutes
+_NEWS_IDEAS_CACHE = {"ideas": [], "ts": 0, "date": None}
+_NEWS_IDEAS_TTL = 86400  # 24 hours — refreshes daily at 6am PT
 
 _NEWS_KEYWORD_RULES = [
     {
