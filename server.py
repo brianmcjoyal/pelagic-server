@@ -105,7 +105,7 @@ def _send_discord(msg, color=0x00dc5a):
                         "description": msg[:2000],
                         "color": color,
                         "footer": {"text": "TradeShark 🦈"},
-                        "timestamp": datetime.datetime.utcnow().isoformat(),
+                        "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
                     }]
                 }, timeout=5)
             except Exception:
@@ -135,7 +135,7 @@ def _log_activity(msg, level="info"):
     if log and log[-1].get("msg") == msg:
         return
     log.append({
-        "time": datetime.datetime.utcnow().isoformat(),
+        "time": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "msg": msg,
         "level": level,
     })
@@ -2783,7 +2783,7 @@ def live_game_snipe():
                             "ticker": ticker, "title": title, "side": side,
                             "price": price, "count": filled, "cost": actual_cost,
                             "potential_profit": potential,
-                            "time": datetime.datetime.utcnow().isoformat(),
+                            "time": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
                             "bot_version": BOT_VERSION,
                             "strategy": "live_sniper",
                             "category": classify_market_category(title, ticker),
@@ -3164,7 +3164,7 @@ def moonshark_snipe():
                             "ticker": ticker, "title": title, "side": side,
                             "price": price, "count": filled, "cost": actual_cost,
                             "potential_profit": potential,
-                            "time": datetime.datetime.utcnow().isoformat(),
+                            "time": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
                             "bot_version": BOT_VERSION,
                             "strategy": "moonshark",
                             "category": classify_market_category(title, ticker),
@@ -3471,7 +3471,7 @@ def closegame_snipe():
                             "ticker": ticker, "title": title, "side": side,
                             "price": price, "count": filled, "cost": actual_cost,
                             "potential_profit": potential,
-                            "time": datetime.datetime.utcnow().isoformat(),
+                            "time": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
                             "strategy": "closegame",
                             "score": score_str,
                             "margin": cg["margin"],
@@ -4265,7 +4265,7 @@ def run_quant_strategies(all_markets):
         success = "error" not in result
 
         trade_record = {
-            "timestamp": datetime.datetime.utcnow().isoformat(),
+            "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
             "ticker": ticker,
             "question": sig.get("question", ""),
             "side": side,
@@ -8937,7 +8937,7 @@ def quick_bet():
         BOT_STATE.setdefault("manual_trades_today", []).append({
             "ticker": ticker, "title": ticker, "side": side,
             "price": price_cents, "count": count, "cost": round(cost_usd, 2),
-            "time": datetime.datetime.utcnow().isoformat(),
+            "time": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
             "strategy": "manual", "source": "you",
         })
         _journal_trade(ticker, ticker, side, price_cents, count, cost_usd, "manual", is_live=False)
@@ -9621,7 +9621,7 @@ def moonshot_bet():
             BOT_STATE.setdefault("manual_trades_today", []).append({
                 "ticker": ticker, "title": ticker, "side": side,
                 "price": price_cents, "count": count, "cost": round(actual_cost, 2),
-                "time": datetime.datetime.utcnow().isoformat(),
+                "time": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "strategy": "moonshark_manual", "source": "you",
             })
             _journal_trade(ticker, ticker, side, price_cents, count, actual_cost, "moonshark_manual", is_live=False)
@@ -9797,7 +9797,7 @@ def quant_bet():
             "price_cents": price_cents,
             "count": count,
             "cost_usd": round(cost, 2),
-            "time": datetime.datetime.utcnow().isoformat(),
+            "time": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
             "category": classify_market_category(body.get("title", ticker), ticker),
             "deviation_pct": body.get("deviation_pct", 0),
             "status": "open",
@@ -10395,7 +10395,7 @@ def _generate_picks():
                 "win_probability": p.get("win_probability", 0),
                 "platform_count": p.get("platform_count", 0),
                 "confidence": p.get("confidence", ""),
-                "timestamp": datetime.datetime.utcnow().isoformat(),
+                "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
             })
             existing_hist_tickers.add(tk)
     # Trim to last 500
@@ -10526,7 +10526,7 @@ def execute_trade():
     count = max(1, 500 // pc) if pc > 0 else 1  # target $5 per trade
     result = place_kalshi_order(ticker, side, pc, count=count)
     trade_record = {
-        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "ticker": ticker,
         "question": data.get("question", ""),
         "side": side,
@@ -10561,7 +10561,7 @@ def sell_position():
         return jsonify({"error": "Missing ticker, side, or price_cents"}), 400
     result = sell_kalshi_position(ticker, side, int(price_cents), int(count))
     trade_record = {
-        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "ticker": ticker,
         "side": side,
         "action": "sell",
