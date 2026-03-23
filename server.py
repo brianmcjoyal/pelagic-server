@@ -10992,6 +10992,23 @@ a:hover { color: #7da5f5; }
     <h1><span>Trade</span><span style="background:linear-gradient(135deg,#c9963a,#dab060,#8b5e28,#c9963a);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text">Shark</span></h1>
   </div>
   <div style="display:flex;align-items:center;gap:12px">
+    <!-- Notification Bell -->
+    <div id="notif-bell-wrapper" style="position:relative;cursor:pointer" onclick="toggleNotifPanel()">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" id="notif-bell-icon">
+        <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+      </svg>
+      <span id="notif-badge" style="display:none;position:absolute;top:-4px;right:-6px;background:#ff3333;color:#fff;font-size:9px;font-weight:800;border-radius:50%;min-width:16px;height:16px;line-height:16px;text-align:center;padding:0 3px">0</span>
+    </div>
+    <!-- Notification Dropdown -->
+    <div id="notif-panel" style="display:none;position:absolute;top:60px;right:100px;width:380px;max-height:450px;overflow-y:auto;background:#1a1a1a;border:1px solid #333;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,0.6);z-index:1000;padding:0">
+      <div style="padding:12px 16px;border-bottom:1px solid #333;display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:13px;font-weight:700;color:#fff">Notifications</span>
+        <span style="font-size:10px;color:#00dc5a;cursor:pointer" onclick="clearNotifs()">Mark all read</span>
+      </div>
+      <div id="notif-list" style="padding:4px 0">
+        <div style="padding:20px;text-align:center;color:#555;font-size:11px">No notifications yet</div>
+      </div>
+    </div>
     <button id="scan-btn" onclick="triggerScan()" style="background:none;border:1px solid #00dc5a;color:#00dc5a;padding:6px 16px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;font-family:inherit;transition:all 0.2s;display:flex;align-items:center;gap:6px">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
       Scan Now
@@ -13970,7 +13987,102 @@ loadMoonshark();
 // Auto-refresh: ticker every 60s, activity every 10s, portfolio every 30s
 setInterval(() => { loadTicker(); }, 60000);
 setInterval(() => { loadActivity(); loadBetsFeed(); checkForNotifications(); }, 10000);
-setInterval(() => { loadStatus(); loadPortfolio(); loadTopPicks(); loadTodayPicks(); loadPositions(); loadSettled(); loadTrades(); }, 30000);
+setInterval(() => { loadStatus(); loadPortfolio(); loadTopPicks(); loadTodayPicks(); loadPositions(); loadSettled(); loadTrades(); checkNotifications(); }, 30000);
+
+// --- Notification Bell ---
+var _notifItems = [];
+var _notifUnread = 0;
+var _lastNotifCheck = 0;
+var _notifPanelOpen = false;
+var _NOTIF_TRIGGERS = ['HIT', 'WIN', 'LOSS', 'BLOWOUT EXIT', 'MOMENTUM', 'LEAD CHANGE', 'PRICE MOVE', 'ARB', 'CLOSEGAME'];
+
+function toggleNotifPanel() {
+  _notifPanelOpen = !_notifPanelOpen;
+  document.getElementById('notif-panel').style.display = _notifPanelOpen ? 'block' : 'none';
+  if (_notifPanelOpen) renderNotifs();
+}
+
+// Close panel when clicking outside
+document.addEventListener('click', function(e) {
+  var wrapper = document.getElementById('notif-bell-wrapper');
+  var panel = document.getElementById('notif-panel');
+  if (_notifPanelOpen && wrapper && !wrapper.contains(e.target) && panel && !panel.contains(e.target)) {
+    _notifPanelOpen = false;
+    panel.style.display = 'none';
+  }
+});
+
+function clearNotifs() {
+  _notifUnread = 0;
+  _notifItems.forEach(function(n) { n.read = true; });
+  var badge = document.getElementById('notif-badge');
+  badge.style.display = 'none';
+  document.getElementById('notif-bell-icon').style.stroke = '#888';
+  renderNotifs();
+}
+
+function renderNotifs() {
+  var el = document.getElementById('notif-list');
+  if (_notifItems.length === 0) {
+    el.innerHTML = '<div style="padding:20px;text-align:center;color:#555;font-size:11px">No notifications yet</div>';
+    return;
+  }
+  var html = '';
+  _notifItems.slice().reverse().forEach(function(n) {
+    var bg = n.read ? 'transparent' : '#1e2a1e';
+    var timeStr = '--:--';
+    try { timeStr = new Date(n.time + 'Z').toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); } catch(e) {}
+    // Pick icon based on content
+    var icon = '📋';
+    if (n.msg.indexOf('HIT') >= 0) icon = '🎯';
+    if (n.msg.indexOf('WIN') >= 0) icon = '🎉';
+    if (n.msg.indexOf('LOSS') >= 0) icon = '❌';
+    if (n.msg.indexOf('BLOWOUT') >= 0) icon = '💀';
+    if (n.msg.indexOf('MOMENTUM') >= 0) icon = '🔥';
+    if (n.msg.indexOf('LEAD') >= 0) icon = '🚀';
+    if (n.msg.indexOf('ARB') >= 0) icon = '💰';
+    if (n.msg.indexOf('PRICE') >= 0) icon = '📈';
+    html += '<div style="padding:10px 16px;border-bottom:1px solid #222;background:' + bg + ';transition:background 0.2s">';
+    html += '<div style="display:flex;gap:8px;align-items:flex-start">';
+    html += '<span style="font-size:16px;flex-shrink:0">' + icon + '</span>';
+    html += '<div style="flex:1;min-width:0">';
+    html += '<div style="font-size:11px;color:#ddd;line-height:1.4;word-wrap:break-word">' + n.msg + '</div>';
+    html += '<div style="font-size:9px;color:#555;margin-top:3px">' + timeStr + '</div>';
+    html += '</div></div></div>';
+  });
+  el.innerHTML = html;
+}
+
+function checkNotifications() {
+  fetch(API + '/bot-activity').then(function(r) { return r.json(); }).then(function(data) {
+    var items = data.activity || [];
+    // Find new important events
+    items.forEach(function(a) {
+      var isImportant = _NOTIF_TRIGGERS.some(function(t) { return a.msg && a.msg.toUpperCase().indexOf(t) >= 0; });
+      if (!isImportant) return;
+      // Dedupe by message
+      var exists = _notifItems.some(function(n) { return n.msg === a.msg && n.time === a.time; });
+      if (exists) return;
+      _notifItems.push({ msg: a.msg, time: a.time, read: false });
+      _notifUnread++;
+    });
+    // Keep last 50
+    if (_notifItems.length > 50) _notifItems = _notifItems.slice(-50);
+    // Update badge
+    var badge = document.getElementById('notif-badge');
+    var bell = document.getElementById('notif-bell-icon');
+    if (_notifUnread > 0) {
+      badge.textContent = _notifUnread > 99 ? '99+' : _notifUnread;
+      badge.style.display = 'block';
+      bell.style.stroke = '#ffb400';
+    }
+    if (_notifPanelOpen) renderNotifs();
+  }).catch(function() {});
+}
+
+// Initial check
+setTimeout(checkNotifications, 3000);
+setInterval(checkNotifications, 15000);
 
 // --- News Feed ---
 var _newsLoaded = false;
