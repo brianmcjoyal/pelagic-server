@@ -5584,6 +5584,29 @@ def settled_positions():
             cursor = page.get("cursor")
             if not cursor:
                 break
+        # Filter to Day 1+ only (March 16, 2026 onwards)
+        # Pre-Day-1 positions are legacy noise that pollutes the scorecard
+        _day1_cutoff = TRADE_JOURNAL_START  # "2026-03-16"
+        _pre_day1 = []
+        _post_day1 = []
+        for _pos in positions_list:
+            _tk = _pos.get("ticker", "")
+            # Check close_time from market data or infer from bot_version
+            # For now, check if the trade exists in all_trades with a timestamp
+            _trade_ts = ""
+            for _at in BOT_STATE.get("all_trades", []):
+                if _at.get("ticker") == _tk:
+                    _trade_ts = _at.get("timestamp", "")[:10]
+                    break
+            if _trade_ts and _trade_ts < _day1_cutoff:
+                _pre_day1.append(_pos)
+            else:
+                _post_day1.append(_pos)
+
+        # Use Day 1+ positions for scorecard stats
+        # Keep all positions available but mark pre-Day-1 ones
+        _pre_day1_tickers = set(p.get("ticker", "") for p in _pre_day1)
+
         wins = 0
         losses = 0
         breakeven = 0
@@ -5687,6 +5710,19 @@ def settled_positions():
                     entry_cents = int(round(float(str(pos.get("average_no_price_dollars") or pos.get("average_no_price") or 0)) * 100))
             except Exception:
                 pass
+            is_legacy = ticker in _pre_day1_tickers
+
+            # Skip pre-Day-1 positions from scorecard stats
+            if is_legacy:
+                total_pnl -= pnl  # undo the pnl we added above
+                total_wagered -= traded_cents / 100
+                if pnl > 0:
+                    wins -= 1
+                elif pnl < 0:
+                    losses -= 1
+                else:
+                    breakeven -= 1
+
             settled.append({
                 "ticker": ticker,
                 "title": title,
@@ -5702,6 +5738,7 @@ def settled_positions():
                 "side": side,
                 "count": count,
                 "entry_cents": entry_cents,
+                "is_legacy": is_legacy,
             })
 
         # Sort: most recently settled (past close_times) first, future at bottom
@@ -5724,9 +5761,9 @@ def settled_positions():
         legacy_losses = sum(1 for s in legacy_settled if s["won"] is False)
         legacy_pnl = sum(s["pnl_usd"] for s in legacy_settled)
 
-        # Category breakdown — know where the edge is
+        # Category breakdown — Day 1+ only (skip legacy noise)
         by_category = {}
-        for s in settled:
+        for s in [x for x in settled if not x.get("is_legacy")]:
             cat = s.get("category", "other")
             if cat not in by_category:
                 by_category[cat] = {"wins": 0, "losses": 0, "pnl_usd": 0, "bets": 0}
@@ -11985,6 +12022,8 @@ async function loadSettled() {
     if (hideJunk) {
       var _historyJunk = ['truth social', 'truthsocial', 'canadian team win', 'groomsman', 'kelce', 'title holder', 'nuclear fusion', 'billboard', 'netflix', 'spotify', 'top song', 'top artist', 'featherweight', 'bantamweight', 'flyweight', 'middleweight', 'welterweight', 'lightweight', 'heavyweight', 'pga tour major', 'ballon d', 'gas prices', 'trillionaire', 'next uk pm', 'nextukpm'];
       filtered = allSettled.filter(function(s) {
+        // Hide pre-Day-1 legacy positions (before March 16, 2026)
+        if (s.is_legacy) return false;
         // Hide known junk categories by ticker/title
         var t = ((s.title || '') + ' ' + (s.ticker || '')).toLowerCase();
         for (var i = 0; i < _historyJunk.length; i++) { if (t.indexOf(_historyJunk[i]) >= 0) return false; }
