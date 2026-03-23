@@ -5420,9 +5420,7 @@ def _background_loop():
             # MoonShark — longshot underdog sniper (10-30c contracts)
             moonshark_snipe()
             _time.sleep(2)  # yield to web requests
-            # Close-Game Sniper — buy underdogs in tight late games (25-45c)
-            closegame_snipe()
-            _time.sleep(2)  # yield to web requests
+            # Close-Game Sniper runs on its own fast thread (10s loop)
             # QUANT ENGINE DISABLED — mean reversion + market making lost money
             # Keep volatility tracking for data, but don't place trades
             if cycle % 3 == 0:
@@ -5577,6 +5575,21 @@ def _ensure_bg_thread():
     _bg_thread = threading.Thread(target=_background_loop, daemon=True)
     _bg_thread.start()
     print("[STARTUP] Background thread started")
+
+    # Close-Game Sniper — fast 10s loop for live game edge
+    def _closegame_loop():
+        _time.sleep(60)  # wait for main loop to warm up first
+        print("[CLOSEGAME] Fast sniper thread started (10s interval)")
+        while True:
+            try:
+                closegame_snipe()
+            except Exception as e:
+                print(f"[CLOSEGAME] Error: {e}")
+            _time.sleep(10)
+
+    _cg_thread = threading.Thread(target=_closegame_loop, daemon=True)
+    _cg_thread.start()
+    print("[STARTUP] Close-Game Sniper thread started (10s)")
 
 # Background thread starts on first request via before_request hook
 # (not at import time, to avoid issues with gunicorn --preload)
@@ -7448,7 +7461,7 @@ def trades_today_endpoint():
 
 # ── Live Scores (ESPN) ────────────────────────────────────────────────
 _live_scores_cache = {"data": {}, "ts": 0}
-_LIVE_SCORES_TTL = 60  # seconds
+_LIVE_SCORES_TTL = 15  # seconds — fast refresh for close-game sniper
 
 _ESPN_ENDPOINTS = {
     "nba": "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard",
