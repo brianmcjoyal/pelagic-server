@@ -2072,12 +2072,20 @@ def check_position_prices():
                     if mt.get("ticker") == ticker:
                         placed_by = "you"
                         break
-            # 5) If no bot strategy claimed it, default to "you"
+            # 5) If no bot strategy claimed it, check if it's a legacy pre-Day-1 trade
             # After restart, all trades come in as kalshi_fill with no strategy info.
             # If the bot placed it, it would be in one of the bot lists above.
-            # Anything unclaimed = manual bet on kalshi.com
             if not placed_by:
-                placed_by = "you"
+                # Check if trade was placed before Day 1 (March 16, 2026)
+                _trade_date = ""
+                for _at in BOT_STATE.get("all_trades", []):
+                    if _at.get("ticker") == ticker:
+                        _trade_date = (_at.get("timestamp", "") or "")[:10]
+                        break
+                if _trade_date and _trade_date < TRADE_JOURNAL_START:
+                    placed_by = "legacy"  # pre-Day-1 — not yours, not bot's
+                else:
+                    placed_by = "you"  # manual bet on kalshi.com
 
             enriched.append({
                 "ticker": ticker,
@@ -11021,7 +11029,11 @@ async function loadPortfolio() {
 
     // Split by placed_by: YOU vs BOT
     var myBets = positions.filter(function(p) { return p.placed_by === 'you'; });
-    var botBets = positions.filter(function(p) { return p.placed_by !== 'you'; });
+    var botBets = positions.filter(function(p) { return p.placed_by === 'bot'; });
+    var legacyBets = positions.filter(function(p) { return p.placed_by === 'legacy'; });
+    if (legacyBets.length > 0) {
+      hiddenCount += legacyBets.length;
+    }
     var myPnl = myBets.reduce(function(s, p) { return s + (p.unrealized_pnl_cents || 0); }, 0);
     var botPnl = botBets.reduce(function(s, p) { return s + (p.unrealized_pnl_cents || 0); }, 0);
     html += '<div style="margin-top:16px;display:grid;grid-template-columns:1fr 1fr;gap:16px">';
