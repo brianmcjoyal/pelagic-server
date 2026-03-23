@@ -7480,16 +7480,22 @@ def trades_today_endpoint():
 
     # Fallback: also check all_trades for today's entries (survives redeploys via Kalshi hydration)
     seen_tickers = set(t.get("ticker", "") for t in all_today)
+    # Build set of tickers the bot ACTUALLY placed (from in-memory daily arrays)
+    _bot_placed_tickers = set()
+    for _blist in [bot_trades, sniper_trades, moonshark_trades, quant_trades]:
+        for _bt in _blist:
+            _bot_placed_tickers.add(_bt.get("ticker", ""))
     for t in BOT_STATE.get("all_trades", []):
         ticker = t.get("ticker", "")
         ts = t.get("timestamp", "")
         if ticker and ticker not in seen_tickers and _is_today_pacific(ts) and t.get("action") != "sell":
-            # Bot trades have strategy like "moonshark", "sniper", "consensus_mispricing"
-            # After restart, hydrated fills have source=kalshi_fill but may have inferred strategy
+            # Only trust bot attribution if the ticker is in an actual bot trade array
+            # Hydration infers "moonshark" for all sports tickers, which mislabels manual bets
+            actually_bot = ticker in _bot_placed_tickers
+            is_manual = t.get("manual") or not actually_bot
             strat = t.get("strategy") or ""
-            is_bot = strat in ("moonshark", "live_sniper", "consensus_mispricing", "arb", "sniper")
-            is_manual = t.get("manual") or (t.get("source") == "kalshi_fill" and not is_bot)
-            source = "bot" if is_bot else ("you" if is_manual else "bot")
+            source = "bot" if actually_bot else "you"
+            display_strategy = strat if actually_bot else "manual"
             all_today.append({
                 "ticker": ticker,
                 "title": t.get("question", t.get("ticker", "")),
@@ -7498,7 +7504,7 @@ def trades_today_endpoint():
                 "count": t.get("count", 0),
                 "cost_usd": round(t.get("cost_usd", 0), 2),
                 "time": ts,
-                "strategy": strat or "bot",
+                "strategy": display_strategy,
                 "success": t.get("success", True),
                 "source": source,
             })
