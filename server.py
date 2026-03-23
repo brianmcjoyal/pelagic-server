@@ -11952,7 +11952,7 @@ async function loadActivity() {
     items.slice().reverse().forEach(a => {
       var t = '--:--';
       try {
-        var d = new Date(a.time + 'Z');
+        var d = new Date(a.time.indexOf('Z') >= 0 ? a.time : a.time + 'Z');
         t = d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});
       } catch(e) {}
       var lvl = a.level || 'info';
@@ -13327,7 +13327,7 @@ async function loadQuantPicks() {
         var sideC = t.side === 'yes' ? '#00dc5a' : '#ff5000';
         var timeStr = '';
         if (t.time) {
-          var d = new Date(t.time + 'Z');
+          var d = new Date(t.time.indexOf('Z') >= 0 ? t.time : t.time + 'Z');
           timeStr = d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
         }
         var statusC = t.status === 'won' ? '#00dc5a' : t.status === 'lost' ? '#ff5000' : '#888';
@@ -14056,7 +14056,7 @@ function renderNotifs() {
   _notifItems.slice().reverse().forEach(function(n) {
     var bg = n.read ? 'transparent' : '#1e2a1e';
     var timeStr = '--:--';
-    try { timeStr = new Date(n.time + 'Z').toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); } catch(e) {}
+    try { var _nts = n.time && n.time.indexOf('Z') >= 0 ? n.time : (n.time || '') + 'Z'; timeStr = new Date(_nts).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); } catch(e) {}
     // Pick icon based on content
     var icon = '📋';
     if (n.msg.indexOf('HIT') >= 0) icon = '🎯';
