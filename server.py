@@ -3515,6 +3515,15 @@ def enhanced_auto_exit():
         pnl_pct = pos.get("pnl_pct")
         ticker = pos["ticker"]
 
+        # NEVER auto-exit same-day game/match bets — let them settle at $0 or $1
+        # MoonShark buys underdogs; selling mid-game kills the upside
+        _tk = ticker.upper()
+        _game_prefixes = ("KXKBL", "KXATP", "KXWTA", "KXNCAA", "KXNBA", "KXNHL",
+                          "KXMLB", "KXUFC", "KXMMA", "KXEPL", "KXNFL", "KXMLS",
+                          "KXWNBA", "KXSOCCER", "KXPGA", "KXNBA")
+        if any(_tk.startswith(p) for p in _game_prefixes):
+            continue
+
         if pnl_pct is None:
             continue
 
