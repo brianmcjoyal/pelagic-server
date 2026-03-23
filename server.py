@@ -5606,19 +5606,12 @@ def settled_positions():
                 if _at.get("ticker") == _tk:
                     _trade_ts = _at.get("timestamp", "")[:10]
                     break
-            # Also check the position's own close_time as fallback
-            if not _trade_ts:
-                _close_t = _pos.get("close_time") or _pos.get("expiration_time") or ""
-                if _close_t:
-                    _trade_ts = _close_t[:10]
-            # If still no date, check realized_pnl timestamp or market info
-            if _trade_ts and _trade_ts < _day1_cutoff:
-                _pre_day1.append(_pos)
-            elif not _trade_ts:
-                # No date info at all — default to legacy to be safe
-                _pre_day1.append(_pos)
-            else:
+            # If found in recent trades AND placed after Day 1 → post-Day-1
+            # Otherwise → legacy (either not in trades at all, or placed before Day 1)
+            if _trade_ts and _trade_ts >= _day1_cutoff:
                 _post_day1.append(_pos)
+            else:
+                _pre_day1.append(_pos)
 
         # Use Day 1+ positions for scorecard stats
         # Keep all positions available but mark pre-Day-1 ones
