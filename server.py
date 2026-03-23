@@ -5562,7 +5562,7 @@ _SETTLED_CACHE_TTL = 120  # 2 minutes
 
 @app.route("/settled")
 def settled_positions():
-    """Get settled positions with full scorecard data. Cached for 2 min."""
+    """Get settled positions from Kalshi realized P&L. Cached for 2 min."""
     import time as _t
     now = _t.time()
     if _SETTLED_CACHE["data"] and (now - _SETTLED_CACHE["ts"]) < _SETTLED_CACHE_TTL:
@@ -5572,51 +5572,28 @@ def settled_positions():
     if not headers:
         return jsonify({"settled": [], "error": "No API key"})
     try:
-        # Paginate to get ALL settled positions
+        # Get ALL positions (settled + unsettled) with realized P&L
         positions_list = []
-        cursor = None
-        for _ in range(10):  # max 10 pages = 2000 positions
-            params = {"limit": 200, "settlement_status": "settled"}
-            if cursor:
-                params["cursor"] = cursor
-            h = signed_headers("GET", path)
-            resp = requests.get(
-                KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
-                headers=h,
-                params=params,
-                timeout=TIMEOUT,
-            )
-            resp.raise_for_status()
-            page = resp.json()
-            positions_list.extend(page.get("market_positions", []))
-            cursor = page.get("cursor")
-            if not cursor:
-                break
-        # Filter to Day 1+ only (March 16, 2026 onwards)
-        # Pre-Day-1 positions are legacy noise that pollutes the scorecard
-        _day1_cutoff = TRADE_JOURNAL_START  # "2026-03-16"
-        _pre_day1 = []
-        _post_day1 = []
-        for _pos in positions_list:
-            _tk = _pos.get("ticker", "")
-            # Check close_time from market data or infer from bot_version
-            # For now, check if the trade exists in all_trades with a timestamp
-            _trade_ts = ""
-            for _at in BOT_STATE.get("all_trades", []):
-                if _at.get("ticker") == _tk:
-                    _trade_ts = _at.get("timestamp", "")[:10]
+        for _status in ["settled", "unsettled"]:
+            cursor = None
+            for _ in range(10):
+                params = {"limit": 200, "settlement_status": _status}
+                if cursor:
+                    params["cursor"] = cursor
+                h = signed_headers("GET", path)
+                resp = requests.get(
+                    KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
+                    headers=h, params=params, timeout=TIMEOUT,
+                )
+                resp.raise_for_status()
+                page = resp.json()
+                positions_list.extend(page.get("market_positions", []))
+                cursor = page.get("cursor")
+                if not cursor:
                     break
-            # If found in recent trades AND placed after Day 1 → post-Day-1
-            # Otherwise → legacy (either not in trades at all, or placed before Day 1)
-            if _trade_ts and _trade_ts >= _day1_cutoff:
-                _post_day1.append(_pos)
-            else:
-                _pre_day1.append(_pos)
 
-        # Use Day 1+ positions for scorecard stats
-        # Keep all positions available but mark pre-Day-1 ones
-        _pre_day1_tickers = set(p.get("ticker", "") for p in _pre_day1)
-
+        # Only keep positions with non-zero realized P&L (completed trades)
+        _day1_cutoff = TRADE_JOURNAL_START  # "2026-03-16"
         wins = 0
         losses = 0
         breakeven = 0
@@ -5628,10 +5605,17 @@ def settled_positions():
         current_streak_type = None
         settled = []
 
-        # Cache market titles to avoid N+1 API calls
-        _title_cache = {}
+        # Build a map of trade timestamps from all_trades for date filtering
+        _trade_dates = {}
+        for _at in BOT_STATE.get("all_trades", []):
+            _tk = _at.get("ticker", "")
+            _ts = (_at.get("timestamp", "") or "")[:10]
+            if _tk and _ts and (_tk not in _trade_dates or _ts > _trade_dates[_tk]):
+                _trade_dates[_tk] = _ts
 
-        def _get_market_info(ticker):
+        # Cache market titles
+        _title_cache = {}
+        def _get_title(ticker):
             if ticker in _title_cache:
                 return _title_cache[ticker]
             try:
@@ -5643,33 +5627,43 @@ def settled_positions():
                 )
                 if mkt_r.ok:
                     mkt = mkt_r.json().get("market", {})
-                    info = {
-                        "title": mkt.get("title", ticker),
-                        "close_time": mkt.get("close_time", ""),
-                        "result": mkt.get("result", ""),
-                    }
-                    _title_cache[ticker] = info
-                    return info
+                    _title_cache[ticker] = mkt.get("title", ticker)
+                    return _title_cache[ticker]
             except Exception:
                 pass
-            _title_cache[ticker] = {"title": ticker, "close_time": "", "result": ""}
-            return _title_cache[ticker]
+            _title_cache[ticker] = ticker
+            return ticker
 
         for pos in positions_list:
             pnl_cents = _parse_kalshi_dollars(pos.get("realized_pnl_dollars") or pos.get("realized_pnl"))
             pnl = pnl_cents / 100
-            total_pnl += pnl
-            fees_cents = _parse_kalshi_dollars(pos.get("fees_paid_dollars") or pos.get("fees_paid"))
-            fees = fees_cents / 100
-            traded_cents = _parse_kalshi_dollars(pos.get("total_traded_dollars") or pos.get("total_traded"))
-            total_wagered += traded_cents / 100
+            # Skip positions with zero realized P&L (still open, no completed trades)
+            if abs(pnl) < 0.005:
+                continue
 
             ticker = pos.get("ticker", "")
-            mkt_info = _get_market_info(ticker)
-            title = mkt_info["title"]
-            close_time = mkt_info.get("close_time", "")
+            # Filter: only Day 1+ trades
+            trade_date = _trade_dates.get(ticker, "")
+            if trade_date and trade_date < _day1_cutoff:
+                continue
+            # If not in trade history at all, check if it's a known sport ticker (bot trade)
+            # Otherwise skip (likely pre-Day-1 junk)
+            if not trade_date:
+                _tk_upper = ticker.upper()
+                _known_bot = any(_tk_upper.startswith(p) for p in [
+                    "KXKBL", "KXATP", "KXWTA", "KXNCAA", "KXNBA", "KXNHL",
+                    "KXMLB", "KXUFC", "KXMMA", "KXEPL", "KXNFL", "KXMLS",
+                    "KXWNBA", "KXSOCCER", "KXPGA"])
+                if not _known_bot:
+                    continue
 
-            if pnl > 0:
+            title = _get_title(ticker)
+            traded_cents = _parse_kalshi_dollars(pos.get("total_traded_dollars") or pos.get("total_traded"))
+
+            total_pnl += pnl
+            total_wagered += traded_cents / 100
+
+            if pnl > 0.005:
                 wins += 1
                 won = True
                 biggest_win = max(biggest_win, pnl)
@@ -5678,7 +5672,7 @@ def settled_positions():
                 else:
                     streak = 1
                     current_streak_type = "win"
-            elif pnl < 0:
+            elif pnl < -0.005:
                 losses += 1
                 won = False
                 biggest_loss = min(biggest_loss, pnl)
@@ -5691,21 +5685,6 @@ def settled_positions():
                 breakeven += 1
                 won = None
 
-            # Check if this was a pick we recommended + find bot version
-            pick_type = "unknown"
-            trade_version = "v1-legacy"  # default: old trade
-            trade_strategy = "unknown"
-            for ph in BOT_STATE.get("pick_history", []):
-                if ph.get("ticker") == ticker:
-                    pick_type = ph.get("type", "unknown")
-                    break
-            for t in BOT_STATE.get("all_trades", []):
-                if t.get("ticker") == ticker:
-                    trade_version = t.get("bot_version", "v1-legacy")
-                    trade_strategy = t.get("strategy", "unknown")
-                    break
-
-            category = classify_market_category(title, ticker)
             side = pos.get("side", "")
             count = 0
             try:
@@ -5720,18 +5699,14 @@ def settled_positions():
                     entry_cents = int(round(float(str(pos.get("average_no_price_dollars") or pos.get("average_no_price") or 0)) * 100))
             except Exception:
                 pass
-            is_legacy = ticker in _pre_day1_tickers
 
-            # Skip pre-Day-1 positions from scorecard stats
-            if is_legacy:
-                total_pnl -= pnl  # undo the pnl we added above
-                total_wagered -= traded_cents / 100
-                if pnl > 0:
-                    wins -= 1
-                elif pnl < 0:
-                    losses -= 1
-                else:
-                    breakeven -= 1
+            category = classify_market_category(title, ticker)
+            # Find strategy from trade history
+            trade_strategy = "unknown"
+            for t in BOT_STATE.get("all_trades", []):
+                if t.get("ticker") == ticker:
+                    trade_strategy = t.get("strategy") or "unknown"
+                    break
 
             settled.append({
                 "ticker": ticker,
@@ -5739,41 +5714,23 @@ def settled_positions():
                 "pnl_usd": round(pnl, 2),
                 "won": won,
                 "total_traded": round(traded_cents / 100, 2),
-                "fees_paid": round(fees, 2),
-                "pick_type": pick_type,
-                "bot_version": trade_version,
-                "strategy": trade_strategy,
                 "category": category,
-                "close_time": close_time,
+                "strategy": trade_strategy,
                 "side": side,
                 "count": count,
                 "entry_cents": entry_cents,
-                "is_legacy": is_legacy,
+                "trade_date": trade_date,
             })
 
-        # Sort: most recently settled (past close_times) first, future at bottom
-        now_str = datetime.datetime.utcnow().isoformat() + "Z"
-        settled_past = [s for s in settled if (s.get("close_time") or "9999") <= now_str]
-        settled_future = [s for s in settled if (s.get("close_time") or "9999") > now_str]
-        settled_past.sort(key=lambda s: s.get("close_time") or "", reverse=True)
-        settled = settled_past + settled_future
+        # Sort by trade date descending (most recent first)
+        settled.sort(key=lambda s: s.get("trade_date") or "", reverse=True)
 
         total_bets = wins + losses + breakeven
         roi = round(total_pnl / max(0.01, total_wagered) * 100, 1) if total_wagered > 0 else 0
 
-        # Split stats by version — legacy vs v3
-        v3_settled = [s for s in settled if s.get("bot_version", "").startswith("v3")]
-        legacy_settled = [s for s in settled if not s.get("bot_version", "").startswith("v3")]
-        v3_wins = sum(1 for s in v3_settled if s["won"] is True)
-        v3_losses = sum(1 for s in v3_settled if s["won"] is False)
-        v3_pnl = sum(s["pnl_usd"] for s in v3_settled)
-        legacy_wins = sum(1 for s in legacy_settled if s["won"] is True)
-        legacy_losses = sum(1 for s in legacy_settled if s["won"] is False)
-        legacy_pnl = sum(s["pnl_usd"] for s in legacy_settled)
-
-        # Category breakdown — Day 1+ only (skip legacy noise)
+        # Category breakdown
         by_category = {}
-        for s in [x for x in settled if not x.get("is_legacy")]:
+        for s in settled:
             cat = s.get("category", "other")
             if cat not in by_category:
                 by_category[cat] = {"wins": 0, "losses": 0, "pnl_usd": 0, "bets": 0}
@@ -5803,22 +5760,6 @@ def settled_positions():
             "streak_type": current_streak_type or "none",
             "total_bets": total_bets,
             "by_category": by_category,
-            "by_version": {
-                "v3_quant": {
-                    "wins": v3_wins,
-                    "losses": v3_losses,
-                    "win_rate": round(v3_wins / max(1, v3_wins + v3_losses) * 100, 1),
-                    "pnl_usd": round(v3_pnl, 2),
-                    "total_bets": len(v3_settled),
-                },
-                "legacy": {
-                    "wins": legacy_wins,
-                    "losses": legacy_losses,
-                    "win_rate": round(legacy_wins / max(1, legacy_wins + legacy_losses) * 100, 1),
-                    "pnl_usd": round(legacy_pnl, 2),
-                    "total_bets": len(legacy_settled),
-                },
-            },
         }
         _SETTLED_CACHE["data"] = result
         _SETTLED_CACHE["ts"] = now
@@ -12034,18 +11975,8 @@ async function loadSettled() {
     // Filter: only show bets from Day 1 onwards (March 16, 2026)
     var filtered = allSettled;
     if (hideJunk) {
-      var DAY1 = '2026-03-16';
-      filtered = allSettled.filter(function(s) {
-        var ct = s.close_time || '';
-        var now = new Date().toISOString();
-        // If close_time is in the future, this is an old sold position on a still-open market — hide it
-        if (ct && ct > now) return false;
-        // If close_time is before Day 1, it's pre-Day-1 — hide it
-        if (ct && ct.substring(0, 10) < DAY1) return false;
-        // If no close_time at all, keep it (may be a recently settled game bet)
-        // Keep everything else (real Day 1+ settled bets)
-        return true;
-      });
+      // Backend already filters to Day 1+ trades only
+      filtered = allSettled;
     }
     window._settledData = filtered;
 
