@@ -2486,6 +2486,8 @@ LIVE_GAME_SERIES = [
     "KXATPMATCH",          # ATP tennis matches
     "KXWTAMATCH",          # WTA tennis matches
     "KXATPCHALLENGERMATCH", # ATP Challenger tennis
+    "KXNCAAMBGAME",        # NCAA Men's Basketball game winners
+    "KXNCAAWBGAME",        # NCAA Women's Basketball game winners
 ]
 
 # Sniper settings
@@ -3276,9 +3278,12 @@ def closegame_snipe():
             if sport == "nba":
                 is_late = any(p in period for p in ["Q4", "OT", "4th"])
                 max_margin = 8  # NBA: within 8 in Q4
-            elif sport in ("ncaab", "ncaawb"):
+            elif sport == "ncaab":
                 is_late = any(p in period for p in ["2H", "OT", "2nd"])
-                max_margin = 7  # College BB: within 7 in 2H
+                max_margin = 7  # College BB men: within 7 in 2H
+            elif sport == "ncaawb":
+                is_late = any(p in period for p in ["Q3", "Q4", "3rd", "4th", "OT"])
+                max_margin = 7  # College BB women: within 7 in Q3+ (quarters)
             elif sport == "nhl":
                 is_late = any(p in period for p in ["P3", "3rd", "OT"])
                 max_margin = 2  # Hockey: within 2 in P3
@@ -7390,10 +7395,9 @@ def trades_today_endpoint():
             return ts_str[:10] == today_str
 
     all_today = []
+    # Bot trades from trades_today array — already filtered to today (daily reset), skip date check
     for t in bot_trades:
         ts = t.get("timestamp", "") or ""
-        if not _is_today_pacific(ts):
-            continue
         all_today.append({
             "ticker": t.get("ticker", ""),
             "title": t.get("question", t.get("ticker", "")),
@@ -7408,8 +7412,6 @@ def trades_today_endpoint():
         })
     for t in sniper_trades:
         ts = t.get("time", "") or ""
-        if not _is_today_pacific(ts):
-            continue
         all_today.append({
             "ticker": t.get("ticker", ""),
             "title": t.get("title", t.get("ticker", "")),
@@ -7423,8 +7425,6 @@ def trades_today_endpoint():
             "source": "bot",
         })
     for t in quant_trades:
-        if not _is_today_pacific(t.get("time", "") or ""):
-            continue
         if True:
             all_today.append({
                 "ticker": t.get("ticker", ""),
@@ -7441,8 +7441,6 @@ def trades_today_endpoint():
 
     for t in moonshark_trades:
         ts = t.get("time", "") or ""
-        if not _is_today_pacific(ts):
-            continue
         all_today.append({
             "ticker": t.get("ticker", ""),
             "title": t.get("title", t.get("ticker", "")),
@@ -7456,19 +7454,18 @@ def trades_today_endpoint():
             "source": "bot",
         })
     for t in manual_trades:
-        if _is_today_pacific(t.get("time", "") or ""):
-            all_today.append({
-                "ticker": t.get("ticker", ""),
-                "title": t.get("title", t.get("ticker", "")),
-                "side": t.get("side", ""),
-                "price_cents": t.get("price", 0),
-                "count": t.get("count", 0),
-                "cost_usd": round(t.get("cost", 0), 2),
-                "time": t.get("time", ""),
-                "strategy": t.get("strategy", "manual"),
-                "success": True,
-                "source": "you",
-            })
+        all_today.append({
+            "ticker": t.get("ticker", ""),
+            "title": t.get("title", t.get("ticker", "")),
+            "side": t.get("side", ""),
+            "price_cents": t.get("price", 0),
+            "count": t.get("count", 0),
+            "cost_usd": round(t.get("cost", 0), 2),
+            "time": t.get("time", ""),
+            "strategy": t.get("strategy", "manual"),
+            "success": True,
+            "source": "you",
+        })
 
     # Fallback: also check all_trades for today's entries (survives redeploys via Kalshi hydration)
     seen_tickers = set(t.get("ticker", "") for t in all_today)
@@ -7659,8 +7656,9 @@ def _fetch_all_espn_scores():
                     # In-progress
                     if league in ("nba", "ncaab", "ncaawb"):
                         qtr_names = {1: "Q1", 2: "Q2", 3: "Q3", 4: "Q4"}
-                        if league in ("ncaab", "ncaawb"):
+                        if league == "ncaab":
                             qtr_names = {1: "1H", 2: "2H"}
+                        # ncaawb plays quarters (Q1-Q4), same as NBA
                         clock_str = qtr_names.get(period, f"OT{period-4}" if period > 4 else f"Q{period}")
                         if detail:
                             clock_str = f"{detail} {clock_str}"
@@ -11075,7 +11073,7 @@ a:hover { color: #7da5f5; }
   <div class="stat-card"><div class="stat-label">Daily P&L</div><div class="stat-value" id="pf-daily-pl">--</div></div>
   <div class="stat-card"><div class="stat-label">P&amp;L Since Day 1</div><div class="stat-value" id="pf-total-pl">--</div></div>
   <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-value" id="pf-winrate">--</div></div>
-  <div class="stat-card"><div class="stat-label">Today W/L</div><div class="stat-value" id="pf-winrate-7d">--</div></div>
+  <div class="stat-card"><div class="stat-label">W / L</div><div class="stat-value" id="pf-winrate-7d">--</div></div>
   <div class="stat-card" style="cursor:pointer;position:relative" onclick="toggleTodayTrades()"><div class="stat-label">Trades Today</div><div class="stat-value" id="trades-today" style="text-decoration:underline;text-decoration-style:dotted">--</div><div id="today-trades-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;min-width:350px;max-width:500px;background:#111;border:1px solid #333;border-radius:10px;padding:12px;z-index:100;box-shadow:0 8px 24px rgba(0,0,0,0.6);max-height:400px;overflow-y:auto;font-size:10px"></div></div>
 </div>
 
@@ -11730,13 +11728,10 @@ async function loadPortfolio() {
       dailyEl.textContent = (dailyPl >= 0 ? '+' : '') + '$' + Math.abs(dailyPl).toFixed(2);
       dailyEl.style.color = dailyPl >= 0 ? '#00dc5a' : '#ff5000';
     }
-    // Total P&L
+    // Total P&L — use /settled endpoint for Day 1+ accuracy (fetched below for win rate)
     var totalPl = data.total_realized_usd || 0;
     var totalPlEl = document.getElementById('pf-total-pl');
-    if (totalPlEl) {
-      totalPlEl.textContent = (totalPl >= 0 ? '+' : '') + '$' + Math.abs(totalPl).toFixed(2);
-      totalPlEl.style.color = totalPl >= 0 ? '#00dc5a' : '#ff5000';
-    }
+    // Will be updated below with settled data if available
 
     var uPnl = data.total_unrealized_usd || 0;
     var uEl = document.getElementById('pf-unrealized');
@@ -11762,31 +11757,27 @@ async function loadPortfolio() {
         w = settledData.wins || 0;
         l = settledData.losses || 0;
       }
+      // Use settled P&L for Day 1+ total (more accurate than portfolio-summary journal)
+      if (settledData && settledData.total_pnl_usd !== undefined) {
+        totalPl = settledData.total_pnl_usd || 0;
+      }
     } catch(e) { /* keep fallback values from portfolio-summary */ }
+    // Now render P&L Since Day 1 (after settled data is available)
+    if (totalPlEl) {
+      totalPlEl.textContent = (totalPl >= 0 ? '+' : '') + '$' + Math.abs(totalPl).toFixed(2);
+      totalPlEl.style.color = totalPl >= 0 ? '#00dc5a' : '#ff5000';
+    }
     var wrEl = document.getElementById('pf-winrate');
     wrEl.textContent = wr.toFixed(0) + '%';
     wrEl.style.color = wr >= 60 ? '#00dc5a' : wr >= 40 ? '#ffb400' : '#ff5000';
     var wr7d = document.getElementById('pf-winrate-7d');
     if (wr7d) {
-      // Show today's wins/losses count instead of 7d win rate
-      try {
-        var _tdData = await fetch(API + '/trades').then(function(r){return r.json();});
-        var _todayWins = 0, _todayLosses = 0;
-        (_tdData.trades || []).forEach(function(t) {
-          if (t.outcome === 'win') _todayWins++;
-          else if (t.outcome === 'loss') _todayLosses++;
-        });
-        if (_todayWins + _todayLosses > 0) {
-          wr7d.innerHTML = '<span style="color:#00dc5a">' + _todayWins + 'W</span> / <span style="color:#ff5000">' + _todayLosses + 'L</span>';
-        } else {
-          wr7d.textContent = '0W / 0L';
-          wr7d.style.color = '#555';
-        }
-      } catch(e) {
-        if (data.win_rate_7d !== undefined) {
-          wr7d.textContent = data.win_rate_7d + '%';
-          wr7d.style.color = data.win_rate_7d >= 50 ? '#00dc5a' : '#ff5000';
-        }
+      // Show Day 1+ wins/losses from /settled (already fetched above)
+      if (w + l > 0) {
+        wr7d.innerHTML = '<span style="color:#00dc5a">' + w + 'W</span> / <span style="color:#ff5000">' + l + 'L</span>';
+      } else {
+        wr7d.textContent = '0W / 0L';
+        wr7d.style.color = '#555';
       }
     }
     var wrBar = document.getElementById('pf-wrbar');
