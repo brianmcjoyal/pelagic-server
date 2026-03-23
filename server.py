@@ -219,20 +219,30 @@ def _hydrate_from_kalshi():
         if not headers:
             print("[HYDRATE] No API key — skipping")
             return
-        resp = _req.get(
-            KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
-            headers=headers,
-            params={"limit": 200},
-            timeout=15,
-        )
-        if not resp.ok:
-            print(f"[HYDRATE] Fills API returned {resp.status_code}")
-            return
-        fills_data = resp.json()
-        fills = fills_data.get("fills", [])
+        # Paginate to get ALL fills (not just 200)
+        fills = []
+        cursor = None
+        for _page in range(20):  # max 20 pages = 4000 fills
+            params = {"limit": 200}
+            if cursor:
+                params["cursor"] = cursor
+            _ph = signed_headers("GET", path)
+            resp = _req.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
+                headers=_ph, params=params, timeout=15,
+            )
+            if not resp.ok:
+                print(f"[HYDRATE] Fills API returned {resp.status_code} on page {_page}")
+                break
+            fills_data = resp.json()
+            page_fills = fills_data.get("fills", [])
+            fills.extend(page_fills)
+            cursor = fills_data.get("cursor")
+            if not cursor or not page_fills:
+                break
+        print(f"[HYDRATE] Loaded {len(fills)} total fills")
         if fills:
             print(f"[HYDRATE] Sample fill keys: {list(fills[0].keys())}")
-            print(f"[HYDRATE] Sample fill: {_json.dumps(fills[0])[:500]}")
         if not fills:
             print("[HYDRATE] No fills found")
             return
