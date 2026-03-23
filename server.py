@@ -5405,10 +5405,24 @@ def _background_loop():
             "total_realized_usd": 0, "settled_history": [],
         }
         # Warm realized P&L on startup so Total P&L doesn't flash $0.00
+        # Split into "since Day 1" and "legacy" (pre-Day-1 junk)
         _early_realized = 0.0
+        _early_realized_day1 = 0.0  # only since Day 1
         _early_wins = 0
         _early_losses = 0
+        _early_wins_day1 = 0
+        _early_losses_day1 = 0
         try:
+            # Build set of tickers with known buy dates from hydrated trades
+            _buy_dates = {}
+            for _at in BOT_STATE.get("all_trades", []):
+                _atk = _at.get("ticker", "")
+                _ats = _at.get("timestamp", "")[:10]
+                _ata = _at.get("action", "buy")
+                if _atk and _ats and _ata == "buy":
+                    if _atk not in _buy_dates or _ats < _buy_dates[_atk]:
+                        _buy_dates[_atk] = _ats  # earliest buy date
+
             for _esf in ["settled", "unsettled"]:
                 _esh = signed_headers("GET", "/portfolio/positions")
                 _esr = requests.get(
@@ -5423,14 +5437,27 @@ def _background_loop():
                         if _esf == "unsettled" and abs(_epnl_usd) < 0.005:
                             continue
                         _early_realized += _epnl_usd
+                        _etk = _esp.get("ticker", "")
+                        _ebd = _buy_dates.get(_etk, "")
+                        _is_day1 = _ebd >= TRADE_JOURNAL_START if _ebd else False
+
                         if _epnl_usd > 0.005:
                             _early_wins += 1
+                            if _is_day1:
+                                _early_wins_day1 += 1
                         elif _epnl_usd < -0.005:
                             _early_losses += 1
-            _PORTFOLIO_CACHE["data"]["total_realized_usd"] = round(_early_realized, 2)
-            _PORTFOLIO_CACHE["data"]["wins"] = _early_wins
-            _PORTFOLIO_CACHE["data"]["losses"] = _early_losses
-            _PORTFOLIO_CACHE["data"]["win_rate"] = round(_early_wins / max(1, _early_wins + _early_losses) * 100, 1)
+                            if _is_day1:
+                                _early_losses_day1 += 1
+                        if _is_day1:
+                            _early_realized_day1 += _epnl_usd
+
+            _PORTFOLIO_CACHE["data"]["total_realized_usd"] = round(_early_realized_day1, 2)  # Show Day 1+ only
+            _PORTFOLIO_CACHE["data"]["total_realized_all"] = round(_early_realized, 2)  # Keep all-time for reference
+            _PORTFOLIO_CACHE["data"]["wins"] = _early_wins_day1
+            _PORTFOLIO_CACHE["data"]["losses"] = _early_losses_day1
+            _PORTFOLIO_CACHE["data"]["win_rate"] = round(_early_wins_day1 / max(1, _early_wins_day1 + _early_losses_day1) * 100, 1)
+            print(f"[BG] P&L split: Day1+=${_early_realized_day1:+.2f} ({_early_wins_day1}W/{_early_losses_day1}L), All-time=${_early_realized:+.2f}")
         except Exception:
             pass
         _PORTFOLIO_CACHE["ts"] = _time.time()
@@ -5612,7 +5639,8 @@ def _background_loop():
                     "win_rate": _d1_wr,
                     "win_rate_all_time": _wr2,
                     "win_rate_7d": _7d_wr,
-                    "total_realized_usd": round(_realized2, 2),
+                    "total_realized_usd": round(sum(t.get("pnl", 0) for t in _TRADE_JOURNAL) if _TRADE_JOURNAL else _realized2, 2),
+                    "total_realized_all": round(_realized2, 2),
                     "settled_history": _settled_list2[-20:],
                 }
                 _PORTFOLIO_CACHE["ts"] = _time.time()
@@ -11045,7 +11073,7 @@ a:hover { color: #7da5f5; }
   <div class="stat-card"><div class="stat-label">Cash</div><div class="stat-value" id="pf-cash">--</div></div>
   <div class="stat-card"><div class="stat-label">Invested</div><div class="stat-value" id="pf-invested">--</div></div>
   <div class="stat-card"><div class="stat-label">Daily P&L</div><div class="stat-value" id="pf-daily-pl">--</div></div>
-  <div class="stat-card"><div class="stat-label">Total P&L</div><div class="stat-value" id="pf-total-pl">--</div></div>
+  <div class="stat-card"><div class="stat-label">P&amp;L Since Day 1</div><div class="stat-value" id="pf-total-pl">--</div></div>
   <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-value" id="pf-winrate">--</div></div>
   <div class="stat-card"><div class="stat-label">Today W/L</div><div class="stat-value" id="pf-winrate-7d">--</div></div>
   <div class="stat-card" style="cursor:pointer;position:relative" onclick="toggleTodayTrades()"><div class="stat-label">Trades Today</div><div class="stat-value" id="trades-today" style="text-decoration:underline;text-decoration-style:dotted">--</div><div id="today-trades-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;min-width:350px;max-width:500px;background:#111;border:1px solid #333;border-radius:10px;padding:12px;z-index:100;box-shadow:0 8px 24px rgba(0,0,0,0.6);max-height:400px;overflow-y:auto;font-size:10px"></div></div>
