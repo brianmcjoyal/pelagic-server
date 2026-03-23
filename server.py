@@ -5165,10 +5165,10 @@ def _background_loop():
                 _PORTFOLIO_CACHE["ts"] = _time.time()
             except Exception:
                 pass
-            # Enhanced auto-exit with trailing stops
-            exits = enhanced_auto_exit()
-            if not exits:
-                exits = auto_exit_check()
+            # Auto-exit DISABLED — all positions settle naturally at $0 or $1
+            # Prediction markets aren't stocks; trailing stops just sell winners early
+            # exits = enhanced_auto_exit()
+            # exits = auto_exit_check()
         except Exception as e:
             import traceback
             _log_activity(f"Background error: {str(e)[:80]}", "error")
