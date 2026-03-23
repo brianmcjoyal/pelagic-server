@@ -7637,7 +7637,7 @@ def volatility_view():
 
 @app.route("/trades")
 def trades():
-    # Build settlement lookup from trade journal
+    # Build settlement lookup from trade journal AND Kalshi positions
     settle_map = {}
     for jt in _TRADE_JOURNAL:
         if jt.get("result"):
@@ -7645,6 +7645,28 @@ def trades():
                 "result": jt["result"],
                 "pnl_usd": jt.get("pnl_usd", 0),
             }
+    # Also check Kalshi positions for realized P&L (more reliable after restarts)
+    try:
+        for _status in ["settled", "unsettled"]:
+            _ph = signed_headers("GET", "/portfolio/positions")
+            if _ph:
+                _pr = requests.get(
+                    KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/positions",
+                    headers=_ph, params={"limit": 200, "settlement_status": _status},
+                    timeout=8,
+                )
+                if _pr.ok:
+                    for _pp in _pr.json().get("market_positions", []):
+                        _ptk = _pp.get("ticker", "")
+                        _ppnl = _parse_kalshi_dollars(_pp.get("realized_pnl_dollars") or _pp.get("realized_pnl"))
+                        _ppnl_usd = _ppnl / 100
+                        if _ptk and abs(_ppnl_usd) > 0.005 and _ptk not in settle_map:
+                            settle_map[_ptk] = {
+                                "result": "win" if _ppnl_usd > 0 else "loss",
+                                "pnl_usd": round(_ppnl_usd, 2),
+                            }
+    except Exception:
+        pass
     # Enrich all_trades with settlement outcome
     enriched = []
     for t in BOT_STATE["all_trades"]:
@@ -7656,6 +7678,8 @@ def trades():
         else:
             tc["outcome"] = None
         enriched.append(tc)
+    # Sort by timestamp descending (most recent first)
+    enriched.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
     return jsonify({
         "total": len(enriched),
         "today": len(BOT_STATE["trades_today"]),
@@ -11595,7 +11619,7 @@ async function loadTrades() {
       return;
     }
     let html = '<table><tr><th>Time</th><th>Market</th><th>Side</th><th>Qty</th><th>Cost</th><th>Deviation</th><th>Result</th><th>Source</th></tr>';
-    data.trades.slice().reverse().forEach(t => {
+    data.trades.forEach(t => {
       var time = '--';
       if (t.timestamp) {
         try {
