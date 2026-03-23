@@ -2049,7 +2049,7 @@ def check_position_prices():
             for jt in reversed(_TRADE_JOURNAL):
                 if jt.get("ticker") == ticker and jt.get("side") == side:
                     strat = jt.get("strategy", "")
-                    if strat in ("moonshark", "live_sniper", "consensus_mispricing", "arb"):
+                    if strat in ("moonshark", "live_sniper", "consensus_mispricing", "arb", "closegame"):
                         placed_by = "bot"
                     elif strat in ("moonshark_manual", "manual", "quant"):
                         placed_by = "you"
@@ -2062,7 +2062,7 @@ def check_position_prices():
                     if at.get("ticker") == ticker:
                         if at.get("manual"):
                             placed_by = "you"
-                        elif at.get("strategy") in ("moonshark", "live_sniper", "consensus_mispricing", "arb"):
+                        elif at.get("strategy") in ("moonshark", "live_sniper", "consensus_mispricing", "arb", "closegame"):
                             placed_by = "bot"
                         break
             # 3) Check today's bot trade lists (survives journal wipe on restart)
@@ -3133,6 +3133,301 @@ def moonshark_snipe():
         total_cost = sum(s["cost"] for s in snipes)
         total_potential = sum(s["potential"] for s in snipes)
         _log_activity(f"MOONSHARK round: {len(snipes)} trades, ${total_cost:.2f} invested, potential +${total_potential:.2f}", "success")
+        _save_state()
+
+    return snipes
+
+
+# ---------------------------------------------------------------------------
+# Close-Game Sniper — buy underdogs in tight late-game situations
+# ---------------------------------------------------------------------------
+CLOSEGAME_MAX_DAILY = 30.0   # max $30/day on close-game bets
+CLOSEGAME_MAX_TRADES = 8     # max 8 close-game trades per day
+CLOSEGAME_MIN_PRICE = 25     # buy at 25-45c (higher probability than MoonShark)
+CLOSEGAME_MAX_PRICE = 45
+
+def closegame_snipe():
+    """Buy underdogs in live, close games (within 5 points in late game).
+    Strategy: Kalshi prices lag live action. A team down 2 in Q4 at 35c
+    is often mispriced — real win probability is closer to 40-45%.
+    Key: ONLY bet when the game is tight AND late."""
+    if not BOT_CONFIG.get("enabled"):
+        return []
+    if not BOT_CONFIG.get("closegame_enabled", True):
+        return []
+
+    # Daily reset
+    today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+    if BOT_STATE.get("closegame_date") != today:
+        BOT_STATE["closegame_date"] = today
+        BOT_STATE["closegame_trades_today"] = []
+        BOT_STATE["closegame_daily_spent"] = 0.0
+
+    if BOT_STATE.get("closegame_daily_spent", 0) >= CLOSEGAME_MAX_DAILY:
+        return []
+    if len(BOT_STATE.get("closegame_trades_today", [])) >= CLOSEGAME_MAX_TRADES:
+        return []
+
+    # Check balance
+    bal = 0
+    try:
+        bal_h = signed_headers("GET", "/portfolio/balance")
+        bal_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
+                             headers=bal_h, timeout=TIMEOUT)
+        if bal_r.ok:
+            bal = bal_r.json().get("balance", 0) / 100
+            if bal < BOT_CONFIG.get("min_balance_usd", 200):
+                return []
+    except Exception:
+        return []
+
+    # Get existing positions
+    existing_tickers = set()
+    existing_events = set()
+    try:
+        positions = check_position_prices()
+        for p in positions:
+            existing_tickers.add(p.get("ticker", ""))
+            parts = p.get("ticker", "").split("-")
+            if parts:
+                existing_events.add(parts[0])
+    except Exception:
+        pass
+
+    # Get live scores
+    try:
+        scores = _fetch_all_espn_scores()
+    except Exception:
+        return []
+    if not scores:
+        return []
+
+    # Find games that are LIVE, CLOSE, and LATE
+    close_games = []
+    for sport, games in scores.items():
+        for game in games:
+            if game.get("state") != "in":
+                continue
+            home_score = int(game.get("home_score", 0))
+            away_score = int(game.get("away_score", 0))
+            margin = abs(home_score - away_score)
+            period = game.get("clock", "")
+
+            # Define "late game" by sport
+            is_late = False
+            if sport == "nba":
+                is_late = any(p in period for p in ["Q4", "OT", "4th"])
+                max_margin = 8  # NBA: within 8 in Q4
+            elif sport in ("ncaab", "ncaawb"):
+                is_late = any(p in period for p in ["2H", "OT", "2nd"])
+                max_margin = 7  # College BB: within 7 in 2H
+            elif sport == "nhl":
+                is_late = any(p in period for p in ["P3", "3rd", "OT"])
+                max_margin = 2  # Hockey: within 2 in P3
+            elif sport == "mlb":
+                # Check inning number
+                try:
+                    inning = int(''.join(c for c in period if c.isdigit()) or "0")
+                    is_late = inning >= 7
+                except Exception:
+                    is_late = False
+                max_margin = 3  # Baseball: within 3 in 7th+
+            else:
+                max_margin = 5
+                is_late = True  # default: any live game
+
+            if is_late and margin <= max_margin:
+                # Determine which team is the underdog (trailing)
+                if home_score < away_score:
+                    underdog = game.get("home_abbrev", "")
+                    underdog_name = game.get("home_name", "")
+                elif away_score < home_score:
+                    underdog = game.get("away_abbrev", "")
+                    underdog_name = game.get("away_name", "")
+                else:
+                    # Tied game — both sides are ~50/50, skip (no mispricing)
+                    continue
+
+                close_games.append({
+                    "sport": sport,
+                    "game": game,
+                    "underdog": underdog,
+                    "underdog_name": underdog_name,
+                    "margin": margin,
+                    "period": period,
+                    "home": game.get("home_abbrev", ""),
+                    "away": game.get("away_abbrev", ""),
+                    "home_score": home_score,
+                    "away_score": away_score,
+                })
+
+    if not close_games:
+        return []
+
+    _log_activity(f"CLOSEGAME: Found {len(close_games)} close late games", "info")
+
+    # Now find Kalshi markets for these close games
+    snipes = []
+    for cg in close_games:
+        if BOT_STATE.get("closegame_daily_spent", 0) >= CLOSEGAME_MAX_DAILY:
+            break
+        if len(BOT_STATE.get("closegame_trades_today", [])) >= CLOSEGAME_MAX_TRADES:
+            break
+
+        underdog = cg["underdog"].upper()
+        # Search for Kalshi market matching this game
+        try:
+            mh = signed_headers("GET", "/markets")
+            # Search for the game ticker
+            sport_prefix_map = {
+                "nba": "KXNBAGAME", "ncaab": "KXNCAAMBGAME", "ncaawb": "KXNCAAWBGAME",
+                "nhl": "KXNHLGAME", "mlb": "KXMLBGAME",
+            }
+            prefix = sport_prefix_map.get(cg["sport"])
+            if not prefix:
+                continue
+
+            today_str = datetime.datetime.utcnow().strftime("%d%b%y").upper()  # e.g., 22MAR26
+            # Try to find the market
+            params = {"limit": 50, "status": "open", "ticker_contains": prefix}
+            resp = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + "/markets",
+                headers=mh,
+                params=params,
+                timeout=8,
+            )
+            if not resp.ok:
+                continue
+
+            markets = resp.json().get("markets", [])
+
+            for mkt in markets:
+                ticker = mkt.get("ticker", "")
+                title = mkt.get("title", "")
+
+                # Match the underdog team to the ticker
+                if underdog not in ticker.upper():
+                    continue
+
+                if ticker in existing_tickers:
+                    continue
+                event_key = ticker.split("-")[0] if ticker else ""
+                if event_key in existing_events:
+                    continue
+
+                # Parse prices
+                yes_ask = None
+                no_ask = None
+                try:
+                    ya = mkt.get("yes_ask_dollars") or mkt.get("yes_ask")
+                    if ya:
+                        yes_ask = int(round(float(str(ya)) * 100))
+                    na = mkt.get("no_ask_dollars") or mkt.get("no_ask")
+                    if na:
+                        no_ask = int(round(float(str(na)) * 100))
+                except Exception:
+                    continue
+
+                # Find side where underdog wins at our price range
+                side = None
+                price = None
+                # The underdog ticker usually means YES on that team
+                if yes_ask and CLOSEGAME_MIN_PRICE <= yes_ask <= CLOSEGAME_MAX_PRICE:
+                    side = "yes"
+                    price = yes_ask
+                elif no_ask and CLOSEGAME_MIN_PRICE <= no_ask <= CLOSEGAME_MAX_PRICE:
+                    side = "no"
+                    price = no_ask
+
+                if not side:
+                    continue
+
+                # Calculate real edge based on game state
+                # Teams down 1-3 in late game win ~35-42% of the time
+                # Teams tied would be 50% but we skip ties
+                estimated_win_prob = 0.35  # baseline for close trailing team
+                if cg["margin"] <= 2:
+                    estimated_win_prob = 0.42  # very close
+                elif cg["margin"] <= 5:
+                    estimated_win_prob = 0.35
+                else:
+                    estimated_win_prob = 0.28
+
+                kalshi_implied = price / 100.0
+                edge = estimated_win_prob - kalshi_implied
+
+                if edge < 0.03:
+                    _log_activity(
+                        f"CLOSEGAME SKIP: {title[:35]} — thin edge ({estimated_win_prob:.0%} vs {kalshi_implied:.0%})",
+                        "info"
+                    )
+                    continue
+
+                # Size the bet
+                remaining = CLOSEGAME_MAX_DAILY - BOT_STATE.get("closegame_daily_spent", 0)
+                profit_if_win = (100 - price) / 100.0
+                odds_decimal = profit_if_win / (price / 100.0)
+                kelly_usd = kelly_bet_size(remaining, estimated_win_prob, odds_decimal)
+                bet_usd = max(3.0, min(kelly_usd, remaining / max(1, CLOSEGAME_MAX_TRADES - len(BOT_STATE.get("closegame_trades_today", []))), remaining))
+                bet_usd = min(bet_usd, BOT_CONFIG["max_bet_usd"], remaining)
+                count = max(1, int(bet_usd * 100 / price))
+                cost_usd = (price * count) / 100.0
+
+                score_str = f"{cg['away']} {cg['away_score']} - {cg['home']} {cg['home_score']} {cg['period']}"
+                _log_activity(
+                    f"🎯 CLOSEGAME: {side.upper()} {ticker} @ {price}c x{count} "
+                    f"(${cost_usd:.2f}) | {score_str} | edge={edge:.0%} winP={estimated_win_prob:.0%}",
+                    "info"
+                )
+
+                result = place_kalshi_order(ticker, side, price, count=count)
+                success = "error" not in result
+
+                if success:
+                    order_data = result.get("order", {})
+                    filled = 0
+                    try:
+                        filled = int(float(str(order_data.get("filled_count_fp") or order_data.get("filled_count") or 0)))
+                    except Exception:
+                        pass
+
+                    if filled > 0:
+                        actual_cost = (price * filled) / 100.0
+                        potential = (100 - price) * filled / 100.0
+                        BOT_STATE["closegame_daily_spent"] = BOT_STATE.get("closegame_daily_spent", 0) + actual_cost
+                        BOT_STATE.setdefault("closegame_trades_today", []).append({
+                            "ticker": ticker, "title": title, "side": side,
+                            "price": price, "count": filled, "cost": actual_cost,
+                            "potential_profit": potential,
+                            "time": datetime.datetime.utcnow().isoformat(),
+                            "strategy": "closegame",
+                            "score": score_str,
+                            "margin": cg["margin"],
+                            "period": cg["period"],
+                        })
+                        _journal_trade(ticker, title, side, price, filled, actual_cost, "closegame", is_live=True, close_time=mkt.get("close_time", ""))
+                        _log_activity(
+                            f"🎯 CLOSEGAME HIT! {side.upper()} {underdog} @ {price}c x{filled} "
+                            f"= ${actual_cost:.2f} (potential +${potential:.2f}) | {score_str}",
+                            "success"
+                        )
+                        snipes.append({"ticker": ticker, "filled": filled, "cost": actual_cost, "potential": potential})
+                        existing_tickers.add(ticker)
+                        existing_events.add(event_key)
+                    else:
+                        _log_activity(f"CLOSEGAME missed: {ticker} — 0 filled at {price}c", "error")
+                else:
+                    err = result.get("error", "")[:60]
+                    _log_activity(f"CLOSEGAME failed: {ticker} — {err}", "error")
+
+        except Exception as e:
+            print(f"[CLOSEGAME] Error: {e}")
+            continue
+
+    if snipes:
+        total_cost = sum(s["cost"] for s in snipes)
+        total_potential = sum(s["potential"] for s in snipes)
+        _log_activity(f"🎯 CLOSEGAME round: {len(snipes)} trades, ${total_cost:.2f} invested, potential +${total_potential:.2f}", "success")
         _save_state()
 
     return snipes
@@ -5124,6 +5419,9 @@ def _background_loop():
             _time.sleep(2)  # yield to web requests
             # MoonShark — longshot underdog sniper (10-30c contracts)
             moonshark_snipe()
+            _time.sleep(2)  # yield to web requests
+            # Close-Game Sniper — buy underdogs in tight late games (25-45c)
+            closegame_snipe()
             _time.sleep(2)  # yield to web requests
             # QUANT ENGINE DISABLED — mean reversion + market making lost money
             # Keep volatility tracking for data, but don't place trades
