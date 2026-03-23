@@ -12157,53 +12157,40 @@ async function loadSettled() {
     } else {
       // Server already sorts: past close_times first (newest), future at bottom
       // No client-side re-sort needed
-      var tbl = '<table style="width:100%;border-collapse:collapse;font-size:10px">';
-      tbl += '<tr style="color:#888;border-bottom:1px solid #333;text-align:left">';
-      tbl += '<th style="padding:6px 4px">Settled</th><th style="padding:6px 4px">Market</th><th style="padding:6px 4px">Side</th><th style="padding:6px 4px">Entry</th><th style="padding:6px 4px">P&amp;L</th><th style="padding:6px 4px">Result</th>';
-      tbl += '</tr>';
-      function timeAgo(dateStr) {
-        if (!dateStr) return '';
-        try {
-          var d = new Date(dateStr);
-          var now = new Date();
-          var diffMs = now - d;
-          if (diffMs < 0) return '';
-          var mins = Math.floor(diffMs / 60000);
-          if (mins < 60) return mins + 'm ago';
-          var hrs = Math.floor(mins / 60);
-          if (hrs < 24) return hrs + 'h ago';
-          var days = Math.floor(hrs / 24);
-          if (days === 1) return 'Yesterday';
-          if (days < 7) return days + 'd ago';
-          if (days < 30) return Math.floor(days / 7) + 'w ago';
-          return Math.floor(days / 30) + 'mo ago';
-        } catch(e) { return ''; }
-      }
+      var tbl = '<div style="display:flex;flex-direction:column;gap:4px">';
       settled.forEach(function(s) {
-        var rc = s.won === true ? '#00dc5a' : s.won === false ? '#ff5000' : '#888';
-        var rl = s.won === true ? 'WIN' : s.won === false ? 'LOSS' : 'EVEN';
-        var badge = s.won === true ? 'background:rgba(0,220,90,0.12);color:#00dc5a' : s.won === false ? 'background:rgba(255,80,0,0.12);color:#ff5000' : 'background:rgba(136,136,136,0.12);color:#888';
-        var sideC = s.side === 'yes' ? '#00dc5a' : s.side === 'no' ? '#ff5000' : '#888';
-        var dateStr = '--';
-        var ago = '';
+        var isWin = s.won === true;
+        var isLoss = s.won === false;
+        var pnlAbs = Math.abs(s.pnl_usd).toFixed(2);
+        var borderColor = isWin ? '#00dc5a' : isLoss ? '#ff5000' : '#555';
+        var pnlColor = isWin ? '#00dc5a' : isLoss ? '#ff5000' : '#888';
+        var pnlSign = isWin ? '+$' : '-$';
+        var resultLabel = isWin ? 'WON' : isLoss ? 'LOST' : 'EVEN';
+        var bgColor = isWin ? 'rgba(0,220,90,0.06)' : isLoss ? 'rgba(255,80,0,0.06)' : 'rgba(50,50,50,0.3)';
+        var dateStr = '';
         if (s.close_time) {
           try {
             var dt = new Date(s.close_time);
-            dateStr = dt.toLocaleDateString('en-US', {month:'short', day:'numeric'});
-            ago = timeAgo(s.close_time);
-          } catch(e) { dateStr = s.close_time.substring(0, 10); }
+            var now = new Date();
+            var diffH = Math.floor((now - dt) / 3600000);
+            if (diffH < 1) dateStr = 'Just now';
+            else if (diffH < 24) dateStr = diffH + 'h ago';
+            else if (diffH < 48) dateStr = 'Yesterday';
+            else dateStr = dt.toLocaleDateString('en-US', {month:'short', day:'numeric'});
+          } catch(e) {}
         }
-        var entryStr = s.entry_cents ? s.entry_cents + String.fromCharCode(162) + (s.count ? ' x' + s.count : '') : '--';
-        tbl += '<tr style="border-bottom:1px solid #1a1a1a">';
-        tbl += '<td style="padding:6px 4px;color:#888;white-space:nowrap">' + dateStr + (ago ? '<br><span style="color:#555;font-size:8px">' + ago + '</span>' : '') + '</td>';
-        tbl += '<td style="padding:6px 4px;color:#ddd;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + s.title + '</td>';
-        tbl += '<td style="padding:6px 4px;color:' + sideC + ';font-weight:600">' + (s.side || '--').toUpperCase() + '</td>';
-        tbl += '<td style="padding:6px 4px;color:#ccc">' + entryStr + '</td>';
-        tbl += '<td style="padding:6px 4px;color:' + rc + ';font-weight:700">' + (s.pnl_usd >= 0 ? '+' : '') + '$' + Math.abs(s.pnl_usd).toFixed(2) + '</td>';
-        tbl += '<td style="padding:6px 4px"><span style="' + badge + ';padding:2px 8px;border-radius:4px;font-size:9px;font-weight:700">' + rl + '</span></td>';
-        tbl += '</tr>';
+        var costStr = s.total_traded ? '$' + s.total_traded.toFixed(2) : '';
+        tbl += '<div style="background:' + bgColor + ';border-left:3px solid ' + borderColor + ';padding:8px 12px;border-radius:4px;display:flex;justify-content:space-between;align-items:center">';
+        tbl += '<div style="flex:1;min-width:0">';
+        tbl += '<div style="color:#ddd;font-size:11px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + s.title + '</div>';
+        tbl += '<div style="color:#888;font-size:9px;margin-top:2px">' + dateStr + (costStr ? ' · Bet ' + costStr : '') + (s.category ? ' · ' + s.category : '') + '</div>';
+        tbl += '</div>';
+        tbl += '<div style="text-align:right;margin-left:12px;flex-shrink:0">';
+        tbl += '<div style="color:' + pnlColor + ';font-size:14px;font-weight:800">' + pnlSign + pnlAbs + '</div>';
+        tbl += '<div style="color:' + pnlColor + ';font-size:9px;font-weight:600">' + resultLabel + '</div>';
+        tbl += '</div></div>';
       });
-      tbl += '</table>';
+      tbl += '</div>';
       if (hiddenCount > 0) {
         tbl += '<div style="color:#555;font-size:9px;padding:6px 4px">' + hiddenCount + ' old penny bot trades hidden (uncheck toggle to show all)</div>';
       }
