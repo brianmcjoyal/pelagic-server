@@ -1796,7 +1796,7 @@ def find_consensus_mispricings(all_markets):
 # Kalshi order placement (NEW)
 # ---------------------------------------------------------------------------
 
-def place_kalshi_order(ticker, side, price_cents, count=1):
+def place_kalshi_order(ticker, side, price_cents, count=1, action="buy"):
     path = "/portfolio/orders"
     headers = signed_headers("POST", path)
     if not headers:
@@ -1806,7 +1806,7 @@ def place_kalshi_order(ticker, side, price_cents, count=1):
     price_dollars = f"{price_cents / 100:.4f}"
     payload = {
         "ticker": ticker,
-        "action": "buy",
+        "action": action,
         "side": side,
         "type": "limit",
         "count_fp": f"{int(count)}.00",
@@ -5580,9 +5580,23 @@ def _ensure_bg_thread():
     def _closegame_loop():
         _time.sleep(60)  # wait for main loop to warm up first
         print("[CLOSEGAME] Fast sniper thread started (10s interval)")
+        _cg_cycle = 0
         while True:
             try:
+                _cg_cycle += 1
                 closegame_snipe()
+                # Blowout exit every 30s (every 3rd cycle)
+                if _cg_cycle % 3 == 0:
+                    _blowout_exit()
+                # Game monitor every 60s (every 6th cycle)
+                if _cg_cycle % 6 == 0:
+                    _monitor_live_games()
+                # Price tracking every 60s (every 6th cycle, offset)
+                if _cg_cycle % 6 == 3:
+                    _track_prices()
+                # Arbitrage check every 2 min (every 12th cycle)
+                if _cg_cycle % 12 == 0:
+                    _check_arbitrage()
             except Exception as e:
                 print(f"[CLOSEGAME] Error: {e}")
             _time.sleep(10)
@@ -7795,6 +7809,270 @@ def _check_blowout(ticker, title, bet_team_abbrev=None):
 
 # ── Live Game Monitor ────────────────────────────────────────────────
 _game_score_tracker = {}  # {ticker: {"last_score": "MIL 45 - PHX 52", "last_state": "in", "alerts": []}}
+
+# ── Price Movement Tracker ────────────────────────────────────────────
+_price_history = {}  # {ticker: [(timestamp, yes_price), ...]} — last 10 readings
+
+def _track_prices():
+    """Track Kalshi price movements for game markets. Detect sharp moves."""
+    try:
+        # Get markets from cache
+        markets = _market_cache.get("data") or []
+        if not markets:
+            return
+        now = _time.time()
+        alerts = []
+        for m in markets:
+            ticker = m.get("ticker") or m.get("id") or ""
+            if not ticker:
+                continue
+            # Only track game markets
+            t_upper = ticker.upper()
+            if not any(kw in t_upper for kw in ["GAME", "MATCH", "FIGHT"]):
+                continue
+
+            yes_price = 0
+            try:
+                ya = m.get("yes_ask_cents") or m.get("yes_ask") or m.get("yes", 0)
+                if isinstance(ya, float) and ya < 1:
+                    yes_price = int(round(ya * 100))
+                else:
+                    yes_price = int(ya)
+            except Exception:
+                continue
+
+            if yes_price <= 0 or yes_price >= 100:
+                continue
+
+            # Add to history
+            if ticker not in _price_history:
+                _price_history[ticker] = []
+            history = _price_history[ticker]
+            history.append((now, yes_price))
+            # Keep last 10 readings (~10 minutes at 60s intervals)
+            _price_history[ticker] = history[-10:]
+
+            # Need at least 3 readings to detect movement
+            if len(history) < 3:
+                continue
+
+            # Check price change over last 5 minutes
+            old_readings = [p for t, p in history if now - t >= 180]  # 3+ min ago
+            if not old_readings:
+                continue
+            old_price = old_readings[0]
+            price_change = yes_price - old_price
+
+            # Alert on significant moves (10c+ in either direction)
+            if abs(price_change) >= 10:
+                title = m.get("title", ticker)[:40]
+                direction = "📈" if price_change > 0 else "📉"
+                _log_activity(
+                    f"{direction} PRICE MOVE: {title} — {old_price}c → {yes_price}c ({price_change:+d}c in {len(history)} readings)",
+                    "info"
+                )
+                alerts.append({"ticker": ticker, "change": price_change, "price": yes_price})
+
+        # Cleanup old tickers (>1 hour stale)
+        stale = [t for t, h in _price_history.items() if h and now - h[-1][0] > 3600]
+        for t in stale:
+            del _price_history[t]
+
+        return alerts
+    except Exception as e:
+        print(f"[PRICE_TRACK] Error: {e}")
+        return []
+
+
+def _check_arbitrage():
+    """Find markets where YES + NO < 100c (guaranteed profit).
+    Buy both sides, guaranteed payout of $1, cost less than $1."""
+    if not BOT_CONFIG.get("enabled"):
+        return []
+
+    markets = _market_cache.get("data") or []
+    if not markets:
+        return []
+
+    arbs = []
+    for m in markets:
+        ticker = m.get("ticker") or m.get("id") or ""
+        if not ticker:
+            continue
+
+        yes_ask = 0
+        no_ask = 0
+        try:
+            ya = m.get("yes_ask_cents") or m.get("yes_ask") or 0
+            na = m.get("no_ask_cents") or m.get("no_ask") or 0
+            if isinstance(ya, float) and ya < 1:
+                yes_ask = int(round(ya * 100))
+            else:
+                yes_ask = int(ya)
+            if isinstance(na, float) and na < 1:
+                no_ask = int(round(na * 100))
+            else:
+                no_ask = int(na)
+        except Exception:
+            continue
+
+        if yes_ask <= 0 or no_ask <= 0:
+            continue
+
+        total = yes_ask + no_ask
+        if total < 98:  # At least 2c profit guaranteed
+            gap = 100 - total
+            title = m.get("title", ticker)[:40]
+            _log_activity(
+                f"💰 ARBITRAGE: {title} — YES {yes_ask}c + NO {no_ask}c = {total}c (gap={gap}c FREE)",
+                "success"
+            )
+            # Buy both sides
+            max_contracts = min(50, int(BOT_CONFIG.get("max_bet_usd", 5) * 100 / total))
+            if max_contracts > 0:
+                try:
+                    res_yes = place_kalshi_order(ticker, "yes", yes_ask, count=max_contracts)
+                    res_no = place_kalshi_order(ticker, "no", no_ask, count=max_contracts)
+                    yes_filled = int(float(str(res_yes.get("order", {}).get("filled_count_fp") or 0)))
+                    no_filled = int(float(str(res_no.get("order", {}).get("filled_count_fp") or 0)))
+                    filled = min(yes_filled, no_filled)
+                    if filled > 0:
+                        cost = (yes_ask + no_ask) * filled / 100.0
+                        profit = gap * filled / 100.0
+                        _log_activity(
+                            f"💰 ARB HIT! {ticker} x{filled} — cost ${cost:.2f}, guaranteed profit ${profit:.2f}",
+                            "success"
+                        )
+                        arbs.append({"ticker": ticker, "filled": filled, "profit": profit})
+                except Exception as e:
+                    print(f"[ARB] Order error: {e}")
+
+    return arbs
+
+
+def _blowout_exit():
+    """Sell positions where our team is getting destroyed to salvage capital.
+    Only sells game positions where deficit is severe in late game.
+    Better to get 2-3c back than ride to guaranteed $0."""
+    if not BOT_CONFIG.get("enabled"):
+        return
+    if not BOT_CONFIG.get("blowout_exit_enabled", True):
+        return
+
+    try:
+        positions = check_position_prices()
+    except Exception:
+        return
+
+    # Filter to game positions only
+    game_positions = [p for p in positions if any(x in (p.get("ticker") or "").upper() for x in ["GAME", "MATCH", "FIGHT"])]
+    if not game_positions:
+        return
+
+    scores = _fetch_all_espn_scores()
+    if not scores:
+        return
+
+    for pos in game_positions:
+        ticker = pos.get("ticker", "")
+        title = pos.get("title", ticker)
+        side = pos.get("side", "yes")
+        count = pos.get("count", 0)
+        current_price = pos.get("current_price", 0)
+
+        if count <= 0:
+            continue
+
+        # Only consider selling if price has dropped significantly (under 8c)
+        if current_price > 8:
+            continue
+
+        # Find the game score
+        teams = _extract_teams_from_title(title)
+        game = _find_game_for_teams(teams, scores)
+        if not game:
+            continue
+
+        state = game.get("state", "")
+        if state != "in":
+            continue  # only sell during live games, not pre-game
+
+        home_score = int(game.get("home_score", 0))
+        away_score = int(game.get("away_score", 0))
+        bet_team = ticker.split("-")[-1].upper() if "-" in ticker else ""
+
+        our_score = home_score if game.get("home_abbrev", "").upper() == bet_team else away_score
+        their_score = away_score if game.get("home_abbrev", "").upper() == bet_team else home_score
+        deficit = their_score - our_score
+        period = game.get("clock", "")
+
+        # Define blowout thresholds by sport (more aggressive than buy filter)
+        is_hopeless = False
+        sport = ""
+        for s in ["nba", "ncaab", "nhl", "mlb"]:
+            if s in title.lower() or s in ticker.lower():
+                sport = s
+                break
+
+        if "NBA" in ticker.upper() or "NBAGAME" in ticker.upper():
+            # NBA: down 20+ in Q3/Q4, or down 15+ in Q4
+            if deficit >= 20 and any(p in period for p in ["Q3", "Q4", "3rd", "4th"]):
+                is_hopeless = True
+            elif deficit >= 15 and any(p in period for p in ["Q4", "4th", "OT"]):
+                is_hopeless = True
+        elif "NCAA" in ticker.upper():
+            # College BB: down 18+ in 2H, or down 12+ with <5 min
+            if deficit >= 18 and any(p in period for p in ["2H", "2nd"]):
+                is_hopeless = True
+            elif deficit >= 12 and any(p in period for p in ["2H", "2nd"]):
+                # Check if late in half (rough estimate)
+                is_hopeless = True
+        elif "NHL" in ticker.upper():
+            # Hockey: down 4+ in P3
+            if deficit >= 4 and any(p in period for p in ["P3", "3rd", "OT"]):
+                is_hopeless = True
+        elif "MLB" in ticker.upper():
+            # Baseball: down 7+ in 7th+
+            try:
+                inning = int(''.join(c for c in period if c.isdigit()) or "0")
+                if deficit >= 7 and inning >= 7:
+                    is_hopeless = True
+            except Exception:
+                pass
+
+        if not is_hopeless:
+            continue
+
+        # This position is hopeless — sell to salvage whatever we can
+        score_str = _format_score_string(game)
+        sell_side = "no" if side == "yes" else "yes"
+        # Sell at market (1c) to guarantee exit
+        sell_price = max(1, current_price - 1)
+
+        _log_activity(
+            f"💀 BLOWOUT EXIT: Selling {ticker} — down {deficit} in {period} | {score_str} | salvaging {count} contracts @ ~{current_price}c",
+            "warning"
+        )
+
+        try:
+            result = place_kalshi_order(ticker, side, sell_price, count=count, action="sell")
+            if "error" not in result:
+                order_data = result.get("order", {})
+                filled = 0
+                try:
+                    filled = int(float(str(order_data.get("filled_count_fp") or order_data.get("filled_count") or 0)))
+                except Exception:
+                    pass
+                if filled > 0:
+                    salvaged = (sell_price * filled) / 100.0
+                    _log_activity(
+                        f"💀 BLOWOUT EXIT DONE: Sold {filled}x {ticker} — salvaged ${salvaged:.2f}",
+                        "info"
+                    )
+                    _save_state()
+        except Exception as e:
+            print(f"[BLOWOUT_EXIT] Sell error: {e}")
+
 
 def _monitor_live_games():
     """Monitor live scores for active game positions. Log momentum shifts."""
