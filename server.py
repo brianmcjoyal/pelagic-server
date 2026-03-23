@@ -36,6 +36,7 @@ KALSHI_API_KEY_ID = os.environ.get("KALSHI_API_KEY_ID", "b5321140-8a40-47f5-a99e
 KALSHI_BASE_URL   = "https://api.elections.kalshi.com"
 KALSHI_API_PREFIX  = "/trade-api/v2"
 PRIVATE_KEY_PEM = os.environ.get("KALSHI_PRIVATE_KEY", "")
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
 PLATFORM_FEES = {
     "kalshi":     0.07,
@@ -91,6 +92,42 @@ BOT_STATE = {
     "activity_log": [],  # live feed of bot actions (last 50)
 }
 
+def _send_discord(msg, color=0x00dc5a):
+    """Send a Discord webhook notification. Non-blocking, fire-and-forget."""
+    if not DISCORD_WEBHOOK_URL:
+        return
+    try:
+        import threading as _th
+        def _send():
+            try:
+                requests.post(DISCORD_WEBHOOK_URL, json={
+                    "embeds": [{
+                        "description": msg[:2000],
+                        "color": color,
+                        "footer": {"text": "TradeShark 🦈"},
+                        "timestamp": datetime.datetime.utcnow().isoformat(),
+                    }]
+                }, timeout=5)
+            except Exception:
+                pass
+        _th.Thread(target=_send, daemon=True).start()
+    except Exception:
+        pass
+
+# Discord alert levels — only important events get pushed
+_DISCORD_TRIGGERS = {
+    "MOONSHARK HIT": 0x00d4ff,    # cyan — new bet placed
+    "CLOSEGAME HIT": 0xffd700,    # gold — close game bet
+    "ARB HIT": 0x00ff00,          # green — free money
+    "BLOWOUT EXIT": 0xff5000,     # orange — cutting losses
+    "WIN": 0x00dc5a,              # green — game won
+    "LOSS": 0xff3333,             # red — game lost
+    "MOMENTUM": 0xffb400,         # yellow — momentum shift
+    "LEAD CHANGE": 0xff00ff,      # purple — our team took lead
+    "PRICE MOVE": 0x7a7aff,       # blue — significant price change
+}
+
+
 def _log_activity(msg, level="info"):
     """Add a timestamped message to the activity log. Deduplicates consecutive identical messages."""
     log = BOT_STATE["activity_log"]
@@ -103,6 +140,11 @@ def _log_activity(msg, level="info"):
         "level": level,
     })
     BOT_STATE["activity_log"] = log[-50:]
+    # Push important events to Discord
+    for trigger, color in _DISCORD_TRIGGERS.items():
+        if trigger in msg.upper():
+            _send_discord(msg, color)
+            break
 
 import json as _json
 
@@ -2238,6 +2280,22 @@ def run_bot_scan():
         BOT_STATE["daily_spent_usd"] = 0.0
         BOT_STATE["manual_trades_today"] = []
         _log_activity("Daily reset — new trading day started")
+        # Send daily summary to Discord
+        try:
+            ms_trades = len(BOT_STATE.get("moonshark_trades_today", []))
+            cg_trades = len(BOT_STATE.get("closegame_trades_today", []))
+            ms_spent = BOT_STATE.get("moonshark_daily_spent", 0)
+            cg_spent = BOT_STATE.get("closegame_daily_spent", 0)
+            total_pnl = _PORTFOLIO_CACHE.get("data", {}).get("total_realized_usd", 0)
+            _send_discord(
+                f"📊 **Daily Summary**\n"
+                f"MoonShark: {ms_trades} trades (${ms_spent:.2f})\n"
+                f"CloseGame: {cg_trades} trades (${cg_spent:.2f})\n"
+                f"Total P&L: ${total_pnl:+.2f}",
+                0x7a7aff
+            )
+        except Exception:
+            pass
 
     BOT_STATE["last_scan"] = now.isoformat()
 
