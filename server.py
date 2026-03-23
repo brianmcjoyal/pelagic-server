@@ -12031,26 +12031,25 @@ async function loadSettled() {
     var allSettled = data.settled || [];
     var hideJunk = document.getElementById('hide-history-junk') && document.getElementById('hide-history-junk').checked;
 
-    // Filter: hide penny bot trades (entry < 20c, or $0 P&L with unknown side, or bot_version v1-legacy with tiny P&L)
+    // Filter: only show bets from Day 1 onwards (March 16, 2026)
     var filtered = allSettled;
     if (hideJunk) {
-      var _historyJunk = ['truth social', 'truthsocial', 'canadian team win', 'groomsman', 'kelce', 'title holder', 'nuclear fusion', 'billboard', 'netflix', 'spotify', 'top song', 'top artist', 'featherweight', 'bantamweight', 'flyweight', 'middleweight', 'welterweight', 'lightweight', 'heavyweight', 'pga tour major', 'ballon d', 'gas prices', 'trillionaire', 'next uk pm', 'nextukpm'];
+      var DAY1 = '2026-03-16';
       filtered = allSettled.filter(function(s) {
-        // Hide pre-Day-1 legacy positions (before March 16, 2026)
+        // Hide if explicitly marked legacy
         if (s.is_legacy) return false;
-        // Hide known junk categories by ticker/title
-        var t = ((s.title || '') + ' ' + (s.ticker || '')).toLowerCase();
-        for (var i = 0; i < _historyJunk.length; i++) { if (t.indexOf(_historyJunk[i]) >= 0) return false; }
-        // Keep if P&L is significant (> $0.10 win or loss)
-        if (Math.abs(s.pnl_usd) > 0.10) return true;
-        // Keep if entry was >= 20c (not a penny bet)
-        if (s.entry_cents && s.entry_cents >= 20) return true;
-        // Keep if it was a real category (tennis, basketball, etc) with actual result
-        if (s.won === true || s.won === false) {
-          if (s.entry_cents && s.entry_cents >= 20) return true;
-        }
-        // Hide everything else (penny junk, $0 EVEN trades)
-        return false;
+        // Only keep bets with a close_time that has already passed AND is after Day 1
+        // OR bets with strategy/category indicating they're real bot trades
+        var ct = s.close_time || '';
+        var now = new Date().toISOString();
+        // If close_time is in the future, this is an old sold position — hide it
+        if (ct && ct > now) return false;
+        // If close_time is before Day 1, it's old — hide it
+        if (ct && ct.substring(0, 10) < DAY1) return false;
+        // If no close_time and no strategy, hide it (unknown old junk)
+        if (!ct && !s.strategy) return false;
+        // Keep everything else (real Day 1+ settled bets)
+        return true;
       });
     }
     window._settledData = filtered;
