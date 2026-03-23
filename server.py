@@ -7559,6 +7559,18 @@ def trades_today_endpoint():
         else:
             t["pnl_pct"] = 0
 
+    # Normalize all timestamps to clean UTC format (strip microseconds, ensure Z)
+    for t in all_today:
+        _ts = t.get("time", "")
+        if _ts:
+            # Strip microseconds: "2026-03-23T17:07:32.123456" → "2026-03-23T17:07:32"
+            if "." in _ts:
+                _ts = _ts.split(".")[0]
+            # Ensure Z suffix
+            if not _ts.endswith("Z") and "+" not in _ts:
+                _ts += "Z"
+            t["time"] = _ts
+
     # Sort by time descending
     all_today.sort(key=lambda x: x.get("time", ""), reverse=True)
     total_spent = sum(t["cost_usd"] for t in all_today if t["success"])
@@ -11422,6 +11434,24 @@ a:hover { color: #7da5f5; }
 </div>
 
 <script>
+// Parse any UTC timestamp to local Date — handles microseconds, missing Z, etc.
+function parseUTC(ts) {
+  if (!ts) return null;
+  // Strip microseconds (keep max 3 decimal places for JS compatibility)
+  ts = ts.replace(/(\.\d{3})\d+/, '$1');
+  // Ensure Z suffix for UTC interpretation
+  if (ts.indexOf('Z') < 0 && ts.indexOf('+') < 0 && ts.indexOf('-', 10) < 0) ts += 'Z';
+  var d = new Date(ts);
+  return isNaN(d.getTime()) ? null : d;
+}
+function fmtTime(ts) {
+  var d = parseUTC(ts);
+  return d ? d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '--:--';
+}
+function fmtTimeSec(ts) {
+  var d = parseUTC(ts);
+  return d ? d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}) : '--:--:--';
+}
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
   document.querySelectorAll('.tab-content').forEach(function(t) { t.classList.remove('active'); });
@@ -11550,11 +11580,7 @@ async function toggleTodayTrades() {
     h += '<tr style="color:#888;border-bottom:1px solid #222"><th style="padding:4px;text-align:left">Time</th><th style="padding:4px;text-align:left">Market</th><th style="padding:4px">Side</th><th style="padding:4px">Price</th><th style="padding:4px">Cost</th><th style="padding:4px">Source</th></tr>';
     trades.forEach(function(t) {
       var sideC = t.side === 'yes' ? '#00dc5a' : '#ff5000';
-      var timeStr = '';
-      if (t.time) {
-        var d = new Date(t.time.indexOf('Z') >= 0 ? t.time : t.time + 'Z');
-        timeStr = d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-      }
+      var timeStr = fmtTime(t.time);
       var stratColors = {sniper:'#ffb400', quant:'#00d4ff', bot:'#888', consensus_mispricing:'#888'};
       var stratLabels = {sniper:'Sniper', quant:'Quant', bot:'Bot', consensus_mispricing:'Bot'};
       var sc = stratColors[t.strategy] || '#888';
@@ -11950,11 +11976,7 @@ async function loadActivity() {
     const el = document.getElementById('activity-lines');
     let html = '';
     items.slice().reverse().forEach(a => {
-      var t = '--:--';
-      try {
-        var d = new Date(a.time.indexOf('Z') >= 0 ? a.time : a.time + 'Z');
-        t = d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});
-      } catch(e) {}
+      var t = fmtTimeSec(a.time);
       var lvl = a.level || 'info';
       html += '<div class="activity-line">';
       html += '<span class="time">' + t + '</span>';
@@ -11996,15 +12018,7 @@ async function loadBetsFeed() {
     } catch(e) {}
     var h = '';
     trades.forEach(function(t) {
-      var timeStr = '--:--';
-      if (t.time) {
-        try {
-          var ts = t.time;
-          if (ts.indexOf('Z') < 0) ts += 'Z';
-          var d = new Date(ts);
-          timeStr = d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-        } catch(e) {}
-      }
+      var timeStr = fmtTime(t.time);
       var sideC = t.side === 'yes' ? '#00dc5a' : '#ff5000';
       var stratColors = {sniper:'#ffb400', quant:'#00d4ff', bot:'#888', moonshark:'#e040fb', manual:'#5abf5a', moonshark_manual:'#5abf5a'};
       var stratLabels = {sniper:'SNIPER', quant:'QUANT', bot:'BOT', moonshark:'MOONSHARK', manual:'MANUAL', moonshark_manual:'MOONSHOT'};
@@ -13325,11 +13339,7 @@ async function loadQuantPicks() {
       histHtml += '</tr>';
       trades.slice().reverse().forEach(function(t) {
         var sideC = t.side === 'yes' ? '#00dc5a' : '#ff5000';
-        var timeStr = '';
-        if (t.time) {
-          var d = new Date(t.time.indexOf('Z') >= 0 ? t.time : t.time + 'Z');
-          timeStr = d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
-        }
+        var timeStr = fmtTime(t.time);
         var statusC = t.status === 'won' ? '#00dc5a' : t.status === 'lost' ? '#ff5000' : '#888';
         var statusL = t.status === 'won' ? 'WON' : t.status === 'lost' ? 'LOST' : 'OPEN';
         histHtml += '<tr style="border-bottom:1px solid #0d1a2e">';
@@ -14056,7 +14066,7 @@ function renderNotifs() {
   _notifItems.slice().reverse().forEach(function(n) {
     var bg = n.read ? 'transparent' : '#1e2a1e';
     var timeStr = '--:--';
-    try { var _nts = n.time && n.time.indexOf('Z') >= 0 ? n.time : (n.time || '') + 'Z'; timeStr = new Date(_nts).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); } catch(e) {}
+    try { timeStr = fmtTime(n.time); } catch(e) {}
     // Pick icon based on content
     var icon = '📋';
     if (n.msg.indexOf('HIT') >= 0) icon = '🎯';
