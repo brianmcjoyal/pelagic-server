@@ -2271,7 +2271,7 @@ def auto_exit_check():
 
 def run_bot_scan():
     now = datetime.datetime.utcnow()
-    today = now.strftime("%Y-%m-%d")
+    today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")  # Pacific date for daily reset
 
     # Daily reset
     if BOT_STATE["trade_date"] != today:
@@ -2522,8 +2522,8 @@ def live_game_snipe():
     if not BOT_CONFIG.get("enabled"):
         return []
 
-    # Daily reset check
-    today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+    # Daily reset check (Pacific time — matches dashboard display)
+    today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
     if BOT_STATE.get("snipe_date") != today:
         BOT_STATE["snipe_date"] = today
         BOT_STATE["snipe_trades_today"] = []
@@ -2831,8 +2831,8 @@ def moonshark_snipe():
     if not BOT_CONFIG.get("moonshark_enabled", True):
         return []
 
-    # Daily reset check
-    today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+    # Daily reset check (Pacific time — matches dashboard display)
+    today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
     if BOT_STATE.get("moonshark_date") != today:
         BOT_STATE["moonshark_date"] = today
         BOT_STATE["moonshark_trades_today"] = []
@@ -3216,8 +3216,8 @@ def closegame_snipe():
     if not BOT_CONFIG.get("closegame_enabled", True):
         return []
 
-    # Daily reset
-    today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+    # Daily reset (Pacific time — matches dashboard display)
+    today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
     if BOT_STATE.get("closegame_date") != today:
         BOT_STATE["closegame_date"] = today
         BOT_STATE["closegame_trades_today"] = []
@@ -7560,6 +7560,8 @@ def trades_today_endpoint():
             t["pnl_pct"] = 0
 
     # Normalize all timestamps to clean UTC format (strip microseconds, ensure Z)
+    # Then filter to only trades that are actually TODAY in Pacific time
+    filtered = []
     for t in all_today:
         _ts = t.get("time", "")
         if _ts:
@@ -7570,6 +7572,12 @@ def trades_today_endpoint():
             if not _ts.endswith("Z") and "+" not in _ts:
                 _ts += "Z"
             t["time"] = _ts
+        # Only keep trades that are actually today in Pacific time
+        if _ts and _is_today_pacific(_ts):
+            filtered.append(t)
+        elif not _ts:
+            filtered.append(t)  # keep trades with no timestamp (shouldn't happen)
+    all_today = filtered
 
     # Sort by time descending
     all_today.sort(key=lambda x: x.get("time", ""), reverse=True)
