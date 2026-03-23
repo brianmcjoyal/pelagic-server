@@ -10996,7 +10996,13 @@ async function loadPortfolio() {
         var spark = '<svg class="sparkline" width="24" height="14" viewBox="0 0 24 14"><line x1="1" y1="' + sparkY1 + '" x2="22" y2="' + sparkY2 + '" stroke="' + sparkColor + '" stroke-width="1.5" stroke-linecap="round"/><circle cx="22" cy="' + sparkY2 + '" r="1.5" fill="' + sparkColor + '"/></svg>';
         t += '<tr>';
         var placedTag = p.placed_by === 'bot' ? '<span style="font-size:7px;padding:1px 3px;background:#1a1a2e;border:1px solid #4a4ae0;border-radius:3px;color:#7a7aff;margin-right:4px;vertical-align:middle" title="Placed by TradeShark bot">BOT</span>' : p.placed_by === 'unknown' ? '<span style="font-size:7px;padding:1px 3px;background:#2e2e1a;border:1px solid #8a8a3a;border-radius:3px;color:#bfbf5a;margin-right:4px;vertical-align:middle" title="Source unknown — placed before last restart">?</span>' : '<span style="font-size:7px;padding:1px 3px;background:#1a2e1a;border:1px solid #3a8a3a;border-radius:3px;color:#5abf5a;margin-right:4px;vertical-align:middle" title="Placed by you">YOU</span>';
-        t += '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + placedTag + '<a href="https://kalshi.com/markets/' + p.ticker + '" target="_blank" style="color:#ddd;font-size:9px">' + (p.title || p.ticker) + '</a></td>';
+        var _sc = (window._positionScores || {})[p.ticker];
+        var _scoreHtml = '';
+        if (_sc && _sc.display) {
+          var _scColor = _sc.state === 'in' ? '#ffb400' : _sc.state === 'post' ? '#888' : '#555';
+          _scoreHtml = '<div style="font-size:8px;color:' + _scColor + ';margin-top:1px">&#9889; ' + _sc.display + '</div>';
+        }
+        t += '<td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + placedTag + '<a href="https://kalshi.com/markets/' + p.ticker + '" target="_blank" style="color:#ddd;font-size:9px">' + (p.title || p.ticker) + '</a>' + _scoreHtml + '</td>';
         t += '<td style="color:' + sideColor + ';font-weight:700;font-size:8px">' + p.side.toUpperCase() + '</td>';
         t += '<td style="font-weight:700;font-size:8px">' + (p.current_price || '?') + 'c' + spark + '</td>';
         t += '<td style="color:' + pnlColor + ';font-weight:700;font-size:8px">' + pnlText + '</td>';
@@ -11873,6 +11879,17 @@ async function loadPositions() {
     // Use position-monitor for enriched data with current prices
     const data = await fetch(API + '/position-monitor').then(r => r.json());
     const allPositions = data.positions || [];
+    // Fetch live scores for game positions
+    var _gameTickers = allPositions.map(function(p){ return p.ticker || ''; }).filter(function(t){ return /GAME|MATCH|FIGHT/.test(t.toUpperCase()); });
+    var _gameScores = {};
+    if (_gameTickers.length > 0) {
+      try {
+        var _titles = allPositions.filter(function(p){ return /GAME|MATCH|FIGHT/.test((p.ticker||'').toUpperCase()); }).map(function(p){ return p.title || p.ticker || ''; });
+        var _scResp = await fetch(API + '/live-scores?tickers=' + encodeURIComponent(_gameTickers.join(',')) + '&titles=' + encodeURIComponent(_titles.join(','))).then(function(r){ return r.json(); });
+        (_scResp.scores || []).forEach(function(s){ _gameScores[s.ticker] = s; });
+      } catch(e) {}
+    }
+    window._positionScores = _gameScores;
     var hidePenny = document.getElementById('hide-bot-trades') && document.getElementById('hide-bot-trades').checked;
     var botJunk = ['netflix', 'spotify', 'billboard', 'title holder', 'nuclear fusion', 'truth social', 'top song', 'top artist', 'featherweight', 'bantamweight', 'flyweight', 'middleweight', 'welterweight', 'lightweight', 'heavyweight', 'pga tour major', 'ballon d'];
     var positions = allPositions;
@@ -11907,7 +11924,13 @@ async function loadPositions() {
         var sideColor = p.side === 'yes' ? '#00dc5a' : '#ff5000';
         var sellPrice = p.current_price ? Math.max(1, p.current_price - 1) : 0;
         h += '<tr>';
-        h += '<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (p.title || p.ticker) + '</td>';
+        var _sc2 = (window._positionScores || {})[p.ticker];
+        var _scoreHtml2 = '';
+        if (_sc2 && _sc2.display) {
+          var _scC2 = _sc2.state === 'in' ? '#ffb400' : _sc2.state === 'post' ? '#888' : '#555';
+          _scoreHtml2 = '<div style="font-size:8px;color:' + _scC2 + '">&#9889; ' + _sc2.display + '</div>';
+        }
+        h += '<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (p.title || p.ticker) + _scoreHtml2 + '</td>';
         h += '<td style="color:' + sideColor + ';font-weight:700">' + p.side.toUpperCase() + '</td>';
         h += '<td>' + p.count + '</td>';
         h += '<td>' + (p.entry_price || '?') + 'c</td>';
