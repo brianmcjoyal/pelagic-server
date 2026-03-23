@@ -10311,6 +10311,21 @@ a:hover { color: #7da5f5; }
 
 <!-- Positions Tab -->
 <div class="tab-content active" id="tab-positions">
+  <!-- Live Feed + Bets Placed Today at top -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+    <div class="section">
+      <div class="section-title">Live Feed <span style="width:8px;height:8px;border-radius:50%;background:#00dc5a;display:inline-block;animation:pulse 2s infinite" id="activity-pulse-dash"></span></div>
+      <div class="activity-bar" id="activity-feed-dash" style="max-height:300px;overflow-y:auto">
+        <div id="activity-lines-dash"><div class="activity-line"><span class="time">--:--</span><span class="dot info"></span><span class="msg">Waiting for first scan...</span></div></div>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">Bets Placed Today <span class="badge" id="bets-today-count-dash">0</span> <span style="width:8px;height:8px;border-radius:50%;background:#ffb400;display:inline-block" id="bets-pulse-dash"></span></div>
+      <div class="activity-bar" id="bets-feed-dash" style="max-height:300px;overflow-y:auto">
+        <div id="bets-lines-dash"><div class="activity-line"><span class="time">--:--</span><span class="dot info"></span><span class="msg">Loading trade history...</span></div></div>
+      </div>
+    </div>
+  </div>
   <div style="display:flex;justify-content:flex-end;align-items:center;gap:12px;margin-bottom:6px">
     <button onclick="sellAllLosers()" style="background:#2a1010;border:1px solid #ff5000;color:#ff5000;padding:4px 12px;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer">&#x1F4A3; Sell All Losers</button>
     <label style="font-size:10px;color:#888;cursor:pointer"><input type="checkbox" id="hide-bot-trades" checked onchange="loadPortfolio();loadPositions()" style="margin-right:4px">Hide old bot trades &amp; penny positions</label>
@@ -10333,21 +10348,7 @@ a:hover { color: #7da5f5; }
     <div class="section-title">Mispriced Markets <span class="badge" id="opp-badge">0</span><button class="refresh-btn" onclick="loadMispriced()">Refresh</button></div>
     <div id="opp-table"><div class="loading">Scanning markets...</div></div>
   </div>
-  <!-- Activity section merged into Dashboard -->
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">
-    <div class="section">
-      <div class="section-title">Live Feed <span style="width:8px;height:8px;border-radius:50%;background:#00dc5a;display:inline-block;animation:pulse 2s infinite" id="activity-pulse-dash"></span></div>
-      <div class="activity-bar" id="activity-feed-dash">
-        <div id="activity-lines-dash"><div class="activity-line"><span class="time">--:--</span><span class="dot info"></span><span class="msg">Waiting for first scan...</span></div></div>
-      </div>
-    </div>
-    <div class="section">
-      <div class="section-title">Bets Placed Today <span class="badge" id="bets-today-count-dash">0</span> <span style="width:8px;height:8px;border-radius:50%;background:#ffb400;display:inline-block" id="bets-pulse-dash"></span></div>
-      <div class="activity-bar" id="bets-feed-dash" style="max-height:400px;overflow-y:auto">
-        <div id="bets-lines-dash"><div class="activity-line"><span class="time">--:--</span><span class="dot info"></span><span class="msg">Loading trade history...</span></div></div>
-      </div>
-    </div>
-  </div>
+  <!-- Activity section merged into Dashboard — REMOVED from bottom, now at top -->
 </div>
 
 <!-- Picks Tab — Goldman Sachs Style Research Desk -->
