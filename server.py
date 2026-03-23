@@ -5252,10 +5252,12 @@ def _sync_kalshi_fills():
         headers = signed_headers("GET", path)
         if not headers:
             return
+        # Fetch recent fills — use min_ts to only get today's fills (much faster)
+        _today_start_utc = datetime.datetime.now(tz=_PACIFIC).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         resp = _req.get(
             KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
             headers=headers,
-            params={"limit": 50},
+            params={"limit": 100, "min_ts": _today_start_utc},
             timeout=15,
         )
         if not resp.ok:
