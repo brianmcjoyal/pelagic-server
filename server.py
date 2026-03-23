@@ -10204,7 +10204,7 @@ a:hover { color: #7da5f5; }
   <div class="stat-card"><div class="stat-label">Daily P&L</div><div class="stat-value" id="pf-daily-pl">--</div></div>
   <div class="stat-card"><div class="stat-label">Total P&L</div><div class="stat-value" id="pf-total-pl">--</div></div>
   <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-value" id="pf-winrate">--</div></div>
-  <div class="stat-card"><div class="stat-label">7d Win Rate</div><div class="stat-value" id="pf-winrate-7d">--</div></div>
+  <div class="stat-card"><div class="stat-label">Today W/L</div><div class="stat-value" id="pf-winrate-7d">--</div></div>
   <div class="stat-card" style="cursor:pointer;position:relative" onclick="toggleTodayTrades()"><div class="stat-label">Trades Today</div><div class="stat-value" id="trades-today" style="text-decoration:underline;text-decoration-style:dotted">--</div><div id="today-trades-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;min-width:350px;max-width:500px;background:#111;border:1px solid #333;border-radius:10px;padding:12px;z-index:100;box-shadow:0 8px 24px rgba(0,0,0,0.6);max-height:400px;overflow-y:auto;font-size:10px"></div></div>
 </div>
 
@@ -10889,9 +10889,27 @@ async function loadPortfolio() {
     wrEl.textContent = wr.toFixed(0) + '%';
     wrEl.style.color = wr >= 60 ? '#00dc5a' : wr >= 40 ? '#ffb400' : '#ff5000';
     var wr7d = document.getElementById('pf-winrate-7d');
-    if (wr7d && data.win_rate_7d !== undefined) {
-        wr7d.textContent = data.win_rate_7d + '%';
-        wr7d.style.color = data.win_rate_7d >= 50 ? '#00dc5a' : (data.win_rate_7d >= 30 ? '#ffb400' : '#ff5000');
+    if (wr7d) {
+      // Show today's wins/losses count instead of 7d win rate
+      try {
+        var _tdData = await fetch(API + '/trades').then(function(r){return r.json();});
+        var _todayWins = 0, _todayLosses = 0;
+        (_tdData.trades || []).forEach(function(t) {
+          if (t.outcome === 'win') _todayWins++;
+          else if (t.outcome === 'loss') _todayLosses++;
+        });
+        if (_todayWins + _todayLosses > 0) {
+          wr7d.innerHTML = '<span style="color:#00dc5a">' + _todayWins + 'W</span> / <span style="color:#ff5000">' + _todayLosses + 'L</span>';
+        } else {
+          wr7d.textContent = '0W / 0L';
+          wr7d.style.color = '#555';
+        }
+      } catch(e) {
+        if (data.win_rate_7d !== undefined) {
+          wr7d.textContent = data.win_rate_7d + '%';
+          wr7d.style.color = data.win_rate_7d >= 50 ? '#00dc5a' : '#ff5000';
+        }
+      }
     }
     var wrBar = document.getElementById('pf-wrbar');
     if (wrBar) {
