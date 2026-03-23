@@ -5144,6 +5144,12 @@ def _background_loop():
                     live_game_snipe()
                 except Exception:
                     pass
+            # Monitor live scores for active game positions
+            if cycle % 2 == 0:  # every other cycle (~3 min)
+                try:
+                    _monitor_live_games()
+                except Exception as _mle:
+                    print(f"[MONITOR] Error: {_mle}")
             # Sync external Kalshi fills (bets placed on kalshi.com)
             try:
                 _sync_kalshi_fills()
@@ -7474,6 +7480,84 @@ def _check_blowout(ticker, title, bet_team_abbrev=None):
     except Exception as e:
         print(f"[BLOWOUT] Error checking {ticker}: {e}")
         return False, "", None  # Error — allow the bet
+
+
+# ── Live Game Monitor ────────────────────────────────────────────────
+_game_score_tracker = {}  # {ticker: {"last_score": "MIL 45 - PHX 52", "last_state": "in", "alerts": []}}
+
+def _monitor_live_games():
+    """Monitor live scores for active game positions. Log momentum shifts."""
+    try:
+        positions = check_position_prices()
+    except Exception:
+        return
+    # Filter to game positions only
+    game_positions = [p for p in positions if any(x in (p.get("ticker") or "").upper() for x in ["GAME", "MATCH", "FIGHT"])]
+    if not game_positions:
+        return
+
+    scores = _fetch_all_espn_scores()
+    if not scores:
+        return
+
+    for pos in game_positions:
+        ticker = pos.get("ticker", "")
+        title = pos.get("title", ticker)
+        bet_team = ticker.split("-")[-1].upper() if "-" in ticker else ""
+
+        # Find the game
+        teams = _extract_teams_from_title(title)
+        game = _find_game_for_teams(teams, scores)
+        if not game:
+            continue
+
+        score_str = _format_score_string(game)
+        state = game.get("state", "")
+
+        # Get previous state
+        prev = _game_score_tracker.get(ticker, {})
+        prev_score = prev.get("last_score", "")
+        prev_state = prev.get("last_state", "")
+
+        # Detect changes
+        if score_str != prev_score and state == "in":
+            # Check if our team took the lead or game got close
+            home_score = int(game.get("home_score", 0))
+            away_score = int(game.get("away_score", 0))
+            our_score = home_score if game.get("home_abbrev", "").upper() == bet_team else away_score
+            their_score = away_score if game.get("home_abbrev", "").upper() == bet_team else home_score
+            deficit = their_score - our_score
+
+            if prev.get("last_deficit") is not None:
+                prev_deficit = prev["last_deficit"]
+                # Our team made a run (deficit shrunk by 5+)
+                if prev_deficit - deficit >= 5:
+                    _log_activity(f"🔥 MOMENTUM: {title[:30]} — {score_str} (was down {prev_deficit}, now {deficit})", "info")
+                # Our team took the lead!
+                if prev_deficit > 0 and deficit <= 0:
+                    _log_activity(f"🚀 LEAD CHANGE: {title[:30]} — {score_str} — our team leads!", "info")
+                # Game is now close (within 3 points in Q4)
+                if abs(deficit) <= 3 and game.get("clock", "").startswith(("Q4", "P3", "OT", "2H")):
+                    _log_activity(f"⚡ CLOSE GAME: {title[:30]} — {score_str}", "info")
+
+            _game_score_tracker[ticker] = {
+                "last_score": score_str,
+                "last_state": state,
+                "last_deficit": deficit,
+            }
+
+        # Game just ended
+        if state == "post" and prev_state == "in":
+            home_score = int(game.get("home_score", 0))
+            away_score = int(game.get("away_score", 0))
+            our_score = home_score if game.get("home_abbrev", "").upper() == bet_team else away_score
+            their_score = away_score if game.get("home_abbrev", "").upper() == bet_team else home_score
+            won = our_score > their_score
+            _log_activity(
+                f"{'🎉 WIN' if won else '❌ LOSS'}: {title[:30]} — Final: {score_str}",
+                "info"
+            )
+            _game_score_tracker[ticker] = {"last_score": score_str, "last_state": state, "last_deficit": 0}
 
 
 @app.route("/live-scores")
