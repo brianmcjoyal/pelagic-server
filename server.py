@@ -11097,7 +11097,7 @@ a:hover { color: #7da5f5; }
 <!-- Positions Tab -->
 <div class="tab-content active" id="tab-positions">
   <!-- Live Feed + Bets Placed Today + Closing Soon -->
-  <div style="display:grid;grid-template-columns:1fr 1.2fr 0.8fr;gap:12px;margin-bottom:16px">
+  <div style="display:grid;grid-template-columns:1fr 1.2fr 1fr;gap:12px;margin-bottom:16px">
     <div class="section">
       <div class="section-title">Live Feed <span style="width:8px;height:8px;border-radius:50%;background:#00dc5a;display:inline-block;animation:pulse 2s infinite" id="activity-pulse-dash"></span></div>
       <div class="activity-bar" id="activity-feed-dash" style="max-height:300px;overflow-y:auto">
