@@ -10219,15 +10219,10 @@ a:hover { color: #7da5f5; }
 
 <!-- Tabs -->
 <div class="tabs">
-  <button class="tab active" onclick="switchTab('positions')">Positions</button>
-  <button class="tab" onclick="switchTab('activity')">Activity</button>
-  <button class="tab" onclick="switchTab('history')">History</button>
+  <button class="tab active" onclick="switchTab('positions')">Dashboard</button>
   <button class="tab" onclick="switchTab('moonshark')" style="color:#00d4ff">&#x1F988; MoonShark</button>
-  <button class="tab" onclick="switchTab('seventyfivers')">75%'ers</button>
-  <button class="tab" onclick="switchTab('picks')">Top Picks</button>
-  <button class="tab" onclick="switchTab('quant')">Quant</button>
-  <button class="tab" onclick="switchTab('analytics')" style="color:#00d4ff">Insights</button>
-  <button class="tab" onclick="switchTab('news')" style="color:#ccc">&#x1F4F0; News</button>
+  <button class="tab" onclick="switchTab('history')">History</button>
+  <button class="tab" onclick="switchTab('analytics')">Analytics</button>
 </div>
 
 <!-- Positions Tab -->
@@ -10253,6 +10248,21 @@ a:hover { color: #7da5f5; }
   <div class="section">
     <div class="section-title">Mispriced Markets <span class="badge" id="opp-badge">0</span><button class="refresh-btn" onclick="loadMispriced()">Refresh</button></div>
     <div id="opp-table"><div class="loading">Scanning markets...</div></div>
+  </div>
+  <!-- Activity section merged into Dashboard -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">
+    <div class="section">
+      <div class="section-title">Live Feed <span style="width:8px;height:8px;border-radius:50%;background:#00dc5a;display:inline-block;animation:pulse 2s infinite" id="activity-pulse-dash"></span></div>
+      <div class="activity-bar" id="activity-feed-dash">
+        <div id="activity-lines-dash"><div class="activity-line"><span class="time">--:--</span><span class="dot info"></span><span class="msg">Waiting for first scan...</span></div></div>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">Bets Placed Today <span class="badge" id="bets-today-count-dash">0</span> <span style="width:8px;height:8px;border-radius:50%;background:#ffb400;display:inline-block" id="bets-pulse-dash"></span></div>
+      <div class="activity-bar" id="bets-feed-dash" style="max-height:400px;overflow-y:auto">
+        <div id="bets-lines-dash"><div class="activity-line"><span class="time">--:--</span><span class="dot info"></span><span class="msg">Loading trade history...</span></div></div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -10543,13 +10553,12 @@ function switchTab(name) {
   var tabs = document.querySelectorAll('.tab');
   tabs.forEach(function(t) { if (t.getAttribute('onclick').indexOf(name) >= 0) t.classList.add('active'); });
   // Lazy-load tab data
+  if (name === 'positions') { loadActivityDash(); loadBetsFeedDash(); }
   if (name === 'moonshark') loadMoonshark();
-  if (name === 'quant') loadQuantPicks();
-  if (name === 'seventyfivers') loadSeventyFivers();
-  if (name === 'history') loadSettled();
+  if (name === 'history') { loadSettled(); loadTrades(); }
+  if (name === 'analytics') { loadAnalytics(); loadInsights(); loadSeventyFivers(); loadQuantPicks(); loadNews(); loadNewsIdeas(); }
+  // Legacy support for hidden tabs
   if (name === 'activity') { loadActivity(); loadBetsFeed(); loadAllBets(); }
-  if (name === 'analytics') { loadAnalytics(); loadInsights(); }
-  if (name === 'news') { loadNews(); loadNewsIdeas(); }
 }
 
 const API = window.location.origin;
@@ -11067,16 +11076,25 @@ async function loadActivity() {
       html += '</div>';
     });
     el.innerHTML = html;
+    // Also update dashboard version
+    var dashEl = document.getElementById('activity-lines-dash');
+    if (dashEl) dashEl.innerHTML = html;
   } catch(e) {}
 }
+
+async function loadActivityDash() { loadActivity(); }
+async function loadBetsFeedDash() { loadBetsFeed(); }
 
 async function loadBetsFeed() {
   try {
     var data = await fetch(API + '/trades-today').then(r => r.json());
     var trades = data.trades || [];
     var el = document.getElementById('bets-lines');
-    if (!el) return;
-    document.getElementById('bets-today-count').textContent = trades.length;
+    // Update both old and dashboard badge counts
+    var countEl = document.getElementById('bets-today-count');
+    var countElDash = document.getElementById('bets-today-count-dash');
+    if (countEl) countEl.textContent = trades.length;
+    if (countElDash) countElDash.textContent = trades.length;
     if (trades.length === 0) {
       el.innerHTML = '<div class="activity-line"><span class="time">--:--</span><span class="dot info"></span><span class="msg" style="color:#666">No bets placed today</span></div>';
       return;
@@ -11148,6 +11166,9 @@ async function loadBetsFeed() {
       h += '</span></div>';
     });
     el.innerHTML = h;
+    // Also update dashboard version
+    var dashBetsEl = document.getElementById('bets-lines-dash');
+    if (dashBetsEl) dashBetsEl.innerHTML = h;
     // Pulse the dot
     var pulse = document.getElementById('bets-pulse');
     if (pulse && trades.length > 0) pulse.style.background = '#ffb400';
