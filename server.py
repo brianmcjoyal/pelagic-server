@@ -9857,24 +9857,24 @@ input:checked + .slider:before { transform: translateX(22px); background: #fff; 
 .chart-canvas canvas { width: 100%; height: 100%; }
 
 /* Quick stats row */
-.stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: #1a1a1a; border-radius: 12px; overflow: hidden; margin: 0 0 24px; }
-.stat-card { background: #141414; padding: 16px; text-align: center; }
-.stat-label { font-size: 11px; color: #666; font-weight: 500; margin-bottom: 4px; }
-.stat-value { font-size: 20px; font-weight: 700; color: #fff; }
+.stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 1px; background: #1a1a1a; border-radius: 12px; overflow: hidden; margin: 0 0 20px; }
+.stat-card { background: #141414; padding: 14px 8px; text-align: center; }
+.stat-label { font-size: 10px; color: #555; font-weight: 600; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+.stat-value { font-size: 18px; font-weight: 700; color: #fff; }
 .stat-value.green { color: #00dc5a; }
 .stat-value.red { color: #ff5000; }
 
 /* Tabs */
-.tabs { display: flex; gap: 0; border-bottom: 1px solid #222; margin-bottom: 20px; overflow-x: auto; }
-.tab { padding: 12px 24px; font-size: 14px; font-weight: 600; color: #666; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.2s; white-space: nowrap; background: none; border-top: none; border-left: none; border-right: none; font-family: inherit; }
+.tabs { display: flex; gap: 0; border-bottom: 1px solid #222; margin-bottom: 24px; }
+.tab { flex: 1; padding: 14px 0; font-size: 14px; font-weight: 600; color: #555; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.2s; white-space: nowrap; background: none; border-top: none; border-left: none; border-right: none; font-family: inherit; text-align: center; }
 .tab:hover { color: #aaa; }
 .tab.active { color: #fff; border-bottom-color: #00dc5a; }
 .tab-content { display: none; }
 .tab-content.active { display: block; }
 
 /* Section headers */
-.section { margin-bottom: 24px; }
-.section-title { font-size: 16px; font-weight: 700; color: #fff; margin-bottom: 12px; display: flex; align-items: center; gap: 10px; }
+.section { margin-bottom: 28px; }
+.section-title { font-size: 15px; font-weight: 700; color: #eee; margin-bottom: 14px; display: flex; align-items: center; gap: 10px; letter-spacing: -0.2px; }
 .badge { background: #1f1f1f; padding: 2px 10px; border-radius: 20px; font-size: 12px; color: #999; font-weight: 600; }
 .refresh-btn { background: none; border: 1px solid #333; color: #666; padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 12px; margin-left: auto; font-family: inherit; font-weight: 500; transition: all 0.2s; }
 .refresh-btn:hover { border-color: #555; color: #aaa; }
