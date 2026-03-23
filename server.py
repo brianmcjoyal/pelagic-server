@@ -12036,18 +12036,13 @@ async function loadSettled() {
     if (hideJunk) {
       var DAY1 = '2026-03-16';
       filtered = allSettled.filter(function(s) {
-        // Hide if explicitly marked legacy
-        if (s.is_legacy) return false;
-        // Only keep bets with a close_time that has already passed AND is after Day 1
-        // OR bets with strategy/category indicating they're real bot trades
         var ct = s.close_time || '';
         var now = new Date().toISOString();
-        // If close_time is in the future, this is an old sold position — hide it
+        // If close_time is in the future, this is an old sold position on a still-open market — hide it
         if (ct && ct > now) return false;
-        // If close_time is before Day 1, it's old — hide it
+        // If close_time is before Day 1, it's pre-Day-1 — hide it
         if (ct && ct.substring(0, 10) < DAY1) return false;
-        // If no close_time and no strategy, hide it (unknown old junk)
-        if (!ct && !s.strategy) return false;
+        // If no close_time at all, keep it (may be a recently settled game bet)
         // Keep everything else (real Day 1+ settled bets)
         return true;
       });
