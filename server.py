@@ -5605,13 +5605,16 @@ def settled_positions():
         current_streak_type = None
         settled = []
 
-        # Build a map of trade timestamps from all_trades for date filtering
+        # Build a map of BUY timestamps from all_trades for date filtering
+        # Only use buy fills — sell/settlement fills have today's date for old positions
         _trade_dates = {}
         for _at in BOT_STATE.get("all_trades", []):
             _tk = _at.get("ticker", "")
+            _action = _at.get("action", "buy")
             _ts = (_at.get("timestamp", "") or "")[:10]
-            if _tk and _ts and (_tk not in _trade_dates or _ts > _trade_dates[_tk]):
-                _trade_dates[_tk] = _ts
+            if _tk and _ts and _action != "sell":
+                if _tk not in _trade_dates or _ts < _trade_dates[_tk]:
+                    _trade_dates[_tk] = _ts  # Use EARLIEST buy date
 
         # Cache market titles
         _title_cache = {}
