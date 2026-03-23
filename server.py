@@ -2956,12 +2956,42 @@ def moonshark_snipe():
                     break
 
                 # Calculate quantity using Kelly Criterion
-                # For longshots, estimate win probability from price + small edge
-                # A 20c contract implies 20% chance; we think it's slightly higher
                 implied_prob = price / 100.0
-                # Assume a small edge (5-10%) — longshots are underpriced in closing markets
-                edge_estimate = 0.05 + (0.05 * (30 - price) / 20)  # more edge at cheaper prices
-                win_prob = min(implied_prob + edge_estimate, 0.45)  # cap — still a longshot
+
+                # TRY REAL SPORTSBOOK ODDS FIRST (ESPN moneylines)
+                espn_edge = None
+                _bet_team_odds = None
+                try:
+                    _tk_parts_odds = ticker.split("-")
+                    _bet_team_odds_abbrev = _tk_parts_odds[-1].upper() if len(_tk_parts_odds) >= 2 else None
+                    if _bet_team_odds_abbrev and _game_info and _game_info.get("odds"):
+                        _odds_info = _game_info["odds"]
+                        if _game_info["home_abbrev"] == _bet_team_odds_abbrev:
+                            espn_implied = _odds_info.get("home_implied", 0)
+                        elif _game_info["away_abbrev"] == _bet_team_odds_abbrev:
+                            espn_implied = _odds_info.get("away_implied", 0)
+                        else:
+                            espn_implied = 0
+                        if espn_implied > 0:
+                            espn_edge = espn_implied - implied_prob
+                            # SKIP if sportsbooks agree it's a longshot (no edge)
+                            if espn_edge < 0.03:
+                                _log_activity(
+                                    f"MOONSHARK SKIP: {title[:35]} — no edge (ESPN={espn_implied:.0%} vs Kalshi={implied_prob:.0%})",
+                                    "info"
+                                )
+                                continue
+                except Exception:
+                    pass
+
+                # Use real edge if available, otherwise estimate
+                if espn_edge is not None and espn_edge > 0:
+                    edge_estimate = espn_edge
+                    win_prob = min(espn_implied, 0.45)  # use sportsbook probability
+                else:
+                    # Fallback: assume small edge (5-10%)
+                    edge_estimate = 0.05 + (0.05 * (30 - price) / 20)
+                    win_prob = min(implied_prob + edge_estimate, 0.45)
                 remaining_budget = MOONSHARK_MAX_DAILY - BOT_STATE["moonshark_daily_spent"]
                 trades_left = MOONSHARK_MAX_TRADES - len(BOT_STATE.get("moonshark_trades_today", []))
                 # Kelly sizes based on remaining daily budget (not full bankroll)
@@ -3003,6 +3033,16 @@ def moonshark_snipe():
                 profit_per = 100 - price  # cents profit per contract if we win
                 expected_profit = profit_per * count / 100.0
 
+                # BLOWOUT CHECK — skip if our team is getting destroyed
+                _bet_team = None
+                _tk_parts = ticker.split("-")
+                if len(_tk_parts) >= 2:
+                    _bet_team = _tk_parts[-1]  # e.g., "UVA" from KXNCAAMBGAME-26MAR22TENNUVA-UVA
+                is_blowout, blowout_reason, _game_info = _check_blowout(ticker, title, _bet_team)
+                if is_blowout:
+                    _log_activity(f"MOONSHARK SKIP: {title[:35]} — {blowout_reason}", "info")
+                    continue
+
                 # Vetting log
                 reasons = []
                 reasons.append(f"cat={mcat}")
@@ -3015,6 +3055,10 @@ def moonshark_snipe():
                     reasons.append(f"cat_mult={cat_mult}x")
                 if live_boost > 1.0:
                     reasons.append(f"LIVE BOOST {live_boost}x")
+                if espn_edge is not None:
+                    reasons.append(f"ESPN_EDGE={espn_edge:.1%}")
+                if blowout_reason and not is_blowout:
+                    reasons.append(f"score={blowout_reason}")
                 vetting = " | ".join(reasons)
 
                 _log_activity(
@@ -4185,37 +4229,40 @@ def _update_category_stats(ticker, title, won, pnl_usd):
     _CATEGORY_STATS[cat]["pnl"] += pnl_usd
 
 def _category_multiplier(ticker, title):
-    """Get bet size multiplier based on PROVEN category performance.
+    """Dynamic bet size multiplier based on ACTUAL category performance.
 
-    Based on actual trading data (5W/10L, -$24.71 P&L):
-    - Tennis: 100% WR (1W/0L, +$0.18) -> 2.0x
-    - NHL: 100% WR (1W/0L) -> 1.5x
-    - MLB: 100% WR (1W/0L) -> 1.5x
-    - NBA/NCAA Basketball: decent liquidity -> 1.2x / 1.0x
-    - MMA (live fights): 20% WR but live fights are fine -> 1.0x
-    - Politics: 0% WR (0W/2L, -$1.51) -> 0.3x
-    - Other/unknown: 20% WR -> 0.5x
+    Learns from _CATEGORY_STATS (rebuilt from Kalshi on startup).
+    Needs 3+ bets in a category before adjusting — avoids overreacting to 1 win.
     """
     cat = classify_market_category(title or "", ticker or "")
+    stats = _CATEGORY_STATS.get(cat, {})
+    wins = stats.get("wins", 0)
+    losses = stats.get("losses", 0)
+    total = wins + losses
 
-    # Hardcoded multipliers from real trading data
-    _CATEGORY_MULTIPLIERS = {
-        "tennis": 2.0,   # best category — 100% win rate
-        "nhl": 1.5,      # 100% win rate
-        "mlb": 1.5,      # 100% win rate
-        "nba": 1.0,      # decent liquidity, includes NCAA basketball
-        "nfl": 1.0,      # standard
-        "soccer": 1.0,   # standard
-        "mma": 1.0,      # live fights only (title holders blocked by keywords)
-        "tech": 1.2,     # 100% win rate (1W/0L, +$0.40)
-        "economics": 0.5, # long-dated, avoid
-        "politics": 0.3, # 0% win rate — minimize exposure
-        "weather": 0.0,  # blocked category, but just in case
-        "crypto": 0.5,   # volatile, low conviction
-        "entertainment": 0.3, # long-dated, low conviction
-        "golf": 0.5,     # not enough data
-    }
-    return _CATEGORY_MULTIPLIERS.get(cat, 0.5)  # default 0.5x for unknown categories
+    # Not enough data — use neutral multiplier
+    if total < 3:
+        return 1.0
+
+    win_rate = wins / total
+
+    # Dynamic multiplier tiers based on proven win rate
+    if win_rate >= 0.25:
+        mult = 2.0   # strong performer — bet aggressively
+    elif win_rate >= 0.15:
+        mult = 1.5   # above average
+    elif win_rate >= 0.10:
+        mult = 1.0   # break-even territory
+    elif win_rate > 0:
+        mult = 0.5   # weak — reduce exposure
+    else:
+        mult = 0.0   # 0% win rate — skip entirely
+
+    # Always block weather
+    if cat == "weather":
+        mult = 0.0
+
+    return mult
 
 
 # ---------------------------------------------------------------------------
@@ -4514,6 +4561,25 @@ def check_settlements_and_reinvest():
             wins = sum(1 for s in new_settlements if s["won"])
             losses = len(new_settlements) - wins
             total_pnl = sum(s["pnl_usd"] for s in new_settlements)
+            # Log individual settlements for notifications
+            for s in new_settlements:
+                tk = s["ticker"]
+                pnl = s["pnl_usd"]
+                # Try to get a human-readable title
+                _stitle = tk
+                try:
+                    _sm_path = f"/markets/{tk}"
+                    _sm_h = signed_headers("GET", _sm_path)
+                    if _sm_h:
+                        _sm_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + _sm_path, headers=_sm_h, timeout=3)
+                        if _sm_r.ok:
+                            _stitle = _sm_r.json().get("market", {}).get("title", tk)[:60]
+                except Exception:
+                    pass
+                if s["won"]:
+                    _log_activity(f"🦈 WIN! {_stitle} +${pnl:.2f}", "success")
+                else:
+                    _log_activity(f"LOSS: {_stitle} -${abs(pnl):.2f}", "error")
             _log_activity(
                 f"💰 Settlements: {len(new_settlements)} new ({wins}W/{losses}L) "
                 f"P&L: ${total_pnl:+.2f} — reinvesting freed capital",
@@ -7186,6 +7252,32 @@ def _fetch_all_espn_scores():
                 away = next((t for t in teams if not t["home"]), teams[1] if len(teams) > 1 else teams[0])
                 home = next((t for t in teams if t["home"]), teams[0])
 
+                # Extract sportsbook odds if available
+                odds_data = {}
+                try:
+                    _odds_list = competition.get("odds", [])
+                    if _odds_list:
+                        _odds = _odds_list[0]  # First provider (usually consensus)
+                        _home_ml = _odds.get("homeTeamOdds", {}).get("moneyLine")
+                        _away_ml = _odds.get("awayTeamOdds", {}).get("moneyLine")
+                        if _home_ml is not None and _away_ml is not None:
+                            # Convert moneyline to implied probability
+                            def _ml_to_prob(ml):
+                                ml = float(ml)
+                                if ml > 0:
+                                    return 100 / (ml + 100)
+                                else:
+                                    return abs(ml) / (abs(ml) + 100)
+                            odds_data = {
+                                "home_ml": int(_home_ml),
+                                "away_ml": int(_away_ml),
+                                "home_implied": round(_ml_to_prob(_home_ml), 3),
+                                "away_implied": round(_ml_to_prob(_away_ml), 3),
+                                "provider": _odds.get("provider", {}).get("name", "ESPN"),
+                            }
+                except Exception:
+                    pass
+
                 game_info = {
                     "away_abbrev": away["abbrev"],
                     "home_abbrev": home["abbrev"],
@@ -7200,6 +7292,7 @@ def _fetch_all_espn_scores():
                     "clock": clock_str,
                     "state": state,
                     "league": league.upper(),
+                    "odds": odds_data,
                 }
 
                 # Index by multiple keys for fuzzy matching
@@ -7256,6 +7349,138 @@ def _format_score_string(game):
     if not game:
         return ""
     return f"{game['away_abbrev']} {game['away_score']} - {game['home_abbrev']} {game['home_score']} {game['clock']}"
+
+
+# ---------------------------------------------------------------------------
+# BLOWOUT DETECTION — Skip bets where underdog is getting destroyed
+# ---------------------------------------------------------------------------
+
+# Blowout thresholds by sport: max point deficit to still bet on the underdog
+_BLOWOUT_THRESHOLDS = {
+    "nba": 15,     # down by 15+ points
+    "ncaab": 15,   # down by 15+ points
+    "nhl": 3,      # down by 3+ goals
+    "mlb": 4,      # down by 4+ runs
+    "soccer": 2,   # down by 2+ goals (soccer is low-scoring)
+}
+
+# Late-game thresholds: stricter when game is almost over
+_LATE_GAME_THRESHOLDS = {
+    "nba": {"period": 4, "max_deficit": 8},      # Q4, down 8+
+    "ncaab": {"period": 2, "max_deficit": 10},    # 2nd half, down 10+
+    "nhl": {"period": 3, "max_deficit": 2},       # P3, down 2+
+    "mlb": {"period": 7, "max_deficit": 3},       # 7th inning+, down 3+
+}
+
+
+def _check_blowout(ticker, title, bet_team_abbrev=None):
+    """Check if the game is a blowout. Returns (is_blowout, reason, game_info).
+
+    bet_team_abbrev: the team abbreviation we're betting ON (from ticker suffix).
+    If the team we're betting on is getting crushed, skip.
+    If the game is close or our team is winning, it's fine.
+    """
+    try:
+        # Detect sport from ticker
+        tk_upper = ticker.upper()
+        sport = None
+        if "NBA" in tk_upper or "NCAA" in tk_upper:
+            sport = "ncaab" if "NCAA" in tk_upper else "nba"
+        elif "NHL" in tk_upper:
+            sport = "nhl"
+        elif "MLB" in tk_upper:
+            sport = "mlb"
+        elif "SOCCER" in tk_upper or "EPL" in tk_upper or "MLS" in tk_upper:
+            sport = "soccer"
+        else:
+            return False, "", None  # Can't check — allow the bet
+
+        # Fetch live scores
+        now = _time.time()
+        if now - _live_scores_cache["ts"] > _LIVE_SCORES_TTL or not _live_scores_cache["data"]:
+            _live_scores_cache["data"] = _fetch_all_espn_scores()
+            _live_scores_cache["ts"] = now
+
+        scores = _live_scores_cache["data"]
+        if not scores:
+            return False, "", None  # No scores available — allow the bet
+
+        # Find the game
+        team_names = _extract_teams_from_title(title)
+        game = _find_game_for_teams(team_names, scores)
+        if not game:
+            # Try extracting from ticker suffix (e.g., KXNCAAMBGAME-26MAR22TENNUVA-UVA)
+            parts = ticker.split("-")
+            if len(parts) >= 2:
+                suffix_team = parts[-1].lower()
+                if suffix_team in scores:
+                    game = scores[suffix_team]
+            if not game:
+                return False, "", None  # Can't find game — allow the bet
+
+        # Game hasn't started yet — no blowout possible
+        if game["state"] == "pre":
+            return False, "pregame", game
+
+        # Game is over — don't bet on finished games
+        if game["state"] == "post":
+            return True, "game over", game
+
+        # Parse scores
+        away_score = int(game.get("away_score", 0) or 0)
+        home_score = int(game.get("home_score", 0) or 0)
+
+        # Figure out which team we're betting on
+        our_score = None
+        their_score = None
+        if bet_team_abbrev:
+            bet_abbrev_upper = bet_team_abbrev.upper()
+            if game["away_abbrev"] == bet_abbrev_upper:
+                our_score = away_score
+                their_score = home_score
+            elif game["home_abbrev"] == bet_abbrev_upper:
+                our_score = home_score
+                their_score = away_score
+
+        if our_score is not None and their_score is not None:
+            deficit = their_score - our_score  # positive = we're losing
+
+            # Check standard blowout
+            threshold = _BLOWOUT_THRESHOLDS.get(sport, 15)
+            if deficit >= threshold:
+                score_str = _format_score_string(game)
+                return True, f"blowout (down {deficit}, threshold {threshold}) {score_str}", game
+
+            # Check late-game threshold (stricter)
+            late = _LATE_GAME_THRESHOLDS.get(sport)
+            if late:
+                period = 0
+                try:
+                    # Extract period from clock string
+                    clock = game.get("clock", "")
+                    for p_match in re.findall(r'Q(\d)|P(\d)|OT|(\d+)(?:st|nd|rd|th)', clock):
+                        for g in p_match:
+                            if g:
+                                period = int(g)
+                                break
+                        if period:
+                            break
+                except Exception:
+                    pass
+                if period >= late["period"] and deficit >= late["max_deficit"]:
+                    score_str = _format_score_string(game)
+                    return True, f"late-game deficit (period {period}, down {deficit}) {score_str}", game
+
+            # Close game or we're winning — boost confidence
+            if deficit <= 0:
+                return False, f"winning/tied ({_format_score_string(game)})", game
+
+        # Default: allow the bet
+        return False, "", game
+
+    except Exception as e:
+        print(f"[BLOWOUT] Error checking {ticker}: {e}")
+        return False, "", None  # Error — allow the bet
 
 
 @app.route("/live-scores")
@@ -12606,12 +12831,24 @@ async function checkForNotifications() {
     var items = data.activity || [];
     if (items.length > _lastActivityCount && _lastActivityCount > 0) {
       var newest = items[items.length - 1];
-      if (newest && newest.msg && (newest.msg.indexOf('SNIPE') >= 0 || newest.msg.indexOf('SNIPED') >= 0)) {
-        sendNotif('TradeShark Trade', newest.msg, 'trade-' + items.length);
-      }
-      if (newest && newest.msg && newest.msg.indexOf('Settlement') >= 0) {
-        sendNotif('TradeShark Settlement', newest.msg, 'settle-' + items.length);
-      }
+      // Check all new messages since last poll
+      var newItems = items.slice(_lastActivityCount);
+      newItems.forEach(function(item) {
+        if (!item || !item.msg) return;
+        var msg = item.msg;
+        if (msg.indexOf('SNIPE') >= 0 || msg.indexOf('SNIPED') >= 0 || msg.indexOf('MOONSHARK HIT') >= 0) {
+          sendNotif('🦈 TradeShark Trade', msg, 'trade-' + Date.now());
+        }
+        if (msg.indexOf('WIN!') >= 0) {
+          sendNotif('🦈 MoonShark WIN!', msg, 'win-' + Date.now());
+        }
+        if (msg.indexOf('LOSS:') >= 0) {
+          sendNotif('TradeShark Loss', msg, 'loss-' + Date.now());
+        }
+        if (msg.indexOf('Settlements:') >= 0) {
+          sendNotif('💰 Settlement Summary', msg, 'settle-' + Date.now());
+        }
+      });
     }
     _lastActivityCount = items.length;
   } catch(e) {}
