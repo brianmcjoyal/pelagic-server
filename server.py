@@ -11070,8 +11070,8 @@ a:hover { color: #7da5f5; }
 
 <!-- Positions Tab -->
 <div class="tab-content active" id="tab-positions">
-  <!-- Live Feed + Bets Placed Today at top -->
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+  <!-- Live Feed + Bets Placed Today + Closing Soon -->
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:16px">
     <div class="section">
       <div class="section-title">Live Feed <span style="width:8px;height:8px;border-radius:50%;background:#00dc5a;display:inline-block;animation:pulse 2s infinite" id="activity-pulse-dash"></span></div>
       <div class="activity-bar" id="activity-feed-dash" style="max-height:300px;overflow-y:auto">
@@ -11082,6 +11082,12 @@ a:hover { color: #7da5f5; }
       <div class="section-title">Bets Placed Today <span class="badge" id="bets-today-count-dash">0</span> <span style="width:8px;height:8px;border-radius:50%;background:#ffb400;display:inline-block" id="bets-pulse-dash"></span></div>
       <div class="activity-bar" id="bets-feed-dash" style="max-height:300px;overflow-y:auto">
         <div id="bets-lines-dash"><div class="activity-line"><span class="time">--:--</span><span class="dot info"></span><span class="msg">Loading trade history...</span></div></div>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">Closing Soon <span class="badge" id="closing-soon-count">0</span> <span style="width:8px;height:8px;border-radius:50%;background:#ff5000;display:inline-block;animation:pulse 2s infinite"></span></div>
+      <div class="activity-bar" id="closing-soon-feed" style="max-height:300px;overflow-y:auto">
+        <div id="closing-soon-lines"><div class="activity-line"><span class="time">--:--</span><span class="dot info"></span><span class="msg">Loading positions...</span></div></div>
       </div>
     </div>
   </div>
@@ -14083,6 +14089,86 @@ function checkNotifications() {
 // Initial check
 setTimeout(checkNotifications, 3000);
 setInterval(checkNotifications, 15000);
+
+// --- Closing Soon Panel ---
+async function loadClosingSoon() {
+  try {
+    var data = await fetch(API + '/trades-today').then(function(r) { return r.json(); });
+    var trades = data.trades || [];
+    var el = document.getElementById('closing-soon-lines');
+    var countEl = document.getElementById('closing-soon-count');
+
+    // Filter to trades with close_time, sort by soonest
+    var withClose = trades.filter(function(t) { return t.close_time; });
+    withClose.sort(function(a, b) { return (a.close_time || '').localeCompare(b.close_time || ''); });
+
+    // Also get open positions with close times
+    var posData = await fetch(API + '/portfolio-summary').then(function(r) { return r.json(); });
+    var positions = (posData.open_positions || []).filter(function(p) { return p.close_time; });
+    positions.sort(function(a, b) { return (a.close_time || '').localeCompare(b.close_time || ''); });
+
+    var items = positions;
+    countEl.textContent = items.length;
+
+    if (items.length === 0) {
+      el.innerHTML = '<div style="padding:16px;text-align:center;color:#555;font-size:11px">No positions closing today</div>';
+      return;
+    }
+
+    var html = '';
+    var now = new Date();
+    items.forEach(function(p) {
+      var title = (p.title || p.ticker || '').substring(0, 35);
+      var closeTime = new Date(p.close_time);
+      var diffMs = closeTime - now;
+      var diffMin = Math.floor(diffMs / 60000);
+      var timeLeft = '';
+      var urgency = '#888';
+
+      if (diffMin < 0) {
+        timeLeft = 'Settling now';
+        urgency = '#ffb400';
+      } else if (diffMin < 60) {
+        timeLeft = diffMin + 'm';
+        urgency = '#ff3333';
+      } else if (diffMin < 1440) {
+        var h = Math.floor(diffMin / 60);
+        var m = diffMin % 60;
+        timeLeft = h + 'h ' + m + 'm';
+        urgency = diffMin < 180 ? '#ff5000' : '#ffb400';
+      } else {
+        var d = Math.floor(diffMin / 1440);
+        timeLeft = d + 'd';
+        urgency = '#555';
+      }
+
+      var price = p.current_price || p.entry_price || 0;
+      var side = (p.side || 'yes').toUpperCase();
+      var pnl = p.unrealized_pnl_cents || 0;
+      var pnlUsd = (pnl / 100).toFixed(2);
+      var pnlColor = pnl >= 0 ? '#00dc5a' : '#ff3333';
+      var pnlSign = pnl >= 0 ? '+' : '';
+
+      html += '<div style="padding:6px 10px;border-bottom:1px solid #1a1a1a;display:flex;align-items:center;gap:8px">';
+      html += '<div style="flex-shrink:0;min-width:55px;text-align:right">';
+      html += '<span style="font-size:12px;font-weight:700;color:' + urgency + '">' + timeLeft + '</span>';
+      html += '</div>';
+      html += '<div style="flex:1;min-width:0">';
+      html += '<div style="font-size:10px;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + title + '</div>';
+      html += '<div style="font-size:9px;color:#888">' + side + ' ' + price + 'c x' + (p.count || 0) + '</div>';
+      html += '</div>';
+      html += '<div style="flex-shrink:0;text-align:right">';
+      html += '<span style="font-size:11px;font-weight:600;color:' + pnlColor + '">' + pnlSign + '$' + pnlUsd + '</span>';
+      html += '</div>';
+      html += '</div>';
+    });
+    el.innerHTML = html;
+  } catch(e) {
+    console.log('closingSoon error', e);
+  }
+}
+setTimeout(loadClosingSoon, 4000);
+setInterval(loadClosingSoon, 30000);
 
 // --- News Feed ---
 var _newsLoaded = false;
