@@ -11097,20 +11097,20 @@ a:hover { color: #7da5f5; }
 <!-- Positions Tab -->
 <div class="tab-content active" id="tab-positions">
   <!-- Live Feed + Bets Placed Today + Closing Soon -->
-  <div style="display:grid;grid-template-columns:1fr 1.2fr 1fr;gap:12px;margin-bottom:16px">
-    <div class="section">
+  <div style="display:grid;grid-template-columns:1fr 1.2fr 1fr;gap:12px;margin-bottom:16px;min-width:0">
+    <div class="section" style="min-width:0;overflow:hidden">
       <div class="section-title">Live Feed <span style="width:8px;height:8px;border-radius:50%;background:#00dc5a;display:inline-block;animation:pulse 2s infinite" id="activity-pulse-dash"></span></div>
       <div class="activity-bar" id="activity-feed-dash" style="max-height:300px;overflow-y:auto">
         <div id="activity-lines-dash"><div class="activity-line"><span class="time">--:--</span><span class="dot info"></span><span class="msg">Waiting for first scan...</span></div></div>
       </div>
     </div>
-    <div class="section">
+    <div class="section" style="min-width:0;overflow:hidden">
       <div class="section-title">Bets Placed Today <span class="badge" id="bets-today-count-dash">0</span> <span style="width:8px;height:8px;border-radius:50%;background:#ffb400;display:inline-block" id="bets-pulse-dash"></span></div>
       <div class="activity-bar" id="bets-feed-dash" style="max-height:300px;overflow-y:auto">
         <div id="bets-lines-dash"><div class="activity-line"><span class="time">--:--</span><span class="dot info"></span><span class="msg">Loading trade history...</span></div></div>
       </div>
     </div>
-    <div class="section">
+    <div class="section" style="min-width:0;overflow:hidden">
       <div class="section-title">Closing Soon <span class="badge" id="closing-soon-count">0</span> <span style="width:8px;height:8px;border-radius:50%;background:#ff5000;display:inline-block;animation:pulse 2s infinite"></span></div>
       <div class="activity-bar" id="closing-soon-feed" style="max-height:300px;overflow-y:auto">
         <div id="closing-soon-lines"><div class="activity-line"><span class="time">--:--</span><span class="dot info"></span><span class="msg">Loading positions...</span></div></div>
