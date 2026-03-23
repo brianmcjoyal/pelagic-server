@@ -5642,20 +5642,12 @@ def settled_positions():
                 continue
 
             ticker = pos.get("ticker", "")
-            # Filter: only Day 1+ trades
+            # Filter: only Day 1+ trades that are in our trade history
             trade_date = _trade_dates.get(ticker, "")
-            if trade_date and trade_date < _day1_cutoff:
-                continue
-            # If not in trade history at all, check if it's a known sport ticker (bot trade)
-            # Otherwise skip (likely pre-Day-1 junk)
             if not trade_date:
-                _tk_upper = ticker.upper()
-                _known_bot = any(_tk_upper.startswith(p) for p in [
-                    "KXKBL", "KXATP", "KXWTA", "KXNCAA", "KXNBA", "KXNHL",
-                    "KXMLB", "KXUFC", "KXMMA", "KXEPL", "KXNFL", "KXMLS",
-                    "KXWNBA", "KXSOCCER", "KXPGA"])
-                if not _known_bot:
-                    continue
+                continue  # Not in recent trade history — skip
+            if trade_date < _day1_cutoff:
+                continue  # Pre-Day-1 — skip
 
             title = _get_title(ticker)
             traded_cents = _parse_kalshi_dollars(pos.get("total_traded_dollars") or pos.get("total_traded"))
@@ -12127,7 +12119,7 @@ async function loadSettled() {
     } else {
       // Server already sorts: past close_times first (newest), future at bottom
       // No client-side re-sort needed
-      var tbl = '<div style="display:flex;flex-direction:column;gap:4px">';
+      var tbl = '<div style="display:flex;flex-direction:column;gap:6px">';
       settled.forEach(function(s) {
         var isWin = s.won === true;
         var isLoss = s.won === false;
@@ -12136,28 +12128,32 @@ async function loadSettled() {
         var pnlColor = isWin ? '#00dc5a' : isLoss ? '#ff5000' : '#888';
         var pnlSign = isWin ? '+$' : '-$';
         var resultLabel = isWin ? 'WON' : isLoss ? 'LOST' : 'EVEN';
-        var bgColor = isWin ? 'rgba(0,220,90,0.06)' : isLoss ? 'rgba(255,80,0,0.06)' : 'rgba(50,50,50,0.3)';
+        var bgColor = isWin ? 'rgba(0,220,90,0.05)' : isLoss ? 'rgba(255,80,0,0.05)' : 'rgba(50,50,50,0.2)';
+        // Use trade_date for when the bet was placed
         var dateStr = '';
-        if (s.close_time) {
+        var tdRaw = s.trade_date || '';
+        if (tdRaw) {
           try {
-            var dt = new Date(s.close_time);
-            var now = new Date();
-            var diffH = Math.floor((now - dt) / 3600000);
-            if (diffH < 1) dateStr = 'Just now';
-            else if (diffH < 24) dateStr = diffH + 'h ago';
-            else if (diffH < 48) dateStr = 'Yesterday';
-            else dateStr = dt.toLocaleDateString('en-US', {month:'short', day:'numeric'});
-          } catch(e) {}
+            var parts = tdRaw.split('-');
+            var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+            dateStr = months[parseInt(parts[1])-1] + ' ' + parseInt(parts[2]);
+          } catch(e) { dateStr = tdRaw; }
         }
         var costStr = s.total_traded ? '$' + s.total_traded.toFixed(2) : '';
-        tbl += '<div style="background:' + bgColor + ';border-left:3px solid ' + borderColor + ';padding:8px 12px;border-radius:4px;display:flex;justify-content:space-between;align-items:center">';
+        var catLabel = s.category ? s.category.charAt(0).toUpperCase() + s.category.slice(1) : '';
+        tbl += '<div style="background:' + bgColor + ';border-left:3px solid ' + borderColor + ';padding:10px 14px;border-radius:6px;display:flex;justify-content:space-between;align-items:center">';
         tbl += '<div style="flex:1;min-width:0">';
-        tbl += '<div style="color:#ddd;font-size:11px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + s.title + '</div>';
-        tbl += '<div style="color:#888;font-size:9px;margin-top:2px">' + dateStr + (costStr ? ' · Bet ' + costStr : '') + (s.category ? ' · ' + s.category : '') + '</div>';
+        tbl += '<div style="color:#eee;font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + s.title + '</div>';
+        tbl += '<div style="color:#777;font-size:10px;margin-top:3px">';
+        if (dateStr) tbl += dateStr;
+        if (costStr) tbl += ' · Bet ' + costStr;
+        if (catLabel) tbl += ' · ' + catLabel;
+        if (s.side) tbl += ' · ' + s.side.toUpperCase();
         tbl += '</div>';
-        tbl += '<div style="text-align:right;margin-left:12px;flex-shrink:0">';
-        tbl += '<div style="color:' + pnlColor + ';font-size:14px;font-weight:800">' + pnlSign + pnlAbs + '</div>';
-        tbl += '<div style="color:' + pnlColor + ';font-size:9px;font-weight:600">' + resultLabel + '</div>';
+        tbl += '</div>';
+        tbl += '<div style="text-align:right;margin-left:16px;flex-shrink:0">';
+        tbl += '<div style="color:' + pnlColor + ';font-size:15px;font-weight:800">' + pnlSign + pnlAbs + '</div>';
+        tbl += '<div style="color:' + pnlColor + ';font-size:10px;font-weight:600;letter-spacing:0.5px">' + resultLabel + '</div>';
         tbl += '</div></div>';
       });
       tbl += '</div>';
