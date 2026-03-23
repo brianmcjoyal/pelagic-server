@@ -2303,17 +2303,19 @@ def run_bot_scan():
         _log_activity("Scanning all platforms...")
         all_markets = fetch_all_markets()
         BOT_STATE["last_scan_markets"] = len(all_markets)
-
+        # Consensus mispricing detection (data only, trading disabled)
         mispricings = find_consensus_mispricings(all_markets)
         BOT_STATE["last_scan_mispriced"] = len(mispricings)
-        _log_activity(f"Scan complete: {len(all_markets)} markets, {len(mispricings)} mispriced")
+
+        # Count live game markets for the log
+        _live_count = sum(1 for m in all_markets if m.get("platform") == "kalshi" and any(pfx in (m.get("id") or "") for pfx in LIVE_GAME_SERIES))
+        _log_activity(f"Scan complete: {len(all_markets)} markets, {_live_count} live game markets")
 
         if not BOT_CONFIG["enabled"]:
             _log_activity("Auto-trade OFF — skipping trades")
             return
 
-        # CONSENSUS TRADING DISABLED — these strategies lost money (11% win rate)
-        # Live Game Sniper + 75%'ers handle all trading now
+        # Consensus trading disabled — live strategies handle all trading
         return
 
         # SAFETY: check balance floor before trading
@@ -5509,15 +5511,22 @@ def _background_loop():
     while True:
         try:
             cycle += 1
-            # Run bot scan — data only, no trades from consensus/quant strategies
-            # (These strategies produced 16 losses at 11% win rate — disabled)
+            # Run bot scan — data only, consensus trading disabled
             run_bot_scan()
             _time.sleep(2)  # yield to web requests
-            # Live game sniper — THE winning strategy (70%+ live markets)
-            live_game_snipe()
+            # Live game sniper — high-probability favorites (70-90c)
+            _snipe_results = live_game_snipe()
             _time.sleep(2)  # yield to web requests
-            # MoonShark — longshot underdog sniper (10-30c contracts)
-            moonshark_snipe()
+            # MoonShark — longshot underdog sniper (10-45c contracts)
+            _ms_results = moonshark_snipe()
+            _time.sleep(2)  # yield to web requests
+            # Log strategy summary every 5 cycles (~10 min) so feed isn't silent
+            if cycle % 5 == 0:
+                _snipe_ct = len(BOT_STATE.get("snipe_trades_today", []))
+                _ms_ct = len(BOT_STATE.get("moonshark_trades_today", []))
+                _cg_ct = len(BOT_STATE.get("closegame_trades_today", []))
+                _total_ct = _snipe_ct + _ms_ct + _cg_ct
+                _log_activity(f"Strategy status: {_total_ct} trades today (Sniper:{_snipe_ct} Moon:{_ms_ct} Close:{_cg_ct})")
             _time.sleep(2)  # yield to web requests
             # Close-Game Sniper runs on its own fast thread (10s loop)
             # QUANT ENGINE DISABLED — mean reversion + market making lost money
