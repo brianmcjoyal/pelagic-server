@@ -7667,6 +7667,24 @@ def trades():
                             }
     except Exception:
         pass
+    # Build buy/sell P&L from fills: group by ticker, match buys with sells
+    _fill_pnl = {}
+    _buys = {}
+    _sells = {}
+    for t in BOT_STATE["all_trades"]:
+        tk = t.get("ticker", "")
+        action = t.get("action", "buy")
+        cost = t.get("cost_usd", 0) or 0
+        if action == "sell":
+            _sells[tk] = _sells.get(tk, 0) + cost
+        else:
+            _buys[tk] = _buys.get(tk, 0) + cost
+    # If we have both buy and sell for a ticker, calculate P&L
+    for tk in _sells:
+        if tk in _buys:
+            pnl = round(_sells[tk] - _buys[tk], 2)
+            _fill_pnl[tk] = {"result": "win" if pnl > 0 else "loss", "pnl_usd": pnl}
+
     # Enrich all_trades with settlement outcome
     enriched = []
     for t in BOT_STATE["all_trades"]:
@@ -7675,6 +7693,9 @@ def trades():
         if ticker in settle_map:
             tc["outcome"] = settle_map[ticker]["result"]
             tc["pnl_usd"] = settle_map[ticker]["pnl_usd"]
+        elif ticker in _fill_pnl:
+            tc["outcome"] = _fill_pnl[ticker]["result"]
+            tc["pnl_usd"] = _fill_pnl[ticker]["pnl_usd"]
         else:
             tc["outcome"] = None
         enriched.append(tc)
