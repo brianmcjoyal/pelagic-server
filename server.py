@@ -154,6 +154,12 @@ _STATE_FILE = "/tmp/tradeshark_state.json"
 # The later sections that reference these will use the same objects (not re-assign).
 _TRADE_JOURNAL = []  # List of enriched trade records with full metadata
 _CATEGORY_STATS = {}  # {cat: {"wins": 0, "losses": 0, "pnl": 0.0}}
+_LEARNING_STATE = {
+    "last_run": None,
+    "version": 0,
+    "parameters": {},  # learned thresholds/weights per dimension
+    "insights": [],    # human-readable learning outputs
+}
 
 def _save_state():
     """Persist trade data to disk.
@@ -181,6 +187,8 @@ def _save_state():
             "moonshark_date": BOT_STATE.get("moonshark_date"),
             # Persist manual trades today
             "manual_trades_today": BOT_STATE.get("manual_trades_today", []),
+            # Learning engine state
+            "learning_state": _LEARNING_STATE,
             # Timestamp for date-check on load
             "save_date": datetime.datetime.utcnow().strftime("%Y-%m-%d"),
         }
@@ -244,6 +252,12 @@ def _load_state():
             _CATEGORY_STATS.clear()
             _CATEGORY_STATS.update(saved_cat_stats)
             print(f"[STATE] Restored {len(_CATEGORY_STATS)} category stats from disk")
+
+        saved_learning = data.get("learning_state", {})
+        if saved_learning:
+            _LEARNING_STATE.clear()
+            _LEARNING_STATE.update(saved_learning)
+            print(f"[STATE] Restored learning state v{_LEARNING_STATE.get('version', 0)} from disk")
 
         print(f"[STATE] Restored {len(BOT_STATE['all_trades'])} trades from disk, "
               f"daily_spent reset to $0 for new session, same_day={is_same_day}")
@@ -2732,7 +2746,9 @@ def live_game_snipe():
                         pass
 
                 # Calculate quantity — bankroll-scaled sizing for compound growth
-                cat_mult = _category_multiplier(ticker, title)
+                cat_mult = _learning_multiplier(ticker, title, price)
+                if cat_mult <= 0:
+                    continue  # blocked by learning engine
                 bet_usd = _smart_bet_size(price, bankroll=bal if bal > 0 else None) * closing_boost * cat_mult
                 count = max(1, min(50, int(bet_usd * 100 / price)))
                 cost_usd = (price * count) / 100.0
@@ -2789,8 +2805,13 @@ def live_game_snipe():
                             "strategy": "live_sniper",
                             "category": classify_market_category(title, ticker),
                         })
-                        # Track in trade journal for pattern analysis
-                        _journal_trade(ticker, title, side, price, filled, actual_cost, "live_sniper", is_live=True, close_time=mkt.get("close_time", ""))
+                        # Track in trade journal for pattern analysis (pass orderbook if available)
+                        _snipe_ob = None
+                        try:
+                            _snipe_ob = analyze_orderbook(ticker)
+                        except Exception:
+                            pass
+                        _journal_trade(ticker, title, side, price, filled, actual_cost, "live_sniper", is_live=True, close_time=mkt.get("close_time", ""), orderbook_data=_snipe_ob)
                         _log_activity(
                             f"🎯 SNIPED! {side.upper()} {ticker} @ {price}c x{filled} "
                             f"= ${actual_cost:.2f} (potential +${potential:.2f}) | {title[:40]}",
@@ -3081,10 +3102,10 @@ def moonshark_snipe():
                 kelly_usd = kelly_bet_size(kelly_bankroll, win_prob, odds_decimal)
                 # Floor $3, cap at fair share of remaining budget
                 max_per_trade = remaining_budget / max(trades_left, 1)
-                # Category multiplier — bet bigger on proven winners
-                cat_mult = _category_multiplier(ticker, title)
+                # Learning multiplier — bet bigger on proven patterns, skip losers
+                cat_mult = _learning_multiplier(ticker, title, price)
                 if cat_mult <= 0:
-                    continue  # blocked category
+                    continue  # blocked by learning engine
 
                 # Live sports priority — same-day events get 2x, >12h gets 1x
                 live_boost = 1.0
@@ -3181,7 +3202,19 @@ def moonshark_snipe():
                             "category": classify_market_category(title, ticker),
                         })
                         # Track in trade journal for pattern analysis
-                        _journal_trade(ticker, title, side, price, filled, actual_cost, "moonshark", is_live=True, close_time=mkt.get("close_time", ""))
+                        _edge_data = None
+                        try:
+                            if espn_edge is not None:
+                                _edge_data = {"espn_implied": espn_implied, "espn_edge": espn_edge}
+                        except Exception:
+                            pass
+                        _ob_data = None
+                        try:
+                            _ob_data = _ob
+                        except Exception:
+                            pass
+                        _journal_trade(ticker, title, side, price, filled, actual_cost, "moonshark", is_live=True, close_time=mkt.get("close_time", ""),
+                                       game_info=_game_info, espn_edge_data=_edge_data, orderbook_data=_ob_data)
                         _log_activity(
                             f"MOONSHARK HIT! {side.upper()} {ticker} @ {price}c x{filled} "
                             f"= ${actual_cost:.2f} (potential +${potential:.2f}) | {title[:40]}",
@@ -3488,7 +3521,15 @@ def closegame_snipe():
                             "margin": cg["margin"],
                             "period": cg["period"],
                         })
-                        _journal_trade(ticker, title, side, price, filled, actual_cost, "closegame", is_live=True, close_time=mkt.get("close_time", ""))
+                        _cg_game_info = {"home_score": cg.get("home_score"), "away_score": cg.get("away_score"), "clock": cg.get("period", ""), "state": "in", "league": cg.get("sport", "")}
+                        _cg_edge = None
+                        try:
+                            if edge:
+                                _cg_edge = {"espn_implied": win_prob, "espn_edge": edge}
+                        except Exception:
+                            pass
+                        _journal_trade(ticker, title, side, price, filled, actual_cost, "closegame", is_live=True, close_time=mkt.get("close_time", ""),
+                                       game_info=_cg_game_info, espn_edge_data=_cg_edge)
                         _log_activity(
                             f"🎯 CLOSEGAME HIT! {side.upper()} {underdog} @ {price}c x{filled} "
                             f"= ${actual_cost:.2f} (potential +${potential:.2f}) | {score_str}",
@@ -4662,6 +4703,280 @@ def _category_multiplier(ticker, title):
 
 
 # ---------------------------------------------------------------------------
+# LEARNING ENGINE — Analyzes trade history to identify winning patterns
+# ---------------------------------------------------------------------------
+
+def _price_bucket(price_cents):
+    """Map price to a bucket for learning analysis."""
+    if not price_cents:
+        return "unknown"
+    if price_cents < 15:
+        return "10-15"
+    elif price_cents < 20:
+        return "15-20"
+    elif price_cents < 25:
+        return "20-25"
+    elif price_cents < 30:
+        return "25-30"
+    elif price_cents < 35:
+        return "30-35"
+    elif price_cents < 45:
+        return "35-45"
+    elif price_cents < 60:
+        return "45-60"
+    elif price_cents < 75:
+        return "60-75"
+    elif price_cents < 90:
+        return "75-90"
+    else:
+        return "90+"
+
+
+def _game_situation_key(rec):
+    """Map game state to a situation bucket for learning."""
+    margin = rec.get("game_margin")
+    period = rec.get("game_period", "")
+    if margin is None:
+        return "unknown"
+    # Classify period as early/mid/late
+    period_phase = "unknown"
+    p_upper = period.upper()
+    if any(x in p_upper for x in ["Q4", "4TH", "OT", "P3", "3RD", "2H"]):
+        period_phase = "late"
+    elif any(x in p_upper for x in ["Q3", "Q2", "P2", "2ND", "1H"]):
+        period_phase = "mid"
+    elif any(x in p_upper for x in ["Q1", "1ST", "P1"]):
+        period_phase = "early"
+    # Classify margin
+    if margin == 0:
+        margin_key = "tied"
+    elif margin <= 3:
+        margin_key = "close_1-3"
+    elif margin <= 7:
+        margin_key = "mid_4-7"
+    elif margin <= 12:
+        margin_key = "far_8-12"
+    else:
+        margin_key = "blowout_13+"
+    return f"{period_phase}_{margin_key}"
+
+
+def _compute_bucket_stats(trades, key_fn):
+    """Compute win/loss/ROI stats grouped by a key function."""
+    buckets = {}
+    for t in trades:
+        if not t.get("result"):
+            continue  # skip unsettled
+        key = key_fn(t)
+        if key not in buckets:
+            buckets[key] = {"wins": 0, "losses": 0, "pnl": 0.0, "total_cost": 0.0}
+        b = buckets[key]
+        if t["result"] == "win":
+            b["wins"] += 1
+        elif t["result"] == "loss":
+            b["losses"] += 1
+        b["pnl"] += t.get("pnl_usd", 0) or 0
+        b["total_cost"] += t.get("cost_usd", 0) or 0
+
+    # Compute derived stats
+    result = {}
+    for key, b in buckets.items():
+        total = b["wins"] + b["losses"]
+        if total == 0:
+            continue
+        win_rate = b["wins"] / total
+        roi = b["pnl"] / max(0.01, b["total_cost"])
+        # Confidence: 0 for <5, 0.5 for 5-9, 1.0 for 10+
+        if total < 5:
+            confidence = 0.0
+        elif total < 10:
+            confidence = 0.5
+        else:
+            confidence = 1.0
+        # Weight: scale by win rate and ROI
+        if win_rate >= 0.25:
+            weight = 2.5
+        elif win_rate >= 0.15:
+            weight = 1.8
+        elif win_rate >= 0.10:
+            weight = 1.2
+        elif win_rate > 0:
+            weight = 0.5
+        else:
+            weight = 0.0  # 0% win rate = block
+        result[key] = {
+            "weight": round(weight, 2),
+            "win_rate": round(win_rate, 4),
+            "roi": round(roi, 4),
+            "sample_size": total,
+            "wins": b["wins"],
+            "losses": b["losses"],
+            "pnl": round(b["pnl"], 2),
+            "confidence": confidence,
+        }
+    return result
+
+
+def _learning_engine():
+    """Analyze trade history and adjust strategy parameters automatically.
+
+    Runs hourly + on startup. Requires 10+ settled trades before making adjustments.
+    """
+    settled = [t for t in _TRADE_JOURNAL if t.get("result")]
+    if len(settled) < 10:
+        return  # not enough data to learn from
+
+    insights = []
+
+    # 1. Category performance
+    cat_weights = _compute_bucket_stats(settled, lambda t: t.get("category", "other"))
+    _LEARNING_STATE["parameters"]["category_weights"] = cat_weights
+    # Find best/worst categories
+    for cat, stats in sorted(cat_weights.items(), key=lambda x: x[1]["win_rate"], reverse=True):
+        if stats["confidence"] >= 0.5:
+            if stats["win_rate"] >= 0.15:
+                insights.append(f"✅ {cat}: {stats['win_rate']:.0%} win rate ({stats['wins']}W/{stats['losses']}L) → BOOSTED")
+            elif stats["win_rate"] == 0 and stats["sample_size"] >= 5:
+                insights.append(f"🚫 {cat}: 0% win rate on {stats['sample_size']} trades → BLOCKED")
+
+    # 2. Sport type performance
+    sport_weights = _compute_bucket_stats(settled, lambda t: t.get("sport_type", "other"))
+    _LEARNING_STATE["parameters"]["sport_weights"] = sport_weights
+
+    # 3. Price range performance
+    price_weights = _compute_bucket_stats(settled, lambda t: _price_bucket(t.get("price_cents")))
+    _LEARNING_STATE["parameters"]["price_range_weights"] = price_weights
+    best_price = max(price_weights.items(), key=lambda x: x[1]["win_rate"], default=(None, None))
+    if best_price[1] and best_price[1]["confidence"] >= 0.5:
+        insights.append(f"💰 Best price range: {best_price[0]}¢ ({best_price[1]['win_rate']:.0%} win rate)")
+
+    # 4. Game situation performance (only for trades with game data)
+    game_trades = [t for t in settled if t.get("game_margin") is not None]
+    if len(game_trades) >= 5:
+        game_weights = _compute_bucket_stats(game_trades, _game_situation_key)
+        _LEARNING_STATE["parameters"]["game_situation_weights"] = game_weights
+
+    # 5. ESPN edge performance
+    edge_trades = [t for t in settled if t.get("espn_edge") is not None]
+    if len(edge_trades) >= 5:
+        def _edge_bucket(t):
+            e = t.get("espn_edge", 0) or 0
+            if e < 0:
+                return "negative"
+            elif e < 0.05:
+                return "0-5%"
+            elif e < 0.10:
+                return "5-10%"
+            elif e < 0.20:
+                return "10-20%"
+            else:
+                return "20%+"
+        edge_weights = _compute_bucket_stats(edge_trades, _edge_bucket)
+        _LEARNING_STATE["parameters"]["edge_weights"] = edge_weights
+        # Find minimum profitable edge
+        for bucket in ["negative", "0-5%", "5-10%", "10-20%", "20%+"]:
+            if bucket in edge_weights and edge_weights[bucket].get("win_rate", 0) >= 0.10:
+                insights.append(f"📊 Minimum profitable edge: {bucket}")
+                break
+
+    # 6. Time of day performance
+    hour_weights = _compute_bucket_stats(settled, lambda t: str(t.get("entry_hour", "?")))
+    _LEARNING_STATE["parameters"]["hour_weights"] = hour_weights
+
+    # 7. Strategy performance
+    strat_weights = _compute_bucket_stats(settled, lambda t: t.get("strategy", "unknown"))
+    _LEARNING_STATE["parameters"]["strategy_weights"] = strat_weights
+
+    # 8. Market type performance
+    mtype_weights = _compute_bucket_stats(settled, lambda t: t.get("market_type", "unknown"))
+    _LEARNING_STATE["parameters"]["market_type_weights"] = mtype_weights
+
+    # Update state
+    _LEARNING_STATE["version"] = _LEARNING_STATE.get("version", 0) + 1
+    _LEARNING_STATE["last_run"] = datetime.datetime.utcnow().isoformat() + "Z"
+    _LEARNING_STATE["insights"] = insights[-20:]  # keep last 20
+
+    _log_activity(
+        f"🧠 Learning v{_LEARNING_STATE['version']}: {len(settled)} trades analyzed, "
+        f"{len([i for i in insights if '✅' in i])} boosted, "
+        f"{len([i for i in insights if '🚫' in i])} blocked",
+        "info"
+    )
+    _save_state()
+
+
+def _learning_multiplier(ticker, title, price_cents=None, game_info=None, espn_edge=None):
+    """Compute composite bet sizing multiplier from all learned dimensions.
+
+    Returns 0.0 (skip) to 3.0 (max confidence). Each dimension contributes
+    independently, weighted by confidence. Uses geometric mean.
+    """
+    import math
+    params = _LEARNING_STATE.get("parameters", {})
+    if not params:
+        return 1.0  # no learned data yet, neutral
+
+    multipliers = []
+
+    # Category weight
+    cat = classify_market_category(title or "", ticker or "")
+    cat_w = params.get("category_weights", {}).get(cat, {})
+    if cat_w.get("confidence", 0) >= 0.5:
+        if cat_w["weight"] == 0.0:
+            return 0.0  # hard block — 0% win rate on 5+ trades
+        multipliers.append(cat_w["weight"])
+
+    # Sport type weight
+    t_upper = (ticker or "").upper()
+    sport = "other"
+    sport_map = {"KXATP": "tennis", "KXWTA": "tennis", "KXNBA": "basketball", "KXNHL": "hockey",
+                 "KXMLB": "baseball", "KXNFL": "football", "KXNCAAMB": "college_basketball",
+                 "KXNCAAWB": "college_basketball", "KXKBL": "kbo", "KXSOCCER": "soccer",
+                 "KXMLS": "soccer", "KXEPL": "soccer"}
+    for pfx, sp in sport_map.items():
+        if t_upper.startswith(pfx):
+            sport = sp
+            break
+    sport_w = params.get("sport_weights", {}).get(sport, {})
+    if sport_w.get("confidence", 0) >= 0.5:
+        if sport_w["weight"] == 0.0:
+            return 0.0
+        multipliers.append(sport_w["weight"])
+
+    # Price range weight
+    if price_cents:
+        bucket = _price_bucket(price_cents)
+        price_w = params.get("price_range_weights", {}).get(bucket, {})
+        if price_w.get("confidence", 0) >= 0.5:
+            multipliers.append(price_w["weight"])
+
+    # Game situation weight
+    if game_info and isinstance(game_info, dict):
+        sit_key = _game_situation_key(game_info)
+        sit_w = params.get("game_situation_weights", {}).get(sit_key, {})
+        if sit_w.get("confidence", 0) >= 0.5:
+            multipliers.append(sit_w["weight"])
+
+    # Hour weight
+    hour = str(datetime.datetime.utcnow().hour)
+    hour_w = params.get("hour_weights", {}).get(hour, {})
+    if hour_w.get("confidence", 0) >= 0.5:
+        if hour_w["weight"] == 0.0 and hour_w["sample_size"] >= 10:
+            return 0.0  # hard block hours with 0% on 10+ trades
+        multipliers.append(hour_w["weight"])
+
+    if not multipliers:
+        return 1.0  # no data for any dimension
+
+    # Geometric mean — prevents one dimension from dominating
+    product = 1.0
+    for m in multipliers:
+        product *= max(0.01, m)  # floor at 0.01 to avoid zeroing out
+    result = product ** (1.0 / len(multipliers))
+    return max(0.0, min(3.0, round(result, 3)))
+
+
+# ---------------------------------------------------------------------------
 # TRADE JOURNAL — Comprehensive data tracking for pattern recognition
 # ---------------------------------------------------------------------------
 # Day 1 = March 16, 2026. Only count wins/losses from this date forward.
@@ -4669,7 +4984,7 @@ TRADE_JOURNAL_START = "2026-03-16"
 
 # _TRADE_JOURNAL declared early (near BOT_STATE) so _load_state() can populate it
 
-def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, strategy, is_live=False, close_time=None):
+def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, strategy, is_live=False, close_time=None, game_info=None, espn_edge_data=None, orderbook_data=None):
     """Create an enriched trade record with all metadata for pattern analysis."""
     now = datetime.datetime.utcnow()
     cat = classify_market_category(title or "", ticker or "")
@@ -4698,9 +5013,21 @@ def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, stra
         if t_upper.startswith(pfx):
             sport_type = "football"
             break
-    for pfx in ["KXSOCCER"]:
+    for pfx in ["KXSOCCER", "KXMLS", "KXEPL"]:
         if t_upper.startswith(pfx):
             sport_type = "soccer"
+            break
+    for pfx in ["KXNCAAMB", "KXNCAAWB"]:
+        if t_upper.startswith(pfx):
+            sport_type = "college_basketball"
+            break
+    for pfx in ["KXKBL"]:
+        if t_upper.startswith(pfx):
+            sport_type = "kbo"
+            break
+    for pfx in ["KXMMA", "KXUFC"]:
+        if t_upper.startswith(pfx):
+            sport_type = "mma"
             break
 
     # Hour of day (for time-of-day patterns)
@@ -4739,6 +5066,59 @@ def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, stra
     potential_payout_usd = round((100 * count) / 100.0, 2) if count else 0
     risk_reward_ratio = round(potential_payout_usd / cost_usd, 3) if cost_usd > 0 else 0
 
+    # --- Game state at entry (from ESPN live scores) ---
+    _gs = {}
+    if game_info and isinstance(game_info, dict):
+        _gs = {
+            "game_score_home": game_info.get("home_score"),
+            "game_score_away": game_info.get("away_score"),
+            "game_margin": None,
+            "game_period": game_info.get("clock", ""),
+            "game_state": game_info.get("state", ""),
+            "game_league": game_info.get("league", ""),
+            "bet_team_leading": None,
+        }
+        try:
+            hs = int(game_info.get("home_score", 0))
+            as_ = int(game_info.get("away_score", 0))
+            _gs["game_margin"] = abs(hs - as_)
+        except Exception:
+            pass
+
+    # --- Sportsbook edge data ---
+    _edge = {}
+    if espn_edge_data and isinstance(espn_edge_data, dict):
+        _edge = {
+            "espn_implied_prob": espn_edge_data.get("espn_implied"),
+            "kalshi_implied_prob": round(price_cents / 100.0, 4) if price_cents else None,
+            "espn_edge": espn_edge_data.get("espn_edge"),
+            "odds_provider": espn_edge_data.get("provider", ""),
+        }
+
+    # --- Orderbook data ---
+    _ob = {}
+    if orderbook_data and isinstance(orderbook_data, dict):
+        _ob = {
+            "ob_spread": orderbook_data.get("spread"),
+            "ob_bid_depth": orderbook_data.get("bid_depth"),
+            "ob_ask_depth": orderbook_data.get("ask_depth"),
+            "ob_imbalance": orderbook_data.get("imbalance"),
+            "ob_liquidity": orderbook_data.get("liquidity_score"),
+        }
+
+    # --- Momentum data ---
+    _mom = {}
+    try:
+        mom = get_momentum(ticker)
+        if mom:
+            _mom = {
+                "momentum_direction": mom.get("direction", "flat"),
+                "momentum_magnitude": mom.get("magnitude", 0),
+                "momentum_velocity": mom.get("velocity", 0),
+            }
+    except Exception:
+        pass
+
     return {
         "ticker": ticker,
         "title": title,
@@ -4769,12 +5149,20 @@ def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, stra
         "bet_size_usd": bet_size_usd,
         "potential_payout_usd": potential_payout_usd,
         "risk_reward_ratio": risk_reward_ratio,
+        # --- Game state at entry ---
+        **_gs,
+        # --- Sportsbook edge ---
+        **_edge,
+        # --- Orderbook ---
+        **_ob,
+        # --- Momentum ---
+        **_mom,
     }
 
 
-def _journal_trade(ticker, title, side, price_cents, count, cost_usd, strategy, is_live=False, close_time=None):
-    """Add a trade to the journal."""
-    rec = _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, strategy, is_live, close_time=close_time)
+def _journal_trade(ticker, title, side, price_cents, count, cost_usd, strategy, is_live=False, close_time=None, game_info=None, espn_edge_data=None, orderbook_data=None):
+    """Add a trade to the journal with full enrichment."""
+    rec = _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, strategy, is_live, close_time=close_time, game_info=game_info, espn_edge_data=espn_edge_data, orderbook_data=orderbook_data)
     _TRADE_JOURNAL.append(rec)
     return rec
 
@@ -5517,6 +5905,12 @@ def _background_loop():
     except Exception as e:
         print(f"[BG] Journal rebuild error (non-fatal): {e}")
 
+    # Run learning engine on startup to compute initial parameters
+    try:
+        _learning_engine()
+    except Exception as e:
+        print(f"[BG] Learning engine startup error (non-fatal): {e}")
+
     cycle = 0
     # Portfolio cache warms naturally on first background cycle — no startup delay
     while True:
@@ -5544,6 +5938,12 @@ def _background_loop():
                     # run_quant_strategies(all_mkts)  # DISABLED — losing strategy
                 except Exception as qe:
                     print(f"[QUANT] Data error: {qe}")
+            # Learning engine — runs every 60 cycles (~hourly)
+            if cycle % 60 == 0:
+                try:
+                    _learning_engine()
+                except Exception as _le:
+                    print(f"[LEARNING] Error: {_le}")
             # Check for new settlements — recycle capital fast
             settlements = check_settlements_and_reinvest()
             if settlements:
@@ -6219,6 +6619,20 @@ def settled_positions():
         return jsonify(result)
     except Exception as e:
         return jsonify({"settled": [], "error": str(e)})
+
+
+@app.route("/analytics/learning")
+def analytics_learning():
+    """Return current learning state and parameter adjustments."""
+    settled_count = sum(1 for t in _TRADE_JOURNAL if t.get("result"))
+    return jsonify({
+        "version": _LEARNING_STATE.get("version", 0),
+        "last_run": _LEARNING_STATE.get("last_run"),
+        "parameters": _LEARNING_STATE.get("parameters", {}),
+        "insights": _LEARNING_STATE.get("insights", []),
+        "trade_journal_size": len(_TRADE_JOURNAL),
+        "settled_count": settled_count,
+    })
 
 
 @app.route("/analytics")
