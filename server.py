@@ -2495,8 +2495,8 @@ LIVE_GAME_SERIES = [
 SNIPE_MIN_PRICE = 70   # cents — buy if price >= 70c (Brian's winning range)
 SNIPE_MAX_PRICE = 90   # cents — don't buy above 90c (too little profit margin)
 SNIPE_BET_USD = 15.0   # fallback — now uses _smart_bet_size() for bankroll scaling
-SNIPE_MAX_DAILY = 30.0   # max $30/day
-SNIPE_MAX_TRADES = 3     # max 3 sniper trades/day
+SNIPE_MAX_DAILY = 75.0   # budget per day
+SNIPE_MAX_TRADES = 10    # no hard cap — keep going if opportunities exist
 
 BOT_STATE["snipe_trades_today"] = []
 BOT_STATE["snipe_daily_spent"] = 0.0
@@ -2507,10 +2507,10 @@ BOT_STATE["snipe_profit_usd"] = 0.0
 # MoonShark settings — underdog sniper (10-45c contracts, decent chance + big payout)
 MOONSHARK_MIN_PRICE = 10   # cents — skip sub-10c lottery tickets
 MOONSHARK_MAX_PRICE = 45   # cents — widened from 30c, data shows 30-45c range wins
-MOONSHARK_MAX_DAILY = 25.0  # max $25/day
+MOONSHARK_MAX_DAILY = 75.0  # budget per day
 MOONSHARK_BET_USD = 5.0     # ~$5 per MoonShark bet (Kelly-adjusted)
-MOONSHARK_MIN_TRADES = 3    # aim for at least 3 quality trades per day
-MOONSHARK_MAX_TRADES = 3    # max 3 MoonShark trades/day
+MOONSHARK_MIN_TRADES = 5    # floor — at least 5 per day
+MOONSHARK_MAX_TRADES = 15   # no hard cap — keep going if opportunities exist
 
 BOT_STATE["moonshark_trades_today"] = []
 BOT_STATE["moonshark_daily_spent"] = 0.0
@@ -3212,8 +3212,8 @@ def moonshark_snipe():
 # ---------------------------------------------------------------------------
 # Close-Game Sniper — buy underdogs in tight late-game situations
 # ---------------------------------------------------------------------------
-CLOSEGAME_MAX_DAILY = 20.0   # max $20/day
-CLOSEGAME_MAX_TRADES = 2     # max 2 close-game trades/day
+CLOSEGAME_MAX_DAILY = 50.0   # budget per day
+CLOSEGAME_MAX_TRADES = 10    # no hard cap — keep going if opportunities exist
 CLOSEGAME_MIN_PRICE = 25     # buy at 25-45c (higher probability than MoonShark)
 CLOSEGAME_MAX_PRICE = 45
 
