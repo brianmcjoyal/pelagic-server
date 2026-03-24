@@ -14550,7 +14550,7 @@ async function loadTrends() {
       ph += '</table>';
       pEl.innerHTML = ph;
     } else {
-      pEl.innerHTML = '<div style="color:#555;font-size:10px;text-align:center;padding:8px">Learning engine hasn\'t run yet</div>';
+      pEl.innerHTML = '<div style="color:#555;font-size:10px;text-align:center;padding:8px">Learning engine has not run yet</div>';
     }
   } catch(e) {
     document.getElementById('trends-list').innerHTML = '<div style="color:#ff5000;font-size:11px">Error: ' + e.message + '</div>';
