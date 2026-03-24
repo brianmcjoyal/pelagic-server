@@ -6621,6 +6621,132 @@ def settled_positions():
         return jsonify({"settled": [], "error": str(e)})
 
 
+@app.route("/trends")
+def trends_endpoint():
+    """Generate daily trends from learning engine + trade data."""
+    params = _LEARNING_STATE.get("parameters", {})
+    settled = [t for t in _TRADE_JOURNAL if t.get("result")]
+    total_settled = len(settled)
+    total_wins = sum(1 for t in settled if t["result"] == "win")
+    total_losses = total_settled - total_wins
+    overall_wr = round(total_wins / max(1, total_settled) * 100, 1)
+
+    trends = []
+    enhancements = []
+
+    # --- Trend 1: Best and worst sport ---
+    sport_w = params.get("sport_weights", {})
+    if sport_w:
+        best_sport = max(sport_w.items(), key=lambda x: x[1].get("win_rate", 0), default=None)
+        worst_sport = min((x for x in sport_w.items() if x[1].get("sample_size", 0) >= 3), key=lambda x: x[1].get("win_rate", 0), default=None)
+        if best_sport and best_sport[1].get("sample_size", 0) >= 3:
+            bs = best_sport[1]
+            trends.append({
+                "icon": "🏆", "title": f"{best_sport[0].replace('_', ' ').title()} is our best sport",
+                "detail": f"{bs['win_rate']:.0%} win rate ({bs['wins']}W/{bs['losses']}L) — ${bs['pnl']:+.2f} P&L",
+                "color": "#00dc5a",
+            })
+            enhancements.append({"icon": "🔼", "text": f"Boosting {best_sport[0]} bets to {bs['weight']}x sizing", "color": "#00dc5a"})
+        if worst_sport and worst_sport[1].get("sample_size", 0) >= 3 and worst_sport[0] != (best_sport[0] if best_sport else ""):
+            ws = worst_sport[1]
+            trends.append({
+                "icon": "📉", "title": f"{worst_sport[0].replace('_', ' ').title()} is consistently losing",
+                "detail": f"{ws['win_rate']:.0%} win rate ({ws['wins']}W/{ws['losses']}L) — ${ws['pnl']:+.2f} P&L",
+                "color": "#ff5000",
+            })
+            if ws["weight"] == 0:
+                enhancements.append({"icon": "🚫", "text": f"Blocked {worst_sport[0]} — 0% win rate on {ws['sample_size']}+ trades", "color": "#ff5000"})
+            else:
+                enhancements.append({"icon": "🔽", "text": f"Reduced {worst_sport[0]} bets to {ws['weight']}x sizing", "color": "#ffb400"})
+
+    # --- Trend 2: Best price range ---
+    price_w = params.get("price_range_weights", {})
+    if price_w:
+        profitable_ranges = [(k, v) for k, v in price_w.items() if v.get("win_rate", 0) > 0 and v.get("sample_size", 0) >= 3]
+        if profitable_ranges:
+            best_pr = max(profitable_ranges, key=lambda x: x[1]["win_rate"])
+            bp = best_pr[1]
+            trends.append({
+                "icon": "💰", "title": f"Sweet spot: {best_pr[0]}¢ price range",
+                "detail": f"{bp['win_rate']:.0%} win rate ({bp['wins']}W/{bp['losses']}L) — best risk/reward zone",
+                "color": "#ffb400",
+            })
+            enhancements.append({"icon": "🎯", "text": f"Prioritizing {best_pr[0]}¢ bets with {bp['weight']}x multiplier", "color": "#ffb400"})
+        losing_ranges = [(k, v) for k, v in price_w.items() if v.get("win_rate", 0) == 0 and v.get("sample_size", 0) >= 5]
+        for lr in losing_ranges:
+            trends.append({
+                "icon": "⚠️", "title": f"{lr[0]}¢ range has 0% win rate",
+                "detail": f"0 wins on {lr[1]['sample_size']} trades — dead money zone",
+                "color": "#ff5000",
+            })
+
+    # --- Trend 3: Category insights ---
+    cat_w = params.get("category_weights", {})
+    if cat_w:
+        blocked = [(k, v) for k, v in cat_w.items() if v.get("weight", 1) == 0 and v.get("sample_size", 0) >= 3]
+        for bc in blocked[:2]:
+            trends.append({
+                "icon": "🚫", "title": f"{bc[0].title()} category auto-blocked",
+                "detail": f"{bc[1]['wins']}W/{bc[1]['losses']}L ({bc[1]['win_rate']:.0%}) — learning engine disabled this",
+                "color": "#ff5000",
+            })
+            enhancements.append({"icon": "🛑", "text": f"Category '{bc[0]}' permanently blocked", "color": "#ff5000"})
+
+    # --- Trend 4: Strategy comparison ---
+    strat_w = params.get("strategy_weights", {})
+    if strat_w:
+        for strat, data in sorted(strat_w.items(), key=lambda x: x[1].get("pnl", 0), reverse=True):
+            if data.get("sample_size", 0) >= 3:
+                color = "#00dc5a" if data["pnl"] > 0 else "#ff5000"
+                trends.append({
+                    "icon": "📊", "title": f"{strat.replace('_', ' ').title()} strategy: ${data['pnl']:+.2f}",
+                    "detail": f"{data['win_rate']:.0%} win rate ({data['wins']}W/{data['losses']}L) — {data['sample_size']} trades",
+                    "color": color,
+                })
+                break  # just show the best/worst
+
+    # --- Trend 5: Overall trajectory ---
+    if total_settled >= 5:
+        recent = settled[-20:]  # last 20 trades
+        recent_wins = sum(1 for t in recent if t["result"] == "win")
+        recent_wr = round(recent_wins / len(recent) * 100, 1)
+        trend_dir = "improving" if recent_wr > overall_wr else "declining"
+        trends.append({
+            "icon": "📈" if recent_wr > overall_wr else "📉",
+            "title": f"Win rate is {trend_dir}",
+            "detail": f"Last 20 trades: {recent_wr}% ({recent_wins}W/{len(recent)-recent_wins}L) vs overall {overall_wr}%",
+            "color": "#00dc5a" if recent_wr > overall_wr else "#ff5000",
+        })
+
+    # Fill to 5 trends minimum
+    while len(trends) < 5:
+        trends.append({
+            "icon": "🔍", "title": "Collecting more data",
+            "detail": f"{total_settled} trades analyzed — more data = better patterns. Need 50+ for strong signals.",
+            "color": "#888",
+        })
+
+    # Default enhancements
+    if not enhancements:
+        enhancements.append({"icon": "🧠", "text": "Learning engine active — analyzing patterns across 8 dimensions", "color": "#00d4ff"})
+
+    enhancements.append({"icon": "🔄", "text": f"Learning engine v{_LEARNING_STATE.get('version', 0)} — last run: {_LEARNING_STATE.get('last_run', 'pending')}", "color": "#888"})
+
+    return jsonify({
+        "trends": trends[:5],
+        "enhancements": enhancements,
+        "summary": {
+            "total_settled": total_settled,
+            "overall_win_rate": overall_wr,
+            "total_wins": total_wins,
+            "total_losses": total_losses,
+            "learning_version": _LEARNING_STATE.get("version", 0),
+            "dimensions_learned": len(params),
+        },
+        "parameters": params,
+    })
+
+
 @app.route("/analytics/learning")
 def analytics_learning():
     """Return current learning state and parameter adjustments."""
@@ -11571,6 +11697,7 @@ a:hover { color: #7da5f5; }
   <button class="tab" onclick="switchTab('moonshark')" style="color:#00d4ff">&#x1F988; MoonShark</button>
   <button class="tab" onclick="switchTab('history')">History</button>
   <button class="tab" onclick="switchTab('analytics')">Analytics</button>
+  <button class="tab" onclick="switchTab('trends')" style="color:#e040fb">Trends</button>
 </div>
 
 <!-- Positions Tab -->
@@ -11857,6 +11984,35 @@ a:hover { color: #7da5f5; }
   </div>
 </div>
 
+<!-- Trends Tab -->
+<div class="tab-content" id="tab-trends">
+  <div class="section">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <div>
+        <div style="color:#e040fb;font-size:18px;font-weight:800;letter-spacing:0.5px">&#x1F4CA; Daily Trends</div>
+        <div style="color:#888;font-size:10px;margin-top:2px">Updated daily from trade data &bull; Learning engine v<span id="trend-version">0</span></div>
+      </div>
+      <button class="refresh-btn" onclick="loadTrends()">Refresh</button>
+    </div>
+    <div id="trends-date" style="color:#555;font-size:11px;margin-bottom:16px">Last updated: --</div>
+    <div id="trends-list" style="display:flex;flex-direction:column;gap:14px">
+      <div class="loading">Analyzing trade patterns...</div>
+    </div>
+    <div style="margin-top:24px">
+      <div style="color:#00d4ff;font-size:14px;font-weight:700;margin-bottom:10px">&#x1F527; Enhancements Deployed</div>
+      <div id="trends-enhancements" style="display:flex;flex-direction:column;gap:8px">
+        <div class="loading">Loading...</div>
+      </div>
+    </div>
+    <div style="margin-top:24px">
+      <div style="color:#ffb400;font-size:14px;font-weight:700;margin-bottom:10px">&#x1F9E0; Learning Parameters</div>
+      <div id="trends-params" style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:12px;overflow-x:auto">
+        <div class="loading">Loading...</div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- News Tab -->
 <div class="tab-content" id="tab-news">
   <div class="section">
@@ -11930,6 +12086,7 @@ function switchTab(name) {
   if (name === 'moonshark') loadMoonshark();
   if (name === 'history') { loadSettled(); loadTrades(); }
   if (name === 'analytics') { loadAnalytics(); loadInsights(); loadSeventyFivers(); loadQuantPicks(); loadNews(); loadNewsIdeas(); }
+  if (name === 'trends') { loadTrends(); }
   // Legacy support for hidden tabs
   if (name === 'activity') { loadActivity(); loadBetsFeed(); loadAllBets(); }
 }
@@ -14324,6 +14481,79 @@ async function loadInsights() {
   } catch(e) {
     console.error('Insights load error', e);
     document.getElementById('daily-insights-feed').innerHTML = '<div style="color:#ff5000;font-size:12px">Error loading insights: ' + e.message + '</div>';
+  }
+}
+
+// --- Trends Tab ---
+async function loadTrends() {
+  try {
+    var data = await fetch(API + '/trends').then(function(r){ return r.json(); });
+    // Version
+    var vEl = document.getElementById('trend-version');
+    if (vEl) vEl.textContent = data.summary ? data.summary.learning_version : 0;
+    // Date
+    var dEl = document.getElementById('trends-date');
+    if (dEl) dEl.textContent = 'Overall: ' + (data.summary ? data.summary.overall_win_rate : 0) + '% win rate (' + (data.summary ? data.summary.total_wins : 0) + 'W / ' + (data.summary ? data.summary.total_losses : 0) + 'L) across ' + (data.summary ? data.summary.total_settled : 0) + ' settled trades';
+
+    // Trends list
+    var tEl = document.getElementById('trends-list');
+    if (data.trends && data.trends.length > 0) {
+      var h = '';
+      data.trends.forEach(function(t, i) {
+        h += '<div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:14px;display:flex;gap:12px;align-items:flex-start">';
+        h += '<div style="font-size:24px;min-width:32px;text-align:center">' + t.icon + '</div>';
+        h += '<div style="flex:1">';
+        h += '<div style="color:' + t.color + ';font-size:13px;font-weight:700">' + (i+1) + '. ' + t.title + '</div>';
+        h += '<div style="color:#888;font-size:11px;margin-top:4px">' + t.detail + '</div>';
+        h += '</div></div>';
+      });
+      tEl.innerHTML = h;
+    } else {
+      tEl.innerHTML = '<div style="color:#555;font-size:11px;padding:20px;text-align:center">No trends yet — need more settled trades</div>';
+    }
+
+    // Enhancements
+    var eEl = document.getElementById('trends-enhancements');
+    if (data.enhancements && data.enhancements.length > 0) {
+      var eh = '';
+      data.enhancements.forEach(function(e) {
+        eh += '<div style="background:#0a1a0a;border:1px solid #1a3a1a;border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:8px">';
+        eh += '<span style="font-size:16px">' + e.icon + '</span>';
+        eh += '<span style="color:' + e.color + ';font-size:11px;font-weight:600">' + e.text + '</span>';
+        eh += '</div>';
+      });
+      eEl.innerHTML = eh;
+    }
+
+    // Learning parameters summary
+    var pEl = document.getElementById('trends-params');
+    var params = data.parameters || {};
+    var pKeys = Object.keys(params);
+    if (pKeys.length > 0) {
+      var ph = '<table style="font-size:10px;width:100%"><tr><th style="text-align:left">Dimension</th><th>Buckets</th><th>Best</th><th>Worst</th></tr>';
+      pKeys.forEach(function(dim) {
+        var buckets = params[dim];
+        var bKeys = Object.keys(buckets);
+        var best = null, worst = null;
+        bKeys.forEach(function(k) {
+          var b = buckets[k];
+          if (!best || b.win_rate > best.wr) best = {name: k, wr: b.win_rate, n: b.sample_size};
+          if (!worst || b.win_rate < worst.wr) worst = {name: k, wr: b.win_rate, n: b.sample_size};
+        });
+        ph += '<tr>';
+        ph += '<td style="color:#ccc;font-weight:600">' + dim.replace(/_/g, ' ') + '</td>';
+        ph += '<td style="color:#888;text-align:center">' + bKeys.length + '</td>';
+        ph += '<td style="color:#00dc5a;text-align:center">' + (best ? best.name + ' (' + (best.wr*100).toFixed(0) + '%)' : '--') + '</td>';
+        ph += '<td style="color:#ff5000;text-align:center">' + (worst ? worst.name + ' (' + (worst.wr*100).toFixed(0) + '%)' : '--') + '</td>';
+        ph += '</tr>';
+      });
+      ph += '</table>';
+      pEl.innerHTML = ph;
+    } else {
+      pEl.innerHTML = '<div style="color:#555;font-size:10px;text-align:center;padding:8px">Learning engine hasn\'t run yet</div>';
+    }
+  } catch(e) {
+    document.getElementById('trends-list').innerHTML = '<div style="color:#ff5000;font-size:11px">Error: ' + e.message + '</div>';
   }
 }
 
