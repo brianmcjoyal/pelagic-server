@@ -7564,6 +7564,25 @@ def trades_today_endpoint():
                     }
         except Exception:
             pass
+    # Check realized P&L for settled positions
+    _settled_pnl = {}
+    try:
+        _sph = signed_headers("GET", "/portfolio/positions")
+        if _sph:
+            _spr = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/positions",
+                headers=_sph, params={"limit": 200, "settlement_status": "settled"},
+                timeout=8,
+            )
+            if _spr.ok:
+                for _sp in _spr.json().get("market_positions", []):
+                    _stk = _sp.get("ticker", "")
+                    _spnl = _parse_kalshi_dollars(_sp.get("realized_pnl_dollars") or _sp.get("realized_pnl"))
+                    if _stk:
+                        _settled_pnl[_stk] = _spnl / 100  # in USD
+    except Exception:
+        pass
+
     for t in all_today:
         info = market_info.get(t.get("ticker", ""), {})
         t["close_time"] = info.get("close_time", "")
@@ -7575,6 +7594,15 @@ def trades_today_endpoint():
             t["pnl_pct"] = round((current - entry) / entry * 100, 1)
         else:
             t["pnl_pct"] = 0
+        # Add settlement result if available
+        ticker = t.get("ticker", "")
+        if ticker in _settled_pnl:
+            pnl_usd = _settled_pnl[ticker]
+            t["result"] = "win" if pnl_usd > 0.005 else ("loss" if pnl_usd < -0.005 else "push")
+            t["result_pnl"] = round(pnl_usd, 2)
+        else:
+            t["result"] = None
+            t["result_pnl"] = None
 
     # Normalize all timestamps to clean UTC format (strip microseconds, ensure Z)
     # Then filter to only trades that are actually TODAY in Pacific time
@@ -12059,10 +12087,14 @@ async function loadBetsFeed() {
       h += '<span style="color:#ccc">' + title + '</span> ';
       h += '<span style="color:#ffb400">' + t.price_cents + '&#162; x' + (t.count || 1) + '</span> ';
       h += '<span style="color:#888">$' + (t.cost_usd || 0).toFixed(2) + '</span> ';
-      // P&L indicator — skip if market closed (50c default = no real price)
+      // Result / P&L indicator
       var pnl = t.pnl_pct || 0;
       var isSettling = t.close_time && new Date(t.close_time) <= new Date();
-      if (isSettling && t.current_price === 50) {
+      if (t.result === 'win') {
+        h += '<span style="color:#00dc5a;font-size:10px;font-weight:700;margin-left:4px;padding:1px 6px;background:#0a2a0a;border:1px solid #00dc5a;border-radius:4px">✓ WON +$' + Math.abs(t.result_pnl || 0).toFixed(2) + '</span> ';
+      } else if (t.result === 'loss') {
+        h += '<span style="color:#ff5000;font-size:10px;font-weight:700;margin-left:4px;padding:1px 6px;background:#2a0a0a;border:1px solid #ff5000;border-radius:4px">✗ LOST -$' + Math.abs(t.result_pnl || 0).toFixed(2) + '</span> ';
+      } else if (isSettling && t.current_price === 50) {
         h += '<span style="color:#ffb400;font-size:10px;margin-left:4px">⏳ Awaiting result</span> ';
       } else if (t.current_price && t.price_cents && t.current_price !== 50) {
         var pnlColor = pnl > 0 ? '#00dc5a' : (pnl < 0 ? '#ff5000' : '#888');
