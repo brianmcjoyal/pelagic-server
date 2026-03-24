@@ -74,8 +74,8 @@ BOT_CONFIG = {
     "min_volume": 50,             # include smaller markets
     "scan_interval_seconds": 45,  # faster scanning during game hours
     "max_category_exposure": 3,   # max 3 positions per category — diversified
-    "blocked_categories": ["weather"],  # only block weather — UFC live fights are good, politics can have edges
-    "blocked_keywords": ["title holder", "title on dec", "prime minister", "next president", "ipo first", "gas price", "billboard", "netflix", "spotify"],  # block long-dated prediction markets
+    "blocked_categories": ["weather", "golf", "politics", "economics", "nfl"],  # block proven losers: golf 0/18, politics 0/4, economics 0/2, NFL offseason
+    "blocked_keywords": ["title holder", "title on dec", "prime minister", "next president", "ipo first", "gas price", "billboard", "netflix", "spotify", "golf", "pga", "lpga", "masters", "election", "congress", "senate", "governor"],  # block long-dated + losing categories
     "moonshark_enabled": True,  # MoonShark longshot sniper toggle
 }
 
@@ -2300,16 +2300,14 @@ def run_bot_scan():
     BOT_STATE["last_scan"] = now.isoformat()
 
     try:
-        _log_activity("Scanning all platforms...")
         all_markets = fetch_all_markets()
         BOT_STATE["last_scan_markets"] = len(all_markets)
-        # Consensus mispricing detection (data only, trading disabled)
-        mispricings = find_consensus_mispricings(all_markets)
-        BOT_STATE["last_scan_mispriced"] = len(mispricings)
+        BOT_STATE["last_scan_mispriced"] = 0  # consensus disabled
 
         # Count live game markets for the log
         _live_count = sum(1 for m in all_markets if m.get("platform") == "kalshi" and any(pfx in (m.get("id") or "") for pfx in LIVE_GAME_SERIES))
-        _log_activity(f"Scan complete: {len(all_markets)} markets, {_live_count} live")
+        _total_bets = len(BOT_STATE.get("snipe_trades_today", [])) + len(BOT_STATE.get("moonshark_trades_today", [])) + len(BOT_STATE.get("closegame_trades_today", []))
+        _log_activity(f"Scan: {_live_count} live markets | {_total_bets}/5 bets placed today")
 
         if not BOT_CONFIG["enabled"]:
             _log_activity("Auto-trade OFF — skipping trades")
@@ -2490,14 +2488,15 @@ LIVE_GAME_SERIES = [
     "KXATPCHALLENGERMATCH", # ATP Challenger tennis
     "KXNCAAMBGAME",        # NCAA Men's Basketball game winners
     "KXNCAAWBGAME",        # NCAA Women's Basketball game winners
+    "KXKBLGAME",           # KBO Korean baseball (morning hours, less competition)
 ]
 
 # Sniper settings
 SNIPE_MIN_PRICE = 70   # cents — buy if price >= 70c (Brian's winning range)
 SNIPE_MAX_PRICE = 90   # cents — don't buy above 90c (too little profit margin)
 SNIPE_BET_USD = 15.0   # fallback — now uses _smart_bet_size() for bankroll scaling
-SNIPE_MAX_DAILY = 150.0  # max daily spend on snipes (scales naturally via bet sizing)
-SNIPE_MAX_TRADES = 10   # max 10 snipes per day — fewer, bigger, higher-conviction bets
+SNIPE_MAX_DAILY = 25.0   # max $25/day — quality over quantity
+SNIPE_MAX_TRADES = 2     # max 2 sniper trades/day — only the best
 
 BOT_STATE["snipe_trades_today"] = []
 BOT_STATE["snipe_daily_spent"] = 0.0
@@ -2508,10 +2507,10 @@ BOT_STATE["snipe_profit_usd"] = 0.0
 # MoonShark settings — underdog sniper (10-45c contracts, decent chance + big payout)
 MOONSHARK_MIN_PRICE = 10   # cents — skip sub-10c lottery tickets
 MOONSHARK_MAX_PRICE = 45   # cents — widened from 30c, data shows 30-45c range wins
-MOONSHARK_MAX_DAILY = 75.0  # max $75/day on MoonShark (up from $50)
+MOONSHARK_MAX_DAILY = 15.0  # max $15/day — selective, not spray-and-pray
 MOONSHARK_BET_USD = 5.0     # ~$5 per MoonShark bet (Kelly-adjusted)
-MOONSHARK_MIN_TRADES = 5    # aim for at least 5 trades per day
-MOONSHARK_MAX_TRADES = 10   # max 10 MoonShark trades per day — fewer, bigger bets
+MOONSHARK_MIN_TRADES = 1    # aim for at least 1 quality trade per day
+MOONSHARK_MAX_TRADES = 2    # max 2 MoonShark trades/day — only best opportunities
 
 BOT_STATE["moonshark_trades_today"] = []
 BOT_STATE["moonshark_daily_spent"] = 0.0
@@ -3054,10 +3053,11 @@ def moonshark_snipe():
                             espn_implied = 0
                         if espn_implied > 0:
                             espn_edge = espn_implied - implied_prob
-                            # SKIP if sportsbooks agree it's a longshot (no edge)
-                            if espn_edge < 0.03:
+                            # SKIP only if ESPN says WORSE odds than Kalshi (negative edge)
+                            # e.g., ESPN says 15% but Kalshi prices at 20c (20%) = -5% edge = skip
+                            if espn_edge < -0.02:
                                 _log_activity(
-                                    f"MOONSHARK SKIP: {title[:35]} — no edge (ESPN={espn_implied:.0%} vs Kalshi={implied_prob:.0%})",
+                                    f"MOONSHARK SKIP: {title[:35]} — negative edge (ESPN={espn_implied:.0%} vs Kalshi={implied_prob:.0%})",
                                     "info"
                                 )
                                 continue
@@ -3141,6 +3141,15 @@ def moonshark_snipe():
                     reasons.append(f"score={blowout_reason}")
                 vetting = " | ".join(reasons)
 
+                # Check orderbook spread — skip illiquid markets with wide spreads
+                try:
+                    _ob = analyze_orderbook(ticker)
+                    if _ob and _ob.get("spread", 99) > 8:
+                        _log_activity(f"MOONSHARK SKIP: {ticker} — wide spread ({_ob['spread']}c)", "info")
+                        continue
+                except Exception:
+                    pass
+
                 _log_activity(
                     f"MOONSHARK: {side.upper()} {ticker} @ {price}c x{count} "
                     f"(${cost_usd:.2f}) potential +${expected_profit:.2f} | {title[:40]} [{vetting}]",
@@ -3203,8 +3212,8 @@ def moonshark_snipe():
 # ---------------------------------------------------------------------------
 # Close-Game Sniper — buy underdogs in tight late-game situations
 # ---------------------------------------------------------------------------
-CLOSEGAME_MAX_DAILY = 30.0   # max $30/day on close-game bets
-CLOSEGAME_MAX_TRADES = 8     # max 8 close-game trades per day
+CLOSEGAME_MAX_DAILY = 10.0   # max $10/day — only the tightest late-game situations
+CLOSEGAME_MAX_TRADES = 1     # max 1 close-game trade/day — highest conviction only
 CLOSEGAME_MIN_PRICE = 25     # buy at 25-45c (higher probability than MoonShark)
 CLOSEGAME_MAX_PRICE = 45
 
@@ -3275,20 +3284,20 @@ def closegame_snipe():
             margin = abs(home_score - away_score)
             period = game.get("clock", "")
 
-            # Define "late game" by sport
+            # Define "late game" by sport — FINAL period only for highest edge
             is_late = False
             if sport == "nba":
                 is_late = any(p in period for p in ["Q4", "OT", "4th"])
-                max_margin = 8  # NBA: within 8 in Q4
+                max_margin = 6  # NBA: within 6 in Q4 (tighter = better edge)
             elif sport == "ncaab":
                 is_late = any(p in period for p in ["2H", "OT", "2nd"])
-                max_margin = 7  # College BB men: within 7 in 2H
+                max_margin = 5  # College BB men: within 5 in 2H
             elif sport == "ncaawb":
-                is_late = any(p in period for p in ["Q3", "Q4", "3rd", "4th", "OT"])
-                max_margin = 7  # College BB women: within 7 in Q3+ (quarters)
+                is_late = any(p in period for p in ["Q4", "4th", "OT"])
+                max_margin = 5  # College BB women: Q4 only (tighter)
             elif sport == "nhl":
                 is_late = any(p in period for p in ["P3", "3rd", "OT"])
-                max_margin = 2  # Hockey: within 2 in P3
+                max_margin = 1  # Hockey: within 1 goal in P3 (tighter)
             elif sport in ("mlb", "kbo"):
                 # Check inning number
                 try:
@@ -3430,7 +3439,7 @@ def closegame_snipe():
                 kalshi_implied = price / 100.0
                 edge = estimated_win_prob - kalshi_implied
 
-                if edge < 0.03:
+                if edge < 0.015:
                     _log_activity(
                         f"CLOSEGAME SKIP: {title[:35]} — thin edge ({estimated_win_prob:.0%} vs {kalshi_implied:.0%})",
                         "info"
@@ -8706,40 +8715,34 @@ def _get_line_movement(ticker, price_cents):
     }
 
 
-def _smart_bet_size(price_cents, bankroll=None):
-    """Scale bet size with bankroll + confidence for compound growth.
+def _smart_bet_size(price_cents, bankroll=None, edge=0.05):
+    """Edge-driven bet sizing using half-Kelly criterion.
 
-    Uses 2-3% of bankroll per trade (scales up as we grow):
-    - 70-74c (lower confidence): 2% of bankroll
-    - 75-79c: 2.5% of bankroll
-    - 80-84c: 3% of bankroll
-    - 85c+  (highest confidence): 3.5% of bankroll
+    Only bets when edge > 1.5%. Sizes proportional to edge, not price.
+    Smaller bets = survive losing streaks. Quality over quantity.
 
-    Floor: $5 min, Cap: $100 max per trade.
-    At $720 bankroll: $14-25 per trade
-    At $5,000: $100-175 -> capped at $100
-    At $50,000: would be $1,000+ but capped at $100 until we raise it
+    Floor: $3 min, Cap: $15 max per trade (conservative until win rate improves).
     """
     if bankroll is None:
-        # Try to get current bankroll from cache
         try:
             bankroll = (_PORTFOLIO_CACHE.get("data") or {}).get("portfolio_value_usd", 0)
         except Exception:
             bankroll = 0
     if bankroll <= 0:
-        bankroll = 500  # fallback
+        bankroll = 500
 
-    if price_cents >= 85:
-        pct = 0.035
-    elif price_cents >= 80:
-        pct = 0.03
-    elif price_cents >= 75:
-        pct = 0.025
-    else:
-        pct = 0.02
+    if edge < 0.015:
+        return 0  # No edge, no bet
 
-    bet = bankroll * pct
-    bet = max(5.0, min(100.0, bet))  # $5 floor, $100 cap
+    # Half-Kelly: bet size proportional to edge magnitude
+    # Higher edge = bigger bet, but always conservative
+    odds = (100 - price_cents) / max(1, price_cents)
+    win_prob = min(price_cents / 100.0 + edge, 0.50)
+    kelly_frac = (odds * win_prob - (1 - win_prob)) / max(0.01, odds)
+    kelly_frac = max(0, kelly_frac) / 2  # half-Kelly for safety
+
+    bet = bankroll * kelly_frac
+    bet = max(3.0, min(15.0, bet))  # $3 floor, $15 cap (conservative)
     return round(bet, 2)
 
 
