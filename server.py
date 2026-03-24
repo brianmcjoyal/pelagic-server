@@ -6148,6 +6148,9 @@ def settled_positions():
                     trade_strategy = t.get("strategy") or "unknown"
                     break
 
+            # Get settlement time from position data
+            settle_time = pos.get("settlement_time") or pos.get("last_updated") or ""
+
             settled.append({
                 "ticker": ticker,
                 "title": title,
@@ -6160,10 +6163,11 @@ def settled_positions():
                 "count": count,
                 "entry_cents": entry_cents,
                 "trade_date": trade_date,
+                "settle_time": settle_time,
             })
 
-        # Sort by trade date descending (most recent first)
-        settled.sort(key=lambda s: s.get("trade_date") or "", reverse=True)
+        # Sort by settlement time descending (newest settled first), fall back to trade date
+        settled.sort(key=lambda s: s.get("settle_time") or s.get("trade_date") or "", reverse=True)
 
         total_bets = wins + losses + breakeven
         roi = round(total_pnl / max(0.01, total_wagered) * 100, 1) if total_wagered > 0 else 0
@@ -12933,7 +12937,7 @@ async function loadPositions() {
     // Fetch closed/settled positions
     try {
       var settledData = await fetch(API + '/settled').then(function(r) { return r.json(); });
-      var settled = (settledData.settled || []).slice(0, 20);
+      var settled = settledData.settled || [];
       var closedPnl = settled.reduce(function(s, p) { return s + (p.pnl_usd || 0); }, 0);
       var closedPnlColor = closedPnl >= 0 ? '#00dc5a' : '#ff5000';
       document.getElementById('pos-closed-count').textContent = '(' + settled.length + ')';
@@ -12941,12 +12945,22 @@ async function loadPositions() {
       if (settled.length === 0) {
         document.getElementById('pos-table-closed').innerHTML = '<div style="color:#555;font-size:9px;padding:8px;text-align:center">No settled positions yet</div>';
       } else {
-        var ch = '<table style="font-size:10px"><tr><th>Market</th><th>Side</th><th>Result</th><th>P&L</th></tr>';
+        var ch = '<table style="font-size:10px"><tr><th>Settled</th><th>Market</th><th>Side</th><th>Result</th><th>P&L</th></tr>';
         settled.forEach(function(s) {
           var resultColor = s.won ? '#00dc5a' : '#ff5000';
           var resultText = s.won ? 'WON' : 'LOST';
           var pnlUsd = s.pnl_usd || 0;
+          var settleDate = '--';
+          if (s.settle_time) {
+            try {
+              var sd = new Date(s.settle_time);
+              if (!isNaN(sd.getTime())) settleDate = sd.toLocaleDateString('en-US', {month:'short', day:'numeric'});
+            } catch(e) {}
+          } else if (s.trade_date) {
+            settleDate = s.trade_date.substring(5);
+          }
           ch += '<tr>';
+          ch += '<td style="color:#888;font-size:9px">' + settleDate + '</td>';
           ch += '<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (s.title || s.ticker || '') + '</td>';
           ch += '<td style="color:' + (s.side === 'yes' ? '#00dc5a' : '#ff5000') + '">' + (s.side || '').toUpperCase() + '</td>';
           ch += '<td style="color:' + resultColor + ';font-weight:700">' + resultText + '</td>';
