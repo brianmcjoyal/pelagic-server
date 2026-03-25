@@ -2684,16 +2684,24 @@ def live_game_snipe():
                     _ms_reasons["low_liquidity"] = _ms_reasons.get("low_liquidity", 0) + 1
                     continue
 
-                # Must close within 24h — no long-dated positions
+                # Close time check — skip for series-scanned markets (Kalshi sets
+                # close_time to series end, not individual game time)
                 close_time_str = mkt.get("close_time", "")
-                if close_time_str:
-                    try:
-                        close_dt_chk = datetime.datetime.fromisoformat(close_time_str.replace("Z", "+00:00")).replace(tzinfo=None)
-                        hours_to_close = (close_dt_chk - datetime.datetime.utcnow()).total_seconds() / 3600
-                        if hours_to_close > 24:
-                            continue
-                    except Exception:
-                        pass
+                if "series_ticker" not in source_params:
+                    if close_time_str:
+                        try:
+                            close_dt_chk = datetime.datetime.fromisoformat(close_time_str.replace("Z", "+00:00")).replace(tzinfo=None)
+                            hours_to_close = (close_dt_chk - datetime.datetime.utcnow()).total_seconds() / 3600
+                            if hours_to_close > 24:
+                                continue
+                        except Exception:
+                            pass
+                else:
+                    # For series-scanned: only bet on today's/yesterday's games
+                    today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%d%b%y").upper()
+                    yesterday_str = (datetime.datetime.now(tz=_PACIFIC) - datetime.timedelta(days=1)).strftime("%d%b%y").upper()
+                    if today_str not in ticker.upper() and yesterday_str not in ticker.upper():
+                        continue
 
                 # Parse prices
                 yes_ask = None
@@ -3011,20 +3019,29 @@ def moonshark_snipe():
                     _ms_reasons["low_liquidity"] = _ms_reasons.get("low_liquidity", 0) + 1
                     continue
 
-                # Must close within 24h (same-day or overnight games)
+                # Close time check — skip for series-scanned markets (Kalshi sets
+                # close_time to series end, not individual game time)
                 close_time_str = mkt.get("close_time", "")
-                if not close_time_str:
-                    _ms_reasons["no_close_time"] = _ms_reasons.get("no_close_time", 0) + 1
-                    continue
-                try:
-                    close_dt_chk = datetime.datetime.fromisoformat(close_time_str.replace("Z", "+00:00")).replace(tzinfo=None)
-                    hours_to_close = (close_dt_chk - datetime.datetime.utcnow()).total_seconds() / 3600
-                    if hours_to_close > 24 or hours_to_close < 0:
-                        _ms_reasons["close_time_range"] = _ms_reasons.get("close_time_range", 0) + 1
+                if "series_ticker" not in source_params:
+                    if not close_time_str:
+                        _ms_reasons["no_close_time"] = _ms_reasons.get("no_close_time", 0) + 1
                         continue
-                except Exception:
-                    _ms_reasons["close_time_parse"] = _ms_reasons.get("close_time_parse", 0) + 1
-                    continue
+                    try:
+                        close_dt_chk = datetime.datetime.fromisoformat(close_time_str.replace("Z", "+00:00")).replace(tzinfo=None)
+                        hours_to_close = (close_dt_chk - datetime.datetime.utcnow()).total_seconds() / 3600
+                        if hours_to_close > 24 or hours_to_close < 0:
+                            _ms_reasons["close_time_range"] = _ms_reasons.get("close_time_range", 0) + 1
+                            continue
+                    except Exception:
+                        _ms_reasons["close_time_parse"] = _ms_reasons.get("close_time_parse", 0) + 1
+                        continue
+                # For series-scanned markets, check if game is TODAY by parsing date from ticker
+                else:
+                    today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%d%b%y").upper()  # e.g. 25MAR26
+                    yesterday_str = (datetime.datetime.now(tz=_PACIFIC) - datetime.timedelta(days=1)).strftime("%d%b%y").upper()
+                    if today_str not in ticker.upper() and yesterday_str not in ticker.upper():
+                        _ms_reasons["not_today"] = _ms_reasons.get("not_today", 0) + 1
+                        continue
 
                 # Must be a GAME or MATCH (binary outcome, not futures/props)
                 _tk_upper = ticker.upper()
