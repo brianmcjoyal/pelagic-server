@@ -6624,6 +6624,14 @@ def settled_positions():
 @app.route("/trends")
 def trends_endpoint():
     """Generate daily trends from learning engine + trade data."""
+    try:
+        return _generate_trends()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"trends": [{"icon": "⚠️", "title": "Trends loading...", "detail": str(e), "color": "#ffb400"}], "enhancements": [], "parameters": {}, "summary": {"total_settled": 0, "overall_win_rate": 0, "total_wins": 0, "total_losses": 0, "learning_version": 0, "dimensions_learned": 0}})
+
+def _generate_trends():
     params = _LEARNING_STATE.get("parameters", {})
     settled = [t for t in _TRADE_JOURNAL if t.get("result")]
     total_settled = len(settled)
