@@ -6659,10 +6659,18 @@ def debug_scan():
                 results["series_scanned"].append({"series": series, "count": 0, "error": resp.status_code})
                 continue
             mkts = resp.json().get("markets", [])
+            # Grab first market's raw price fields for debugging
+            if mkts and series not in [s.get("series") for s in results.get("_raw_samples", [])]:
+                _sample = mkts[0]
+                _price_fields = {k: v for k, v in _sample.items() if any(p in k.lower() for p in ["price", "ask", "bid", "yes", "no", "last"])}
+                _price_fields["_ticker"] = _sample.get("ticker", "")[:30]
+                _price_fields["_volume"] = _sample.get("volume", "N/A")
+                _price_fields["_close_time"] = _sample.get("close_time", "N/A")
+                results.setdefault("_raw_samples", []).append({"series": series, "fields": _price_fields})
             results["series_scanned"].append({"series": series, "count": len(mkts)})
             for m in mkts:
-                ya = m.get("yes_ask", 0) or 0
-                na = m.get("no_ask", 0) or 0
+                ya = m.get("yes_ask", 0) or m.get("yes_ask_dollars", 0) or 0
+                na = m.get("no_ask", 0) or m.get("no_ask_dollars", 0) or 0
                 try:
                     yes_cents = int(round(float(str(ya)) * 100)) if ya else 0
                     no_cents = int(round(float(str(na)) * 100)) if na else 0
