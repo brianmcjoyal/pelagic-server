@@ -2901,6 +2901,8 @@ def moonshark_snipe():
     close_cutoff = (datetime.datetime.utcnow() + datetime.timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
     scan_sources.append({"close_time_max": close_cutoff, "status": "open"})
 
+    _ms_total_scanned = 0
+    _ms_reasons = {}  # track rejection reasons
     for source_params in scan_sources:
         if BOT_STATE["moonshark_daily_spent"] >= MOONSHARK_MAX_DAILY:
             break
@@ -2918,9 +2920,11 @@ def moonshark_snipe():
                 timeout=8,
             )
             if not resp.ok:
+                _ms_reasons["api_error"] = _ms_reasons.get("api_error", 0) + 1
                 continue
 
             markets = resp.json().get("markets", [])
+            _ms_total_scanned += len(markets)
 
             # Sort so closing-soon markets get priority
             def _close_sort(m):
@@ -2940,15 +2944,18 @@ def moonshark_snipe():
 
                 # Skip if we already hold this ticker or event
                 if ticker in existing_tickers:
+                    _ms_reasons["already_held"] = _ms_reasons.get("already_held", 0) + 1
                     continue
                 event_key = ticker.split("-")[0] if ticker else ""
                 if event_key in existing_events:
+                    _ms_reasons["event_held"] = _ms_reasons.get("event_held", 0) + 1
                     continue
 
                 # Block banned categories
                 blocked = BOT_CONFIG.get("blocked_categories", [])
                 mcat = classify_market_category(title, ticker)
                 if mcat in blocked:
+                    _ms_reasons["blocked_cat"] = _ms_reasons.get("blocked_cat", 0) + 1
                     continue
 
                 # Block known junk keywords
@@ -2966,10 +2973,11 @@ def moonshark_snipe():
                     "prime minister", "next president", "ipo first",
                 ]
                 if any(kw in title_lower for kw in _MOONSHARK_BLOCKED_KEYWORDS):
+                    _ms_reasons["blocked_kw"] = _ms_reasons.get("blocked_kw", 0) + 1
                     continue
 
                 # Only allow vetted categories
-                _ALLOWED_CATEGORIES = ["tennis", "nba", "nfl", "nhl", "mlb", "soccer", "mma"]
+                _ALLOWED_CATEGORIES = ["tennis", "nba", "nfl", "nhl", "mlb", "soccer", "mma", "ncaab", "ncaawb"]
 
                 # WHITELIST: Only bet on major league ticker prefixes
                 _ALLOWED_TICKER_PREFIXES = [
@@ -2978,6 +2986,7 @@ def moonshark_snipe():
                     "KXATPMATCH", "KXWTAMATCH", "KXATPCHALLENGERMATCH",
                     "KXUFCFIGHT",
                     "KXAFLGAME",
+                    "KXNCAAMBGAME", "KXNCAAWBGAME",
                 ]
                 # BLACKLIST: Block minor/foreign leagues and esports
                 _BLOCKED_TICKER_PREFIXES = [
@@ -2987,28 +2996,33 @@ def moonshark_snipe():
                 ]
                 t_upper = ticker.upper()
                 if any(t_upper.startswith(bp) for bp in _BLOCKED_TICKER_PREFIXES):
+                    _ms_reasons["blacklisted"] = _ms_reasons.get("blacklisted", 0) + 1
                     continue
                 if "series_ticker" not in source_params:
                     is_whitelisted = any(t_upper.startswith(wp) for wp in _ALLOWED_TICKER_PREFIXES)
                     if not is_whitelisted and mcat not in _ALLOWED_CATEGORIES:
+                        _ms_reasons["not_whitelisted"] = _ms_reasons.get("not_whitelisted", 0) + 1
                         continue
 
-                # Volume check — higher minimum for MoonShark (want liquid markets)
+                # Volume check — lower minimum to find more opportunities
                 mkt_volume = mkt.get("volume", 0) or 0
-                if mkt_volume < 100:
+                if mkt_volume < 50:
+                    _ms_reasons["low_volume"] = _ms_reasons.get("low_volume", 0) + 1
                     continue
 
-                # Must close TODAY (same-day settlement only)
+                # Must close within 24h (same-day or overnight games)
                 close_time_str = mkt.get("close_time", "")
                 if not close_time_str:
+                    _ms_reasons["no_close_time"] = _ms_reasons.get("no_close_time", 0) + 1
                     continue
                 try:
                     close_dt_chk = datetime.datetime.fromisoformat(close_time_str.replace("Z", "+00:00")).replace(tzinfo=None)
-                    # Reject if closing more than 18h from now (covers overnight games)
                     hours_to_close = (close_dt_chk - datetime.datetime.utcnow()).total_seconds() / 3600
-                    if hours_to_close > 18 or hours_to_close < 0:
+                    if hours_to_close > 24 or hours_to_close < 0:
+                        _ms_reasons["close_time_range"] = _ms_reasons.get("close_time_range", 0) + 1
                         continue
                 except Exception:
+                    _ms_reasons["close_time_parse"] = _ms_reasons.get("close_time_parse", 0) + 1
                     continue
 
                 # Must be a GAME or MATCH (binary outcome, not futures/props)
@@ -3238,6 +3252,11 @@ def moonshark_snipe():
         total_potential = sum(s["potential"] for s in snipes)
         _log_activity(f"MOONSHARK round: {len(snipes)} trades, ${total_cost:.2f} invested, potential +${total_potential:.2f}", "success")
         _save_state()
+    else:
+        # Log why no trades were placed (diagnostic)
+        reason_str = ", ".join(f"{k}:{v}" for k, v in sorted(_ms_reasons.items(), key=lambda x: -x[1])[:5])
+        if _ms_total_scanned > 0 or reason_str:
+            print(f"[MOONSHARK] Scanned {_ms_total_scanned} markets, 0 trades. Rejections: {reason_str or 'none found in price range'}")
 
     return snipes
 
@@ -6619,6 +6638,66 @@ def settled_positions():
         return jsonify(result)
     except Exception as e:
         return jsonify({"settled": [], "error": str(e)})
+
+
+@app.route("/debug-scan")
+def debug_scan():
+    """Quick diagnostic: what can the snipers see right now?"""
+    results = {"series_scanned": [], "eligible_markets": [], "rejection_summary": {}}
+    try:
+        for series in LIVE_GAME_SERIES:
+            mh = signed_headers("GET", "/markets")
+            if not mh:
+                continue
+            resp = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + "/markets",
+                headers=mh,
+                params={"limit": 50, "status": "open", "series_ticker": series},
+                timeout=8,
+            )
+            if not resp.ok:
+                results["series_scanned"].append({"series": series, "count": 0, "error": resp.status_code})
+                continue
+            mkts = resp.json().get("markets", [])
+            results["series_scanned"].append({"series": series, "count": len(mkts)})
+            for m in mkts:
+                ya = m.get("yes_ask", 0) or 0
+                na = m.get("no_ask", 0) or 0
+                try:
+                    yes_cents = int(round(float(str(ya)) * 100)) if ya else 0
+                    no_cents = int(round(float(str(na)) * 100)) if na else 0
+                except Exception:
+                    yes_cents = no_cents = 0
+                vol = m.get("volume", 0) or 0
+                ct = m.get("close_time", "")
+                hours_left = 999
+                try:
+                    if ct:
+                        cd = datetime.datetime.fromisoformat(ct.replace("Z", "+00:00")).replace(tzinfo=None)
+                        hours_left = round((cd - datetime.datetime.utcnow()).total_seconds() / 3600, 1)
+                except Exception:
+                    pass
+                # Check if this would be eligible for any strategy
+                eligible_for = []
+                if 10 <= yes_cents <= 45 and vol >= 50 and 0 < hours_left <= 24:
+                    eligible_for.append("moonshark_yes")
+                if 10 <= no_cents <= 45 and vol >= 50 and 0 < hours_left <= 24:
+                    eligible_for.append("moonshark_no")
+                if 70 <= yes_cents <= 90 and vol >= 50:
+                    eligible_for.append("sniper_yes")
+                if 70 <= no_cents <= 90 and vol >= 50:
+                    eligible_for.append("sniper_no")
+                if eligible_for:
+                    results["eligible_markets"].append({
+                        "ticker": m.get("ticker", "")[:40],
+                        "title": (m.get("title", "") or "")[:50],
+                        "yes": yes_cents, "no": no_cents,
+                        "vol": vol, "hours_left": hours_left,
+                        "eligible": eligible_for,
+                    })
+    except Exception as e:
+        results["error"] = str(e)
+    return jsonify(results)
 
 
 @app.route("/trends")
