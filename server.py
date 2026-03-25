@@ -2678,9 +2678,10 @@ def live_game_snipe():
                     if not is_whitelisted and mcat not in _ALLOWED_CATEGORIES:
                         continue
 
-                # Volume check — only snipe liquid markets
-                mkt_volume = mkt.get("volume", 0) or 0
-                if mkt_volume < 50:
+                # Liquidity check — use order book depth (volume field doesn't exist in API)
+                _ask_size = float(str(mkt.get("yes_ask_size_fp") or mkt.get("no_ask_size_fp") or 0))
+                if _ask_size < 10:
+                    _ms_reasons["low_liquidity"] = _ms_reasons.get("low_liquidity", 0) + 1
                     continue
 
                 # Must close within 24h — no long-dated positions
@@ -3004,10 +3005,10 @@ def moonshark_snipe():
                         _ms_reasons["not_whitelisted"] = _ms_reasons.get("not_whitelisted", 0) + 1
                         continue
 
-                # Volume check — lower minimum to find more opportunities
-                mkt_volume = mkt.get("volume", 0) or 0
-                if mkt_volume < 50:
-                    _ms_reasons["low_volume"] = _ms_reasons.get("low_volume", 0) + 1
+                # Liquidity check — use order book depth (volume field doesn't exist in API)
+                _ask_size = float(str(mkt.get("yes_ask_size_fp") or mkt.get("no_ask_size_fp") or 0))
+                if _ask_size < 10:
+                    _ms_reasons["low_liquidity"] = _ms_reasons.get("low_liquidity", 0) + 1
                     continue
 
                 # Must close within 24h (same-day or overnight games)
@@ -6676,7 +6677,7 @@ def debug_scan():
                     no_cents = int(round(float(str(na)) * 100)) if na else 0
                 except Exception:
                     yes_cents = no_cents = 0
-                vol = m.get("volume", 0) or 0
+                vol = float(str(m.get("yes_ask_size_fp") or m.get("volume") or 0))
                 ct = m.get("close_time", "")
                 hours_left = 999
                 try:
