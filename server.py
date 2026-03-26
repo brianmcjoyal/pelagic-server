@@ -5953,61 +5953,61 @@ def _background_loop():
     while True:
         try:
             cycle += 1
-            # Run bot scan — data only, consensus trading disabled
-            run_bot_scan()
-            _time.sleep(2)  # yield to web requests
-            # Live game sniper — high-probability favorites (70-90c)
+            _cycle_start = _time.time()
+
+            # === FAST TRADING LOOP (every cycle) ===
+            # These are the money-makers — run them FIRST and FAST
             _snipe_results = live_game_snipe()
-            _time.sleep(2)  # yield to web requests
-            # MoonShark — longshot underdog sniper (10-45c contracts)
+            _time.sleep(1)
             _ms_results = moonshark_snipe()
-            _time.sleep(2)  # yield to web requests
-            _time.sleep(2)  # yield to web requests
-            # Close-Game Sniper runs on its own fast thread (10s loop)
-            # QUANT ENGINE DISABLED — mean reversion + market making lost money
-            # Keep volatility tracking for data, but don't place trades
-            if cycle % 3 == 0:
-                try:
-                    all_mkts = fetch_all_markets()
-                    for m in all_mkts:
-                        if m["platform"] == "kalshi":
-                            update_volatility(m["id"], int(m["yes"] * 100))
-                    # run_quant_strategies(all_mkts)  # DISABLED — losing strategy
-                except Exception as qe:
-                    print(f"[QUANT] Data error: {qe}")
-            # Learning engine — runs every 60 cycles (~hourly)
-            if cycle % 60 == 0:
-                try:
-                    _learning_engine()
-                except Exception as _le:
-                    print(f"[LEARNING] Error: {_le}")
-            # Check for new settlements — recycle capital fast
+            _time.sleep(1)
+
+            # Check for new settlements
             settlements = check_settlements_and_reinvest()
             if settlements:
-                # Reinvest via sniper (the winning strategy)
                 try:
                     live_game_snipe()
                 except Exception:
                     pass
-            # Monitor live scores for active game positions
-            if cycle % 2 == 0:  # every other cycle (~3 min)
-                try:
-                    _monitor_live_games()
-                except Exception as _mle:
-                    print(f"[MONITOR] Error: {_mle}")
-            # Sync external Kalshi fills (bets placed on kalshi.com)
+
+            # Sync external Kalshi fills
             try:
                 _sync_kalshi_fills()
             except Exception as se:
                 print(f"[SYNC] Error: {se}")
-            _time.sleep(1)
-            # Warm the 75%'ers cache every cycle
-            try:
-                _generate_seventy_fivers()
-            except Exception:
-                pass
-            # Warm the picks cache so /top-picks is fast
-            _warm_picks_cache()
+
+            _trade_time = _time.time() - _cycle_start
+            print(f"[CYCLE {cycle}] Trading: {_trade_time:.1f}s")
+
+            # === SLOW ANALYTICS (less frequent) ===
+            # Bot scan — every 5 cycles (~2.5 min)
+            if cycle % 5 == 0:
+                try:
+                    run_bot_scan()
+                except Exception as _bse:
+                    print(f"[SCAN] Error: {_bse}")
+
+            # Monitor live scores — every 3 cycles
+            if cycle % 3 == 0:
+                try:
+                    _monitor_live_games()
+                except Exception as _mle:
+                    print(f"[MONITOR] Error: {_mle}")
+
+            # Learning engine — every 120 cycles (~1 hour)
+            if cycle % 120 == 0:
+                try:
+                    _learning_engine()
+                except Exception as _le:
+                    print(f"[LEARNING] Error: {_le}")
+
+            # Heavy caches — every 10 cycles (~5 min)
+            if cycle % 10 == 0:
+                try:
+                    _generate_seventy_fivers()
+                except Exception:
+                    pass
+                _warm_picks_cache()
             # Refresh portfolio cache so dashboard always has data
             try:
                 _bal2 = 0
