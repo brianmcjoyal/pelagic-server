@@ -2359,7 +2359,7 @@ def run_bot_scan():
 
         # Count live game markets for the log
         _live_count = sum(1 for m in all_markets if m.get("platform") == "kalshi" and any(pfx in (m.get("id") or "") for pfx in LIVE_GAME_SERIES))
-        _total_bets = len(BOT_STATE.get("snipe_trades_today", [])) + len(BOT_STATE.get("moonshark_trades_today", [])) + len(BOT_STATE.get("closegame_trades_today", []))
+        _total_bets = len(BOT_STATE.get("trades_today", [])) + len(BOT_STATE.get("snipe_trades_today", [])) + len(BOT_STATE.get("moonshark_trades_today", [])) + len(BOT_STATE.get("closegame_trades_today", [])) + len(BOT_STATE.get("manual_trades_today", []))
         _log_activity(f"Scan: {_live_count} live | {_total_bets} bets today")
 
         if not BOT_CONFIG["enabled"]:
