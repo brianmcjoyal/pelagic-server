@@ -2606,8 +2606,8 @@ def live_game_snipe():
         for p in positions:
             existing_tickers.add(p.get("ticker", ""))
             parts = p.get("ticker", "").split("-")
-            if parts:
-                existing_events.add(parts[0])
+            if len(parts) >= 2:
+                existing_events.add("-".join(parts[:2]))
     except Exception:
         pass
 
@@ -2661,10 +2661,13 @@ def live_game_snipe():
                 ticker = mkt.get("ticker", "")
                 title = mkt.get("title", "")
 
-                # Skip if we already hold this ticker or event
+                # Skip if we already hold this ticker or event (match-specific)
                 if ticker in existing_tickers:
                     continue
-                event_key = ticker.split("-")[0] if ticker else ""
+                # Event key = first 2 parts: e.g. "KXATPCHALLENGERMATCH-26MAR26SANCAR"
+                # This blocks both sides of same match but allows different matches
+                _parts = ticker.split("-") if ticker else []
+                event_key = "-".join(_parts[:2]) if len(_parts) >= 2 else (ticker or "")
                 if event_key in existing_events:
                     continue
 
@@ -2976,8 +2979,8 @@ def moonshark_snipe():
         for p in positions:
             existing_tickers.add(p.get("ticker", ""))
             parts = p.get("ticker", "").split("-")
-            if parts:
-                existing_events.add(parts[0])
+            if len(parts) >= 2:
+                existing_events.add("-".join(parts[:2]))
     except Exception:
         pass
 
@@ -3031,11 +3034,12 @@ def moonshark_snipe():
                 ticker = mkt.get("ticker", "")
                 title = mkt.get("title", "")
 
-                # Skip if we already hold this ticker or event
+                # Skip if we already hold this ticker or match (match-specific key)
                 if ticker in existing_tickers:
                     _ms_reasons["already_held"] = _ms_reasons.get("already_held", 0) + 1
                     continue
-                event_key = ticker.split("-")[0] if ticker else ""
+                _parts = ticker.split("-") if ticker else []
+                event_key = "-".join(_parts[:2]) if len(_parts) >= 2 else (ticker or "")
                 if event_key in existing_events:
                     _ms_reasons["event_held"] = _ms_reasons.get("event_held", 0) + 1
                     continue
@@ -3197,13 +3201,11 @@ def moonshark_snipe():
                             espn_implied = 0
                         if espn_implied > 0:
                             espn_edge = espn_implied - implied_prob
-                            # SKIP only if ESPN says WORSE odds than Kalshi (negative edge)
-                            # e.g., ESPN says 15% but Kalshi prices at 20c (20%) = -5% edge = skip
-                            if espn_edge < -0.02:
-                                _log_activity(
-                                    f"MOONSHARK SKIP: {title[:35]} — negative edge (ESPN={espn_implied:.0%} vs Kalshi={implied_prob:.0%})",
-                                    "info"
-                                )
+                            # SKIP unless ESPN gives at least 3% edge over Kalshi price
+                            # e.g., ESPN says 30% but Kalshi prices at 20c (20%) = +10% edge = BET
+                            # ESPN says 22% and Kalshi prices at 20c (20%) = +2% edge = SKIP (too thin)
+                            if espn_edge < 0.03:
+                                _ms_reasons["no_edge"] = _ms_reasons.get("no_edge", 0) + 1
                                 continue
                 except Exception:
                     pass
@@ -3453,8 +3455,8 @@ def closegame_snipe():
         for p in positions:
             existing_tickers.add(p.get("ticker", ""))
             parts = p.get("ticker", "").split("-")
-            if parts:
-                existing_events.add(parts[0])
+            if len(parts) >= 2:
+                existing_events.add("-".join(parts[:2]))
     except Exception:
         pass
 
@@ -4312,8 +4314,8 @@ def run_quant_strategies(all_markets):
         for p in positions:
             existing_tickers.add(p.get("ticker", ""))
             parts = p.get("ticker", "").split("-")
-            if parts:
-                existing_events.add(parts[0])
+            if len(parts) >= 2:
+                existing_events.add("-".join(parts[:2]))
         # Position limit check
         if len(positions) >= BOT_CONFIG.get("max_open_positions", 20):
             return
