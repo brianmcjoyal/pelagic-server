@@ -2223,8 +2223,8 @@ def check_position_prices():
 # Auto-exit thresholds — DISABLED for event-outcome bets
 # These bets settle at $0 or $1 — mid-event price swings are noise.
 # Stop-losses caused us to sell Zakharova at 5c right before she WON (would have been +$27).
-TAKE_PROFIT_PCT = 999   # effectively disabled — let positions settle naturally
-STOP_LOSS_PCT = -999    # effectively disabled — hold to settlement
+TAKE_PROFIT_PCT = 100   # sell at 2x entry price (100% profit)
+STOP_LOSS_PCT = -70     # cut losses at 70% down (position is likely dead)
 
 def auto_exit_check():
     """DISABLED — event-outcome bets should be held to settlement.
@@ -2795,20 +2795,32 @@ def live_game_snipe():
                         pass
 
                 # CONVICTION SCORE — require multiple signals before betting
-                conviction = 0
-                # Signal 1: Is the game LIVE (in-progress)?
+                # Check if game is LIVE (in-progress)
                 _snipe_game = None
                 try:
                     _snipe_scores = _fetch_all_espn_scores()
                     _snipe_team = ticker.split("-")[-1].upper() if "-" in ticker else ""
                     if _snipe_team:
                         _snipe_game = _snipe_scores.get(_snipe_team.lower())
-                    if _snipe_game and _snipe_game.get("state") == "in":
-                        conviction += 2  # LIVE game = strong signal
-                    elif _snipe_game and _snipe_game.get("state") == "post":
-                        conviction += 1  # finished game, might be settling
                 except Exception:
-                    conviction += 1  # can't check, give benefit of doubt
+                    pass
+                # MUST be LIVE or recently finished — no pre-game bets
+                if _snipe_game and _snipe_game.get("state") == "pre":
+                    continue  # skip pre-game — prices are efficient
+                conviction = 0
+                if _snipe_game and _snipe_game.get("state") == "in":
+                    conviction += 2  # LIVE = strong signal
+                    # Bonus: close game
+                    try:
+                        _margin = abs(int(_snipe_game.get("home_score", 0)) - int(_snipe_game.get("away_score", 0)))
+                        if _margin <= 5:
+                            conviction += 1  # close game, volatile
+                    except Exception:
+                        pass
+                elif _snipe_game and _snipe_game.get("state") == "post":
+                    conviction += 1  # finished, might be settling
+                else:
+                    conviction += 1  # no score data, give benefit of doubt
                 # Signal 2: High volume / liquidity
                 if _ask_size >= 50:
                     conviction += 1
@@ -2820,7 +2832,6 @@ def live_game_snipe():
                     conviction += 1
                 # Require minimum conviction of 2 to bet
                 if conviction < 2:
-                    _ms_reasons["low_conviction"] = _ms_reasons.get("low_conviction", 0) + 1
                     continue
 
                 # Calculate quantity — bankroll-scaled sizing for compound growth
@@ -3197,11 +3208,14 @@ def moonshark_snipe():
                 except Exception:
                     pass
 
+                # MUST be a LIVE in-progress game — no pre-game bets
+                # Pre-game prices are efficient. The edge is during live action.
+                if not _game_info or _game_info.get("state") != "in":
+                    _ms_reasons["not_live"] = _ms_reasons.get("not_live", 0) + 1
+                    continue
+
                 # CONVICTION SCORE — require multiple signals for MoonShark
-                ms_conviction = 0
-                # Signal 1: Game is LIVE in-progress (not pre-game)
-                if _game_info and _game_info.get("state") == "in":
-                    ms_conviction += 2  # LIVE = strongest signal
+                ms_conviction = 2  # already LIVE (required above)
                 # Signal 2: ESPN sportsbook edge exists and is positive
                 if espn_edge is not None and espn_edge > 0.03:
                     ms_conviction += 2  # real sportsbook edge
@@ -3210,10 +3224,17 @@ def moonshark_snipe():
                 # Signal 3: Good liquidity
                 if _ask_size >= 30:
                     ms_conviction += 1
-                # Signal 4: Price in sweet spot (20-30c = best MoonShark range)
+                # Signal 4: Close game (margin <= sport threshold)
+                if _game_info:
+                    _margin = abs(int(_game_info.get("home_score", 0)) - int(_game_info.get("away_score", 0)))
+                    if _margin <= 5:
+                        ms_conviction += 2  # close game = highest value
+                    elif _margin <= 10:
+                        ms_conviction += 1  # competitive
+                # Signal 5: Price in sweet spot (20-30c = best MoonShark range)
                 if 20 <= price <= 30:
                     ms_conviction += 1
-                # Require minimum conviction of 3 (at least 2 signals)
+                # Require minimum conviction of 3 (at least 2 signals beyond LIVE)
                 if ms_conviction < 3:
                     _ms_reasons["low_conviction"] = _ms_reasons.get("low_conviction", 0) + 1
                     continue
