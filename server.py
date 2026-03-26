@@ -2330,7 +2330,7 @@ def run_bot_scan():
         # Count live game markets for the log
         _live_count = sum(1 for m in all_markets if m.get("platform") == "kalshi" and any(pfx in (m.get("id") or "") for pfx in LIVE_GAME_SERIES))
         _total_bets = len(BOT_STATE.get("snipe_trades_today", [])) + len(BOT_STATE.get("moonshark_trades_today", [])) + len(BOT_STATE.get("closegame_trades_today", []))
-        _log_activity(f"Scan: {_live_count} live markets | {_total_bets} bets placed today (min 5)")
+        _log_activity(f"Scan: {_live_count} live | {_total_bets} bets today")
 
         if not BOT_CONFIG["enabled"]:
             _log_activity("Auto-trade OFF — skipping trades")
@@ -2823,8 +2823,7 @@ def live_game_snipe():
                 vetting = " | ".join(reasons)
 
                 _log_activity(
-                    f"SNIPE: {side.upper()} {ticker} @ {price}c x{count} "
-                    f"(${cost_usd:.2f}) +${expected_profit:.2f} potential | {title[:40]} [{vetting}]",
+                    f"🎯 SNIPE {side.upper()} {title[:35]} @ {price}c x{count} (${cost_usd:.2f})",
                     "info"
                 )
 
@@ -3276,8 +3275,7 @@ def moonshark_snipe():
                     pass
 
                 _log_activity(
-                    f"MOONSHARK: {side.upper()} {ticker} @ {price}c x{count} "
-                    f"(${cost_usd:.2f}) potential +${expected_profit:.2f} | {title[:40]} [{vetting}]",
+                    f"🦈 MOON {side.upper()} {title[:35]} @ {price}c x{count} (${cost_usd:.2f})",
                     "info"
                 )
 
@@ -3320,8 +3318,7 @@ def moonshark_snipe():
                         _journal_trade(ticker, title, side, price, filled, actual_cost, "moonshark", is_live=True, close_time=mkt.get("close_time", ""),
                                        game_info=_game_info, espn_edge_data=_edge_data, orderbook_data=_ob_data)
                         _log_activity(
-                            f"MOONSHARK HIT! {side.upper()} {ticker} @ {price}c x{filled} "
-                            f"= ${actual_cost:.2f} (potential +${potential:.2f}) | {title[:40]}",
+                            f"🦈 BET PLACED! {side.upper()} {title[:35]} @ {price}c x{filled} = ${actual_cost:.2f}",
                             "success"
                         )
                         snipes.append({"ticker": ticker, "filled": filled, "cost": actual_cost, "potential": potential})
@@ -11914,7 +11911,7 @@ a:hover { color: #7da5f5; }
     </div>
   </div>
   <div style="display:flex;justify-content:flex-end;align-items:center;gap:12px;margin-bottom:6px">
-    <button onclick="sellAllLosers()" style="background:#2a1010;border:1px solid #ff5000;color:#ff5000;padding:4px 12px;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer">&#x1F4A3; Sell All Losers</button>
+    <button onclick="sellAllLosers()" style="background:#1a1a1a;border:1px solid #333;color:#888;padding:3px 10px;border-radius:6px;font-size:9px;cursor:pointer">Sell Losers</button>
     <label style="font-size:10px;color:#888;cursor:pointer"><input type="checkbox" id="hide-bot-trades" checked onchange="loadPortfolio();loadPositions()" style="margin-right:4px">Hide old bot trades &amp; penny positions</label>
   </div>
   <div id="portfolio-positions"><div class="loading">Loading positions...</div></div>
@@ -11931,9 +11928,10 @@ a:hover { color: #7da5f5; }
       </div>
     </div>
   </div>
-  <div class="section">
+  <!-- Mispriced Markets hidden — consensus strategy disabled -->
+  <div class="section" style="display:none">
     <div class="section-title">Mispriced Markets <span class="badge" id="opp-badge">0</span><button class="refresh-btn" onclick="loadMispriced()">Refresh</button></div>
-    <div id="opp-table"><div class="loading">Scanning markets...</div></div>
+    <div id="opp-table"></div>
   </div>
   <!-- Activity section merged into Dashboard — REMOVED from bottom, now at top -->
 </div>
@@ -12790,12 +12788,16 @@ async function loadActivity() {
     const el = document.getElementById('activity-lines');
     let html = '';
     items.slice().reverse().forEach(a => {
+      var msg = a.msg || '';
+      // Filter out noisy repeated messages
+      if (msg.indexOf('failed:') >= 0 && msg.indexOf('409') >= 0) return;  // 409 order rejections
+      if (msg.indexOf('Scanning all platforms') >= 0) return;  // redundant scan start
       var t = fmtTimeSec(a.time);
       var lvl = a.level || 'info';
       html += '<div class="activity-line">';
       html += '<span class="time">' + t + '</span>';
       html += '<span class="dot ' + lvl + '"></span>';
-      html += '<span class="msg ' + lvl + '">' + a.msg + '</span>';
+      html += '<span class="msg ' + lvl + '">' + msg.substring(0, 80) + (msg.length > 80 ? '...' : '') + '</span>';
       html += '</div>';
     });
     el.innerHTML = html;
@@ -15032,9 +15034,15 @@ async function loadClosingSoon() {
     var withClose = trades.filter(function(t) { return t.close_time; });
     withClose.sort(function(a, b) { return (a.close_time || '').localeCompare(b.close_time || ''); });
 
-    // Also get open positions with close times
+    // Also get open positions with close times — only show next 30 days
     var posData = await fetch(API + '/portfolio-summary').then(function(r) { return r.json(); });
-    var positions = (posData.open_positions || []).filter(function(p) { return p.close_time; });
+    var _now = new Date();
+    var _30d = new Date(_now.getTime() + 30 * 24 * 60 * 60 * 1000);
+    var positions = (posData.open_positions || []).filter(function(p) {
+      if (!p.close_time) return false;
+      var ct = new Date(p.close_time);
+      return ct <= _30d;  // only positions closing within 30 days
+    });
     positions.sort(function(a, b) { return (a.close_time || '').localeCompare(b.close_time || ''); });
 
     var items = positions;
