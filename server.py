@@ -3218,26 +3218,56 @@ def moonshark_snipe():
 
                 # CONVICTION SCORE — require multiple signals for MoonShark
                 ms_conviction = 2  # already LIVE (required above)
+                _conv_reasons = []
+
                 # Signal 2: ESPN sportsbook edge exists and is positive
                 if espn_edge is not None and espn_edge > 0.03:
                     ms_conviction += 2  # real sportsbook edge
+                    _conv_reasons.append(f"ESPN+{espn_edge:.0%}")
                 elif espn_edge is not None and espn_edge > 0:
                     ms_conviction += 1  # small edge
+
                 # Signal 3: Good liquidity
                 if _ask_size >= 30:
                     ms_conviction += 1
-                # Signal 4: Close game (margin <= sport threshold)
+
+                # Signal 4: Close game + win probability model
                 if _game_info:
-                    _margin = abs(int(_game_info.get("home_score", 0)) - int(_game_info.get("away_score", 0)))
+                    _home_sc = int(_game_info.get("home_score", 0) or 0)
+                    _away_sc = int(_game_info.get("away_score", 0) or 0)
+                    _margin = abs(_home_sc - _away_sc)
+                    _clock = _game_info.get("clock", "")
+                    _league = (_game_info.get("league") or "").lower()
+
+                    # Use win probability model to estimate real odds
+                    _model_prob = _lookup_win_prob(_league, _margin, _clock)
+                    _model_edge = _model_prob - implied_prob
+                    if _model_edge > 0.05:
+                        ms_conviction += 2  # model says underpriced by 5%+
+                        _conv_reasons.append(f"model+{_model_edge:.0%}")
+                    elif _model_edge > 0.02:
+                        ms_conviction += 1
+
                     if _margin <= 5:
                         ms_conviction += 2  # close game = highest value
+                        _conv_reasons.append(f"close({_margin}pt)")
                     elif _margin <= 10:
                         ms_conviction += 1  # competitive
-                # Signal 5: Price in sweet spot (20-30c = best MoonShark range)
+
+                    # Signal 5: Momentum — is the team trending up?
+                    _tracker = _game_score_tracker.get(ticker, {})
+                    if _tracker:
+                        _last_deficit = _tracker.get("last_deficit")
+                        if _last_deficit is not None and _margin < _last_deficit:
+                            ms_conviction += 1  # deficit shrinking = momentum
+                            _conv_reasons.append("momentum")
+
+                # Signal 6: Price in sweet spot (20-30c = best MoonShark range)
                 if 20 <= price <= 30:
                     ms_conviction += 1
-                # Require minimum conviction of 3 (at least 2 signals beyond LIVE)
-                if ms_conviction < 3:
+
+                # Require minimum conviction of 4 (need real edge signals)
+                if ms_conviction < 4:
                     _ms_reasons["low_conviction"] = _ms_reasons.get("low_conviction", 0) + 1
                     continue
 
@@ -3329,7 +3359,7 @@ def moonshark_snipe():
                     pass
 
                 _log_activity(
-                    f"🦈 MOON {side.upper()} {title[:35]} @ {price}c x{count} (${cost_usd:.2f})",
+                    f"🦈 MOON {side.upper()} {title[:30]} @ {price}c x{count} (${cost_usd:.2f}) [{','.join(_conv_reasons[:3])}]",
                     "info"
                 )
 
@@ -3372,7 +3402,7 @@ def moonshark_snipe():
                         _journal_trade(ticker, title, side, price, filled, actual_cost, "moonshark", is_live=True, close_time=mkt.get("close_time", ""),
                                        game_info=_game_info, espn_edge_data=_edge_data, orderbook_data=_ob_data)
                         _log_activity(
-                            f"🦈 BET PLACED! {side.upper()} {title[:35]} @ {price}c x{filled} = ${actual_cost:.2f}",
+                            f"🦈 BET PLACED! {side.upper()} {title[:25]} @ {price}c x{filled} = ${actual_cost:.2f} [{','.join(_conv_reasons[:3])}]",
                             "success"
                         )
                         snipes.append({"ticker": ticker, "filled": filled, "cost": actual_cost, "potential": potential})
