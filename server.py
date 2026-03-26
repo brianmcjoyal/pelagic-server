@@ -1852,14 +1852,23 @@ def find_consensus_mispricings(all_markets):
 # Kalshi order placement (NEW)
 # ---------------------------------------------------------------------------
 
-def place_kalshi_order(ticker, side, price_cents, count=1, action="buy"):
+def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggressive=True):
     path = "/portfolio/orders"
     headers = signed_headers("POST", path)
     if not headers:
         return {"error": "No API key"}
 
+    # Bump price 1-2c above ask to ensure fills (409 fix)
+    # For buys: pay slightly more to guarantee execution
+    # For sells: accept slightly less to guarantee exit
+    fill_price = price_cents
+    if aggressive and action == "buy":
+        fill_price = min(price_cents + 2, 99)  # pay 2c more, cap at 99c
+    elif aggressive and action == "sell":
+        fill_price = max(price_cents - 2, 1)   # accept 2c less, floor at 1c
+
     # Convert cents to dollar string (Kalshi API v2 migrated to _dollars and _fp fields March 12 2026)
-    price_dollars = f"{price_cents / 100:.4f}"
+    price_dollars = f"{fill_price / 100:.4f}"
     payload = {
         "ticker": ticker,
         "action": action,
@@ -2519,8 +2528,8 @@ BOT_STATE["snipe_losses"] = 0
 BOT_STATE["snipe_profit_usd"] = 0.0
 
 # MoonShark settings — underdog sniper (10-45c contracts, decent chance + big payout)
-MOONSHARK_MIN_PRICE = 10   # cents — skip sub-10c lottery tickets
-MOONSHARK_MAX_PRICE = 45   # cents — widened from 30c, data shows 30-45c range wins
+MOONSHARK_MIN_PRICE = 15   # cents — skip sub-15c pure lottery tickets (almost never win)
+MOONSHARK_MAX_PRICE = 35   # cents — tighter range, better win probability
 MOONSHARK_MAX_DAILY = 75.0  # budget per day
 MOONSHARK_BET_USD = 5.0     # ~$5 per MoonShark bet (Kelly-adjusted)
 MOONSHARK_MIN_TRADES = 5    # floor — at least 5 per day
@@ -2754,6 +2763,35 @@ def live_game_snipe():
                             )
                     except Exception:
                         pass
+
+                # CONVICTION SCORE — require multiple signals before betting
+                conviction = 0
+                # Signal 1: Is the game LIVE (in-progress)?
+                _snipe_game = None
+                try:
+                    _snipe_scores = _fetch_all_espn_scores()
+                    _snipe_team = ticker.split("-")[-1].upper() if "-" in ticker else ""
+                    if _snipe_team:
+                        _snipe_game = _snipe_scores.get(_snipe_team.lower())
+                    if _snipe_game and _snipe_game.get("state") == "in":
+                        conviction += 2  # LIVE game = strong signal
+                    elif _snipe_game and _snipe_game.get("state") == "post":
+                        conviction += 1  # finished game, might be settling
+                except Exception:
+                    conviction += 1  # can't check, give benefit of doubt
+                # Signal 2: High volume / liquidity
+                if _ask_size >= 50:
+                    conviction += 1
+                # Signal 3: Price in sweet spot (75-88c for sniper = highest win rate)
+                if 75 <= price <= 88:
+                    conviction += 1
+                # Signal 4: Closing soon (live edge)
+                if closing_boost > 1:
+                    conviction += 1
+                # Require minimum conviction of 2 to bet
+                if conviction < 2:
+                    _ms_reasons["low_conviction"] = _ms_reasons.get("low_conviction", 0) + 1
+                    continue
 
                 # Calculate quantity — bankroll-scaled sizing for compound growth
                 cat_mult = _learning_multiplier(ticker, title, price)
@@ -3128,6 +3166,27 @@ def moonshark_snipe():
                                 continue
                 except Exception:
                     pass
+
+                # CONVICTION SCORE — require multiple signals for MoonShark
+                ms_conviction = 0
+                # Signal 1: Game is LIVE in-progress (not pre-game)
+                if _game_info and _game_info.get("state") == "in":
+                    ms_conviction += 2  # LIVE = strongest signal
+                # Signal 2: ESPN sportsbook edge exists and is positive
+                if espn_edge is not None and espn_edge > 0.03:
+                    ms_conviction += 2  # real sportsbook edge
+                elif espn_edge is not None and espn_edge > 0:
+                    ms_conviction += 1  # small edge
+                # Signal 3: Good liquidity
+                if _ask_size >= 30:
+                    ms_conviction += 1
+                # Signal 4: Price in sweet spot (20-30c = best MoonShark range)
+                if 20 <= price <= 30:
+                    ms_conviction += 1
+                # Require minimum conviction of 3 (at least 2 signals)
+                if ms_conviction < 3:
+                    _ms_reasons["low_conviction"] = _ms_reasons.get("low_conviction", 0) + 1
+                    continue
 
                 # Use real edge if available, otherwise estimate
                 if espn_edge is not None and espn_edge > 0:
