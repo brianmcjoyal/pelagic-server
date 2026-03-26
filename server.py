@@ -6878,8 +6878,8 @@ def _generate_trends():
     # --- Trend 1: Best and worst sport ---
     sport_w = params.get("sport_weights", {})
     if sport_w:
-        best_sport = max(sport_w.items(), key=lambda x: x[1].get("win_rate", 0), default=None)
-        worst_sport = min((x for x in sport_w.items() if x[1].get("sample_size", 0) >= 3), key=lambda x: x[1].get("win_rate", 0), default=None)
+        best_sport = max(sport_w.items(), key=lambda x: x[1].get("win_rate") or 0, default=None)
+        worst_sport = min((x for x in sport_w.items() if (x[1].get("sample_size") or 0) >= 3), key=lambda x: x[1].get("win_rate") or 0, default=None)
         if best_sport and best_sport[1].get("sample_size", 0) >= 3:
             bs = best_sport[1]
             trends.append({
@@ -6903,9 +6903,9 @@ def _generate_trends():
     # --- Trend 2: Best price range ---
     price_w = params.get("price_range_weights", {})
     if price_w:
-        profitable_ranges = [(k, v) for k, v in price_w.items() if v.get("win_rate", 0) > 0 and v.get("sample_size", 0) >= 3]
+        profitable_ranges = [(k, v) for k, v in price_w.items() if (v.get("win_rate") or 0) > 0 and (v.get("sample_size") or 0) >= 3]
         if profitable_ranges:
-            best_pr = max(profitable_ranges, key=lambda x: x[1]["win_rate"])
+            best_pr = max(profitable_ranges, key=lambda x: x[1].get("win_rate") or 0)
             bp = best_pr[1]
             trends.append({
                 "icon": "💰", "title": f"Sweet spot: {best_pr[0]}¢ price range",
@@ -6913,7 +6913,7 @@ def _generate_trends():
                 "color": "#ffb400",
             })
             enhancements.append({"icon": "🎯", "text": f"Prioritizing {best_pr[0]}¢ bets with {bp['weight']}x multiplier", "color": "#ffb400"})
-        losing_ranges = [(k, v) for k, v in price_w.items() if v.get("win_rate", 0) == 0 and v.get("sample_size", 0) >= 5]
+        losing_ranges = [(k, v) for k, v in price_w.items() if (v.get("win_rate") or 0) == 0 and (v.get("sample_size") or 0) >= 5]
         for lr in losing_ranges:
             trends.append({
                 "icon": "⚠️", "title": f"{lr[0]}¢ range has 0% win rate",
@@ -6924,7 +6924,7 @@ def _generate_trends():
     # --- Trend 3: Category insights ---
     cat_w = params.get("category_weights", {})
     if cat_w:
-        blocked = [(k, v) for k, v in cat_w.items() if v.get("weight", 1) == 0 and v.get("sample_size", 0) >= 3]
+        blocked = [(k, v) for k, v in cat_w.items() if (v.get("weight") or 0) == 0 and (v.get("sample_size") or 0) >= 3]
         for bc in blocked[:2]:
             trends.append({
                 "icon": "🚫", "title": f"{bc[0].title()} category auto-blocked",
@@ -6936,12 +6936,17 @@ def _generate_trends():
     # --- Trend 4: Strategy comparison ---
     strat_w = params.get("strategy_weights", {})
     if strat_w:
-        for strat, data in sorted(strat_w.items(), key=lambda x: x[1].get("pnl", 0), reverse=True):
-            if data.get("sample_size", 0) >= 3:
-                color = "#00dc5a" if data["pnl"] > 0 else "#ff5000"
+        for strat, data in sorted(strat_w.items(), key=lambda x: x[1].get("pnl") or 0, reverse=True):
+            if (data.get("sample_size") or 0) >= 3:
+                _pnl = data.get("pnl") or 0
+                _wr = data.get("win_rate") or 0
+                _wins = data.get("wins") or 0
+                _losses = data.get("losses") or 0
+                _ss = data.get("sample_size") or 0
+                color = "#00dc5a" if _pnl > 0 else "#ff5000"
                 trends.append({
-                    "icon": "📊", "title": f"{strat.replace('_', ' ').title()} strategy: ${data['pnl']:+.2f}",
-                    "detail": f"{data['win_rate']:.0%} win rate ({data['wins']}W/{data['losses']}L) — {data['sample_size']} trades",
+                    "icon": "📊", "title": f"{strat.replace('_', ' ').title()} strategy: ${_pnl:+.2f}",
+                    "detail": f"{_wr:.0%} win rate ({_wins}W/{_losses}L) — {_ss} trades",
                     "color": color,
                 })
                 break  # just show the best/worst
