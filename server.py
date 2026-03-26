@@ -1858,43 +1858,68 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
     if not headers:
         return {"error": "No API key"}
 
-    # Bump price 1-2c above ask to ensure fills (409 fix)
-    # For buys: pay slightly more to guarantee execution
-    # For sells: accept slightly less to guarantee exit
+    # Bump price above ask to ensure fills
     fill_price = price_cents
     if aggressive and action == "buy":
-        fill_price = min(price_cents + 2, 99)  # pay 2c more, cap at 99c
+        fill_price = min(price_cents + 3, 99)  # pay 3c more, cap at 99c
     elif aggressive and action == "sell":
-        fill_price = max(price_cents - 2, 1)   # accept 2c less, floor at 1c
+        fill_price = max(price_cents - 3, 1)   # accept 3c less, floor at 1c
 
-    # Convert cents to dollar string (Kalshi API v2 migrated to _dollars and _fp fields March 12 2026)
-    price_dollars = f"{fill_price / 100:.4f}"
+    # Convert cents to dollar string — use 2 decimal places (Kalshi standard)
+    price_dollars = f"{fill_price / 100:.2f}"
+    count_int = max(1, int(count))
     payload = {
         "ticker": ticker,
         "action": action,
         "side": side,
         "type": "limit",
-        "count_fp": f"{int(count)}.00",
+        "count": count_int,
         "client_order_id": str(uuid.uuid4()),
-        "time_in_force": "immediate_or_cancel",
     }
+    # Set price field for the chosen side
     if side == "yes":
-        payload["yes_price_dollars"] = price_dollars
+        payload["yes_price"] = fill_price  # cents as integer
     else:
-        payload["no_price_dollars"] = price_dollars
+        payload["no_price"] = fill_price   # cents as integer
 
     try:
-        print(f"[ORDER] {action.upper()} {side} {ticker} @ {fill_price}c (ask={price_cents}c) x{count}")
+        print(f"[ORDER] {action.upper()} {side} {ticker} @ {fill_price}c (ask={price_cents}c) x{count_int}")
         resp = requests.post(
             KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
             headers=headers,
             json=payload,
             timeout=TIMEOUT,
         )
+        if resp.status_code == 409:
+            # Retry with _dollars format and IOC
+            print(f"[ORDER] 409 with cents format, retrying with dollars format...")
+            payload2 = {
+                "ticker": ticker,
+                "action": action,
+                "side": side,
+                "type": "limit",
+                "count_fp": f"{count_int}.00",
+                "client_order_id": str(uuid.uuid4()),
+                "time_in_force": "immediate_or_cancel",
+            }
+            if side == "yes":
+                payload2["yes_price_dollars"] = price_dollars
+            else:
+                payload2["no_price_dollars"] = price_dollars
+            resp = requests.post(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
+                headers=headers,
+                json=payload2,
+                timeout=TIMEOUT,
+            )
         resp.raise_for_status()
         result = resp.json()
-        filled = int(float(str(result.get("order", {}).get("filled_count_fp") or 0)))
-        print(f"[ORDER] OK: {ticker} filled={filled}/{count}")
+        filled = 0
+        try:
+            filled = int(float(str(result.get("order", {}).get("filled_count_fp") or result.get("order", {}).get("filled_count") or 0)))
+        except Exception:
+            pass
+        print(f"[ORDER] OK: {ticker} filled={filled}/{count_int}")
         return result
     except requests.exceptions.HTTPError as e:
         body = ""
