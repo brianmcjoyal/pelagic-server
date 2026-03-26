@@ -3096,16 +3096,12 @@ def moonshark_snipe():
                 _bet_team_odds = None
                 _game_info = None  # will be populated by _check_blowout later
                 # Try to get live scores for odds check
+                # _fetch_all_espn_scores() returns flat dict: team_key(lowercase) -> game_info
                 try:
                     _scores_for_odds = _fetch_all_espn_scores()
                     _bet_team = ticker.split("-")[-1].upper() if "-" in ticker else ""
-                    for _sport_key, _games in _scores_for_odds.items():
-                        for _g in _games:
-                            if _bet_team and (_g.get("home_abbrev", "").upper() == _bet_team or _g.get("away_abbrev", "").upper() == _bet_team):
-                                _game_info = _g
-                                break
-                        if _game_info:
-                            break
+                    if _bet_team:
+                        _game_info = _scores_for_odds.get(_bet_team.lower())
                 except Exception:
                     pass
                 try:
