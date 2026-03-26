@@ -2774,7 +2774,7 @@ def live_game_snipe():
                 # Vetting log — show WHY this trade passed all filters
                 reasons = []
                 reasons.append(f"cat={mcat}")
-                reasons.append(f"vol={mkt_volume}")
+                reasons.append(f"vol={_ask_size:.0f}")
                 if closing_boost > 1:
                     reasons.append(f"CLOSING EDGE")
                 if cat_mult > 1:
@@ -3092,7 +3092,22 @@ def moonshark_snipe():
 
                 # TRY REAL SPORTSBOOK ODDS FIRST (ESPN moneylines)
                 espn_edge = None
+                espn_implied = 0
                 _bet_team_odds = None
+                _game_info = None  # will be populated by _check_blowout later
+                # Try to get live scores for odds check
+                try:
+                    _scores_for_odds = _fetch_all_espn_scores()
+                    _bet_team = ticker.split("-")[-1].upper() if "-" in ticker else ""
+                    for _sport_key, _games in _scores_for_odds.items():
+                        for _g in _games:
+                            if _bet_team and (_g.get("home_abbrev", "").upper() == _bet_team or _g.get("away_abbrev", "").upper() == _bet_team):
+                                _game_info = _g
+                                break
+                        if _game_info:
+                            break
+                except Exception:
+                    pass
                 try:
                     _tk_parts_odds = ticker.split("-")
                     _bet_team_odds_abbrev = _tk_parts_odds[-1].upper() if len(_tk_parts_odds) >= 2 else None
@@ -3179,7 +3194,7 @@ def moonshark_snipe():
                 # Vetting log
                 reasons = []
                 reasons.append(f"cat={mcat}")
-                reasons.append(f"vol={mkt_volume}")
+                reasons.append(f"vol={_ask_size:.0f}")
                 reasons.append(f"payout={profit_per}c/contract")
                 reasons.append(f"kelly=${kelly_usd:.2f}")
                 reasons.append(f"edge={edge_estimate:.1%}")
@@ -3562,7 +3577,7 @@ def closegame_snipe():
                         _cg_edge = None
                         try:
                             if edge:
-                                _cg_edge = {"espn_implied": win_prob, "espn_edge": edge}
+                                _cg_edge = {"espn_implied": estimated_win_prob, "espn_edge": edge}
                         except Exception:
                             pass
                         _journal_trade(ticker, title, side, price, filled, actual_cost, "closegame", is_live=True, close_time=mkt.get("close_time", ""),
