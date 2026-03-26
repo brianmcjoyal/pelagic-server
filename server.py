@@ -2573,6 +2573,7 @@ def live_game_snipe():
         pass
 
     snipes = []
+    _ms_reasons = {}  # rejection tracking (shared name with moonshark for consistency)
 
     # Max snipes per day
     if len(BOT_STATE.get("snipe_trades_today", [])) >= SNIPE_MAX_TRADES:
@@ -3206,6 +3207,7 @@ def moonshark_snipe():
                 vetting = " | ".join(reasons)
 
                 # Check orderbook spread — skip illiquid markets with wide spreads
+                _ob = None
                 try:
                     _ob = analyze_orderbook(ticker)
                     if _ob and _ob.get("spread", 99) > 8:
@@ -3355,78 +3357,83 @@ def closegame_snipe():
         return []
 
     # Find games that are LIVE, CLOSE, and LATE
+    # _fetch_all_espn_scores() returns flat dict (team_key -> game_info)
+    # Deduplicate by building unique games from values
+    _seen_matchups = set()
+    _unique_games = []
+    for _ginfo in scores.values():
+        _matchup_key = f"{_ginfo.get('home_abbrev', '')}_{_ginfo.get('away_abbrev', '')}"
+        if _matchup_key not in _seen_matchups:
+            _seen_matchups.add(_matchup_key)
+            _unique_games.append(_ginfo)
+
     close_games = []
-    for sport, games in scores.items():
-        for game in games:
-            if game.get("state") != "in":
-                continue
-            home_score = int(game.get("home_score", 0))
-            away_score = int(game.get("away_score", 0))
-            margin = abs(home_score - away_score)
-            period = game.get("clock", "")
+    for game in _unique_games:
+        if game.get("state") != "in":
+            continue
+        sport = game.get("league", "").lower()
+        home_score = int(game.get("home_score", 0))
+        away_score = int(game.get("away_score", 0))
+        margin = abs(home_score - away_score)
+        period = game.get("clock", "")
 
-            # Define "late game" by sport — FINAL period only for highest edge
-            is_late = False
-            if sport == "nba":
-                is_late = any(p in period for p in ["Q4", "OT", "4th"])
-                max_margin = 6  # NBA: within 6 in Q4 (tighter = better edge)
-            elif sport == "ncaab":
-                is_late = any(p in period for p in ["2H", "OT", "2nd"])
-                max_margin = 5  # College BB men: within 5 in 2H
-            elif sport == "ncaawb":
-                is_late = any(p in period for p in ["Q4", "4th", "OT"])
-                max_margin = 5  # College BB women: Q4 only (tighter)
-            elif sport == "nhl":
-                is_late = any(p in period for p in ["P3", "3rd", "OT"])
-                max_margin = 1  # Hockey: within 1 goal in P3 (tighter)
-            elif sport in ("mlb", "kbo"):
-                # Check inning number
-                try:
-                    inning = int(''.join(c for c in period if c.isdigit()) or "0")
-                    is_late = inning >= 7
-                except Exception:
-                    is_late = False
-                max_margin = 3  # Baseball: within 3 in 7th+
-            elif sport in ("atp", "wta"):
-                # Tennis: any live match is eligible (sets are volatile)
+        # Define "late game" by sport — FINAL period only for highest edge
+        is_late = False
+        if sport == "nba":
+            is_late = any(p in period for p in ["Q4", "OT", "4th"])
+            max_margin = 6  # NBA: within 6 in Q4 (tighter = better edge)
+        elif sport == "ncaab":
+            is_late = any(p in period for p in ["2H", "OT", "2nd"])
+            max_margin = 5  # College BB men: within 5 in 2H
+        elif sport == "ncaawb":
+            is_late = any(p in period for p in ["Q4", "4th", "OT"])
+            max_margin = 5  # College BB women: Q4 only (tighter)
+        elif sport == "nhl":
+            is_late = any(p in period for p in ["P3", "3rd", "OT"])
+            max_margin = 1  # Hockey: within 1 goal in P3 (tighter)
+        elif sport in ("mlb", "kbo"):
+            try:
+                inning = int(''.join(c for c in period if c.isdigit()) or "0")
+                is_late = inning >= 7
+            except Exception:
+                is_late = False
+            max_margin = 3  # Baseball: within 3 in 7th+
+        elif sport in ("atp", "wta"):
+            is_late = True
+            max_margin = 1  # Within 1 set
+        elif sport in ("mls", "epl"):
+            try:
+                minutes = int(''.join(c for c in period if c.isdigit()) or "0")
+                is_late = minutes >= 60
+            except Exception:
                 is_late = True
-                max_margin = 1  # Within 1 set
-            elif sport in ("mls", "epl"):
-                # Soccer: 2nd half, within 1 goal
-                try:
-                    minutes = int(''.join(c for c in period if c.isdigit()) or "0")
-                    is_late = minutes >= 60
-                except Exception:
-                    is_late = True
-                max_margin = 1  # Soccer: within 1 goal in 60th+
+            max_margin = 1  # Soccer: within 1 goal in 60th+
+        else:
+            max_margin = 5
+            is_late = True  # default: any live game
+
+        if is_late and margin <= max_margin:
+            if home_score < away_score:
+                underdog = game.get("home_abbrev", "")
+                underdog_name = game.get("home_name", "")
+            elif away_score < home_score:
+                underdog = game.get("away_abbrev", "")
+                underdog_name = game.get("away_name", "")
             else:
-                max_margin = 5
-                is_late = True  # default: any live game
+                continue  # Tied game — skip
 
-            if is_late and margin <= max_margin:
-                # Determine which team is the underdog (trailing)
-                if home_score < away_score:
-                    underdog = game.get("home_abbrev", "")
-                    underdog_name = game.get("home_name", "")
-                elif away_score < home_score:
-                    underdog = game.get("away_abbrev", "")
-                    underdog_name = game.get("away_name", "")
-                else:
-                    # Tied game — both sides are ~50/50, skip (no mispricing)
-                    continue
-
-                close_games.append({
-                    "sport": sport,
-                    "game": game,
-                    "underdog": underdog,
-                    "underdog_name": underdog_name,
-                    "margin": margin,
-                    "period": period,
-                    "home": game.get("home_abbrev", ""),
-                    "away": game.get("away_abbrev", ""),
-                    "home_score": home_score,
-                    "away_score": away_score,
-                })
+            close_games.append({
+                "sport": sport,
+                "game": game,
+                "underdog": underdog,
+                "underdog_name": underdog_name,
+                "margin": margin,
+                "period": period,
+                "home": game.get("home_abbrev", ""),
+                "away": game.get("away_abbrev", ""),
+                "home_score": home_score,
+                "away_score": away_score,
+            })
 
     if not close_games:
         return []
