@@ -2698,8 +2698,8 @@ def live_game_snipe():
                             pass
                 else:
                     # For series-scanned: only bet on today's/yesterday's games
-                    today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%d%b%y").upper()
-                    yesterday_str = (datetime.datetime.now(tz=_PACIFIC) - datetime.timedelta(days=1)).strftime("%d%b%y").upper()
+                    today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%y%b%d").upper()  # e.g. 26MAR25
+                    yesterday_str = (datetime.datetime.now(tz=_PACIFIC) - datetime.timedelta(days=1)).strftime("%y%b%d").upper()
                     if today_str not in ticker.upper() and yesterday_str not in ticker.upper():
                         continue
 
@@ -3037,8 +3037,8 @@ def moonshark_snipe():
                         continue
                 # For series-scanned markets, check if game is TODAY by parsing date from ticker
                 else:
-                    today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%d%b%y").upper()  # e.g. 25MAR26
-                    yesterday_str = (datetime.datetime.now(tz=_PACIFIC) - datetime.timedelta(days=1)).strftime("%d%b%y").upper()
+                    today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%y%b%d").upper()  # e.g. 26MAR25
+                    yesterday_str = (datetime.datetime.now(tz=_PACIFIC) - datetime.timedelta(days=1)).strftime("%y%b%d").upper()
                     if today_str not in ticker.upper() and yesterday_str not in ticker.upper():
                         _ms_reasons["not_today"] = _ms_reasons.get("not_today", 0) + 1
                         continue
@@ -3445,7 +3445,7 @@ def closegame_snipe():
             if not prefix:
                 continue
 
-            today_str = datetime.datetime.utcnow().strftime("%d%b%y").upper()  # e.g., 22MAR26
+            today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%y%b%d").upper()  # e.g., 26MAR25
             # Try to find the market
             params = {"limit": 50, "status": "open", "ticker_contains": prefix}
             resp = requests.get(
