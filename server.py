@@ -1884,6 +1884,7 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
         payload["no_price_dollars"] = price_dollars
 
     try:
+        print(f"[ORDER] {action.upper()} {side} {ticker} @ {fill_price}c (ask={price_cents}c) x{count}")
         resp = requests.post(
             KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
             headers=headers,
@@ -1891,13 +1892,17 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
             timeout=TIMEOUT,
         )
         resp.raise_for_status()
-        return resp.json()
+        result = resp.json()
+        filled = int(float(str(result.get("order", {}).get("filled_count_fp") or 0)))
+        print(f"[ORDER] OK: {ticker} filled={filled}/{count}")
+        return result
     except requests.exceptions.HTTPError as e:
         body = ""
         try:
-            body = e.response.text
+            body = e.response.text[:300]
         except Exception:
             pass
+        print(f"[ORDER] REJECT {e.response.status_code}: {ticker} {side} @ {fill_price}c — {body}")
         return {"error": str(e), "response_body": body}
     except Exception as e:
         return {"error": str(e)}
@@ -2871,7 +2876,8 @@ def live_game_snipe():
                         _log_activity(f"🎯 Snipe missed: {ticker} — 0 filled at {price}c", "error")
                 else:
                     err = result.get("error", "")[:60]
-                    _log_activity(f"🎯 Snipe failed: {ticker} — {err}", "error")
+                    body = result.get("response_body", "")[:100]
+                    print(f"[SNIPER] Order rejected: {ticker} side={side} price={price}c err={err} body={body}")
 
         except Exception as e:
             print(f"[SNIPER] Error scanning source: {e}")
@@ -3328,7 +3334,9 @@ def moonshark_snipe():
                         _log_activity(f"MOONSHARK missed: {ticker} — 0 filled at {price}c", "error")
                 else:
                     err = result.get("error", "")[:60]
-                    _log_activity(f"MOONSHARK failed: {ticker} — {err}", "error")
+                    body = result.get("response_body", "")[:100]
+                    print(f"[MOONSHARK] Order rejected: {ticker} side={side} price={price}c count={count} err={err} body={body}")
+                    _log_activity(f"MOONSHARK failed: {title[:25]} — {body[:50] or err[:50]}", "error")
 
         except Exception as e:
             print(f"[MOONSHARK] Error scanning source: {e}")
