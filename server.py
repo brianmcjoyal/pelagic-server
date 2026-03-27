@@ -4901,6 +4901,9 @@ def _category_multiplier(ticker, title):
     win_rate = wins / total
 
     # Dynamic multiplier tiers based on proven win rate
+    # NOTE: Never fully block (0.0) a category — use 0.25 floor so the bot
+    # can still discover wins.  0% WR on longshots is expected early; a
+    # single win flips the economics.  Weather is the only hard-block.
     if win_rate >= 0.25:
         mult = 2.0   # strong performer — bet aggressively
     elif win_rate >= 0.15:
@@ -4910,7 +4913,7 @@ def _category_multiplier(ticker, title):
     elif win_rate > 0:
         mult = 0.5   # weak — reduce exposure
     else:
-        mult = 0.0   # 0% win rate — skip entirely
+        mult = 0.25  # 0% win rate — reduce heavily but keep exploring
 
     # Always block weather
     if cat == "weather":
@@ -5139,9 +5142,10 @@ def _learning_multiplier(ticker, title, price_cents=None, game_info=None, espn_e
     cat = classify_market_category(title or "", ticker or "")
     cat_w = params.get("category_weights", {}).get(cat, {})
     if cat_w.get("confidence", 0) >= 0.5:
-        if cat_w["weight"] == 0.0:
-            return 0.0  # hard block — 0% win rate on 5+ trades
-        multipliers.append(cat_w["weight"])
+        # Never hard-block sports categories — use floor of 0.15 so the bot
+        # keeps exploring.  Only weather is truly zero.
+        w = max(cat_w["weight"], 0.15) if cat != "weather" else cat_w["weight"]
+        multipliers.append(w)
 
     # Sport type weight
     t_upper = (ticker or "").upper()
@@ -5156,9 +5160,8 @@ def _learning_multiplier(ticker, title, price_cents=None, game_info=None, espn_e
             break
     sport_w = params.get("sport_weights", {}).get(sport, {})
     if sport_w.get("confidence", 0) >= 0.5:
-        if sport_w["weight"] == 0.0:
-            return 0.0
-        multipliers.append(sport_w["weight"])
+        # Floor at 0.15 — never fully block a sport (same rationale as categories)
+        multipliers.append(max(sport_w["weight"], 0.15))
 
     # Price range weight
     if price_cents:
@@ -5178,9 +5181,8 @@ def _learning_multiplier(ticker, title, price_cents=None, game_info=None, espn_e
     hour = str(datetime.datetime.utcnow().hour)
     hour_w = params.get("hour_weights", {}).get(hour, {})
     if hour_w.get("confidence", 0) >= 0.5:
-        if hour_w["weight"] == 0.0 and hour_w["sample_size"] >= 10:
-            return 0.0  # hard block hours with 0% on 10+ trades
-        multipliers.append(hour_w["weight"])
+        # Floor at 0.15 — don't fully block any hour
+        multipliers.append(max(hour_w["weight"], 0.15))
 
     if not multipliers:
         return 1.0  # no data for any dimension
