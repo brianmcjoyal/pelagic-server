@@ -2610,6 +2610,16 @@ def live_game_snipe():
                 existing_events.add("-".join(parts[:2]))
     except Exception:
         pass
+    # Also include today's trades from ALL strategies to prevent cross-strategy dupes
+    for _tlist in [BOT_STATE.get("snipe_trades_today", []), BOT_STATE.get("moonshark_trades_today", []),
+                   BOT_STATE.get("closegame_trades_today", []), BOT_STATE.get("manual_trades_today", [])]:
+        for _t in _tlist:
+            _tk = _t.get("ticker", "")
+            if _tk:
+                existing_tickers.add(_tk)
+                _tp = _tk.split("-")
+                if len(_tp) >= 2:
+                    existing_events.add("-".join(_tp[:2]))
 
     snipes = []
     _ms_reasons = {}  # rejection tracking (shared name with moonshark for consistency)
@@ -2983,6 +2993,16 @@ def moonshark_snipe():
                 existing_events.add("-".join(parts[:2]))
     except Exception:
         pass
+    # Also include today's trades from ALL strategies to prevent cross-strategy dupes
+    for _tlist in [BOT_STATE.get("snipe_trades_today", []), BOT_STATE.get("moonshark_trades_today", []),
+                   BOT_STATE.get("closegame_trades_today", []), BOT_STATE.get("manual_trades_today", [])]:
+        for _t in _tlist:
+            _tk = _t.get("ticker", "")
+            if _tk:
+                existing_tickers.add(_tk)
+                _tp = _tk.split("-")
+                if len(_tp) >= 2:
+                    existing_events.add("-".join(_tp[:2]))
 
     snipes = []
 
