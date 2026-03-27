@@ -13824,11 +13824,11 @@ async function loadPositions() {
       if (settled.length === 0) {
         document.getElementById('pos-table-closed').innerHTML = '<div style="color:#555;font-size:9px;padding:8px;text-align:center">No settled positions yet</div>';
       } else {
-        // Sort newest first: by settle_time descending, then trade_date descending
+        // Sort newest first: parse dates properly to handle mixed formats
         settled.sort(function(a, b) {
-          var aKey = a.settle_time || a.trade_date || '';
-          var bKey = b.settle_time || b.trade_date || '';
-          return bKey.localeCompare(aKey);
+          var aTime = new Date(a.settle_time || a.trade_date || '2000-01-01').getTime();
+          var bTime = new Date(b.settle_time || b.trade_date || '2000-01-01').getTime();
+          return bTime - aTime;
         });
         var ch = '<table style="font-size:10px"><tr><th>Settled</th><th>Market</th><th>Side</th><th>Result</th><th>P&L</th></tr>';
         settled.forEach(function(s) {
