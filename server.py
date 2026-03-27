@@ -13824,6 +13824,12 @@ async function loadPositions() {
       if (settled.length === 0) {
         document.getElementById('pos-table-closed').innerHTML = '<div style="color:#555;font-size:9px;padding:8px;text-align:center">No settled positions yet</div>';
       } else {
+        // Sort newest first: by settle_time descending, then trade_date descending
+        settled.sort(function(a, b) {
+          var aKey = a.settle_time || a.trade_date || '';
+          var bKey = b.settle_time || b.trade_date || '';
+          return bKey.localeCompare(aKey);
+        });
         var ch = '<table style="font-size:10px"><tr><th>Settled</th><th>Market</th><th>Side</th><th>Result</th><th>P&L</th></tr>';
         settled.forEach(function(s) {
           var resultColor = s.won ? '#00dc5a' : '#ff5000';
@@ -13843,7 +13849,7 @@ async function loadPositions() {
           ch += '<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (s.title || s.ticker || '') + '</td>';
           ch += '<td style="color:' + (s.side === 'yes' ? '#00dc5a' : '#ff5000') + '">' + (s.side || '').toUpperCase() + '</td>';
           ch += '<td style="color:' + resultColor + ';font-weight:700">' + resultText + '</td>';
-          ch += '<td style="color:' + resultColor + ';font-weight:700">' + (pnlUsd >= 0 ? '+' : '') + '$' + Math.abs(pnlUsd).toFixed(2) + '</td>';
+          ch += '<td style="color:' + resultColor + ';font-weight:700">' + (pnlUsd >= 0 ? '+$' : '-$') + Math.abs(pnlUsd).toFixed(2) + '</td>';
           ch += '</tr>';
         });
         ch += '</table>';
