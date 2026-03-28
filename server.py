@@ -6026,6 +6026,7 @@ def _background_loop():
             "open_count": len(_pos_early),
             "total_invested_usd": round(_inv_early, 2),
             "total_unrealized_usd": round(sum((p.get("unrealized_pnl_cents") or 0) for p in _pos_early) / 100, 2),
+            "daily_pnl_usd": round(sum((p.get("unrealized_pnl_cents") or 0) for p in _pos_early) / 100, 2),
             "wins": 0, "losses": 0, "breakeven": 0, "win_rate": 0,
             "total_realized_usd": 0, "settled_history": [],
         }
@@ -6260,17 +6261,18 @@ def _background_loop():
                 _7d_losses = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "loss" and (t.get("settlement_time") or "") >= _7d_cutoff)
                 _7d_wr = round(_7d_wins / max(1, _7d_wins + _7d_losses) * 100, 1) if (_7d_wins + _7d_losses) > 0 else 0
 
+                _total_unrealized = round(sum((p.get("unrealized_pnl_cents") or 0) for p in _pos2) / 100, 2)
+
                 # Calculate true daily P&L: today's settled results + current unrealized
-                _today_str = datetime.datetime.utcnow().strftime("%Y-%m-%d")
-                _today_settled_pnl = 0
+                _daily_pnl = _total_unrealized
                 try:
+                    _today_str = datetime.datetime.utcnow().strftime("%Y-%m-%d")
                     for _jt in _TRADE_JOURNAL:
-                        if _jt.get("result") is not None and (_jt.get("settlement_time") or "")[:10] == _today_str:
-                            _today_settled_pnl += (_jt.get("pnl") or 0)
+                        if _jt.get("result") is not None and str(_jt.get("settlement_time") or "")[:10] == _today_str:
+                            _daily_pnl += float(_jt.get("pnl") or 0)
+                    _daily_pnl = round(_daily_pnl, 2)
                 except Exception:
                     pass
-                _total_unrealized = sum((p.get("unrealized_pnl_cents") or 0) for p in _pos2) / 100
-                _daily_pnl = round(_today_settled_pnl + _total_unrealized, 2)
 
                 _PORTFOLIO_CACHE["data"] = {
                     "balance_usd": round(_bal2, 2),
@@ -6279,7 +6281,7 @@ def _background_loop():
                     "open_positions": _pos2,
                     "open_count": len(_pos2),
                     "total_invested_usd": round(sum(p.get("market_exposure_cents", 0) for p in _pos2) / 100, 2),
-                    "total_unrealized_usd": round(_total_unrealized, 2),
+                    "total_unrealized_usd": _total_unrealized,
                     "daily_pnl_usd": _daily_pnl,
                     "wins": _d1_wins,
                     "losses": _d1_losses,
