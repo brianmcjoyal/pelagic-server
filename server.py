@@ -6260,6 +6260,15 @@ def _background_loop():
                 _7d_losses = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "loss" and (t.get("settlement_time") or "") >= _7d_cutoff)
                 _7d_wr = round(_7d_wins / max(1, _7d_wins + _7d_losses) * 100, 1) if (_7d_wins + _7d_losses) > 0 else 0
 
+                # Calculate true daily P&L: today's settled results + current unrealized
+                _today_str = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+                _today_settled_pnl = sum(
+                    t.get("pnl", 0) for t in _TRADE_JOURNAL
+                    if t.get("result") is not None and (t.get("settlement_time") or "")[:10] == _today_str
+                )
+                _total_unrealized = sum((p.get("unrealized_pnl_cents") or 0) for p in _pos2) / 100
+                _daily_pnl = round(_today_settled_pnl + _total_unrealized, 2)
+
                 _PORTFOLIO_CACHE["data"] = {
                     "balance_usd": round(_bal2, 2),
                     "portfolio_value_usd": round(_bal2 + _mv2, 2),
@@ -6267,7 +6276,8 @@ def _background_loop():
                     "open_positions": _pos2,
                     "open_count": len(_pos2),
                     "total_invested_usd": round(sum(p.get("market_exposure_cents", 0) for p in _pos2) / 100, 2),
-                    "total_unrealized_usd": round(sum((p.get("unrealized_pnl_cents") or 0) for p in _pos2) / 100, 2),
+                    "total_unrealized_usd": round(_total_unrealized, 2),
+                    "daily_pnl_usd": _daily_pnl,
                     "wins": _d1_wins,
                     "losses": _d1_losses,
                     "wins_all_time": _wins2,
@@ -12707,8 +12717,8 @@ async function loadPortfolio() {
     document.getElementById('pf-cash').textContent = '$' + (data.balance_usd || 0).toFixed(2);
     document.getElementById('pf-invested').textContent = '$' + Math.max(0, investedVal).toFixed(2);
 
-    // Daily P&L
-    var dailyPl = data.total_unrealized_usd || 0;
+    // Daily P&L (today's settled + current unrealized)
+    var dailyPl = (data.daily_pnl_usd !== undefined) ? data.daily_pnl_usd : (data.total_unrealized_usd || 0);
     var dailyEl = document.getElementById('pf-daily-pl');
     if (dailyEl) {
       dailyEl.textContent = (dailyPl >= 0 ? '+' : '') + '$' + Math.abs(dailyPl).toFixed(2);
