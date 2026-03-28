@@ -6262,10 +6262,13 @@ def _background_loop():
 
                 # Calculate true daily P&L: today's settled results + current unrealized
                 _today_str = datetime.datetime.utcnow().strftime("%Y-%m-%d")
-                _today_settled_pnl = sum(
-                    t.get("pnl", 0) for t in _TRADE_JOURNAL
-                    if t.get("result") is not None and (t.get("settlement_time") or "")[:10] == _today_str
-                )
+                _today_settled_pnl = 0
+                try:
+                    for _jt in _TRADE_JOURNAL:
+                        if _jt.get("result") is not None and (_jt.get("settlement_time") or "")[:10] == _today_str:
+                            _today_settled_pnl += (_jt.get("pnl") or 0)
+                except Exception:
+                    pass
                 _total_unrealized = sum((p.get("unrealized_pnl_cents") or 0) for p in _pos2) / 100
                 _daily_pnl = round(_today_settled_pnl + _total_unrealized, 2)
 
