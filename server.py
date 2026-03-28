@@ -6710,7 +6710,20 @@ def settled_positions():
             _title_cache[ticker] = ticker
             return ticker
 
+        # Deduplicate positions by ticker — the same ticker can appear in both
+        # "settled" and "unsettled" results with non-zero realized P&L
+        _seen_tickers = {}
         for pos in positions_list:
+            ticker = pos.get("ticker", "")
+            if not ticker:
+                continue
+            pnl_cents = _parse_kalshi_dollars(pos.get("realized_pnl_dollars") or pos.get("realized_pnl"))
+            if ticker not in _seen_tickers or abs(pnl_cents) > abs(
+                _parse_kalshi_dollars(_seen_tickers[ticker].get("realized_pnl_dollars") or _seen_tickers[ticker].get("realized_pnl"))
+            ):
+                _seen_tickers[ticker] = pos
+
+        for pos in _seen_tickers.values():
             pnl_cents = _parse_kalshi_dollars(pos.get("realized_pnl_dollars") or pos.get("realized_pnl"))
             pnl = pnl_cents / 100
             # Skip positions with zero realized P&L (still open, no completed trades)
@@ -6753,12 +6766,23 @@ def settled_positions():
                 breakeven += 1
                 won = None
 
-            side = pos.get("side", "")
+            # Derive side from position data, fall back to trade history
+            _, pos_side = _parse_kalshi_position(pos)
+            side = pos_side if pos_side else ""
             count = 0
             try:
                 count = int(float(str(pos.get("total_count_fp") or pos.get("total_count") or 0)))
             except Exception:
                 pass
+            # If side is empty or defaulted, check trade history
+            trade_strategy = "unknown"
+            for t in BOT_STATE.get("all_trades", []):
+                if t.get("ticker") == ticker:
+                    if not side or (side == "yes" and not pos.get("position_fp") and not pos.get("position")):
+                        side = t.get("side") or side
+                    trade_strategy = t.get("strategy") or "unknown"
+                    break
+
             entry_cents = 0
             try:
                 if side == "yes":
@@ -6769,12 +6793,6 @@ def settled_positions():
                 pass
 
             category = classify_market_category(title, ticker)
-            # Find strategy from trade history
-            trade_strategy = "unknown"
-            for t in BOT_STATE.get("all_trades", []):
-                if t.get("ticker") == ticker:
-                    trade_strategy = t.get("strategy") or "unknown"
-                    break
 
             # Get settlement time from position data
             settle_time = pos.get("settlement_time") or pos.get("last_updated") or ""
