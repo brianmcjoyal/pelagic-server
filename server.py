@@ -10236,13 +10236,13 @@ def moonshark_opportunities():
             # Must be a GAME/MATCH/FIGHT (binary outcome, not futures/props)
             if not any(kw in _tk_upper for kw in ["GAME", "MATCH", "FIGHT"]):
                 continue
-            # Must close within 18h (same-day settlement only)
+            # Must be LIVE right now — close_time within next 12h and game already started
             _ct = m.get("close_time") or m.get("expected_expiration_time") or ""
             if _ct:
                 try:
                     _cd = datetime.datetime.fromisoformat(_ct.replace("Z", "+00:00")).replace(tzinfo=None)
                     _htc = (_cd - datetime.datetime.utcnow()).total_seconds() / 3600
-                    if _htc > 18 or _htc < 0:
+                    if _htc > 12 or _htc < 0:
                         continue
                 except Exception:
                     continue
@@ -10538,6 +10538,7 @@ def moonshot_bet():
     side = body.get("side", "")
     price_cents = body.get("price_cents", 0)
     bet_usd = body.get("bet_usd", 5)
+    bet_source = body.get("source", "manual")  # "wheel" or "manual"
 
     if not ticker or not side:
         return jsonify({"error": "Missing ticker or side"}), 400
@@ -10580,9 +10581,10 @@ def moonshot_bet():
                 "ticker": ticker, "title": ticker, "side": side,
                 "price": price_cents, "count": count, "cost": round(actual_cost, 2),
                 "time": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "strategy": "moonshark_manual", "source": "you",
+                "strategy": "wta_wheel" if bet_source == "wheel" else "moonshark_manual", "source": "you",
             })
-            _journal_trade(ticker, ticker, side, price_cents, count, actual_cost, "moonshark_manual", is_live=False)
+            _strategy = "wta_wheel" if bet_source == "wheel" else "moonshark_manual"
+            _journal_trade(ticker, ticker, side, price_cents, count, actual_cost, _strategy, is_live=True)
             return jsonify({"success": True, "cost": actual_cost, "count": count, "potential_payout": payout})
         else:
             return jsonify({"error": resp.text}), 400
@@ -10599,6 +10601,87 @@ def moonshot_fund_add():
         BOT_STATE["moonshot_fund"] = BOT_STATE.get("moonshot_fund", 0) + amount
         return jsonify({"success": True, "new_balance": round(BOT_STATE["moonshot_fund"], 2)})
     return jsonify({"error": "Amount must be positive"}), 400
+
+
+@app.route("/wta-wheel-stats")
+def wta_wheel_stats():
+    """Stats for WTA wheel bets and all WTA tennis positions."""
+    try:
+        # Get all WTA trades from journal (wheel + bot)
+        wta_all = [t for t in _TRADE_JOURNAL if "KXWTA" in (t.get("ticker") or "").upper()]
+        wta_wheel = [t for t in _TRADE_JOURNAL if t.get("strategy") == "wta_wheel"]
+        wta_settled = [t for t in wta_all if t.get("result") is not None]
+        wheel_settled = [t for t in wta_wheel if t.get("result") is not None]
+
+        wta_wins = sum(1 for t in wta_settled if t.get("result") == "win")
+        wta_losses = sum(1 for t in wta_settled if t.get("result") == "loss")
+        wta_pnl = sum(float(t.get("pnl") or 0) for t in wta_settled)
+
+        wheel_wins = sum(1 for t in wheel_settled if t.get("result") == "win")
+        wheel_losses = sum(1 for t in wheel_settled if t.get("result") == "loss")
+        wheel_pnl = sum(float(t.get("pnl") or 0) for t in wheel_settled)
+
+        # Also check open WTA positions
+        wta_open = []
+        try:
+            positions = check_position_prices()
+            for p in positions:
+                tk = (p.get("ticker") or "").upper()
+                if "KXWTA" in tk:
+                    wta_open.append(p)
+        except Exception:
+            pass
+
+        # Build bet list for wheel bets (settled + open)
+        bets = []
+        for t in wta_wheel:
+            bets.append({
+                "ticker": t.get("ticker", ""),
+                "title": t.get("title", t.get("ticker", "")),
+                "side": t.get("side", ""),
+                "price": t.get("price_cents", 0),
+                "count": t.get("count", 0),
+                "cost": round(float(t.get("cost_usd") or 0), 2),
+                "result": t.get("result"),
+                "pnl": round(float(t.get("pnl") or 0), 2),
+                "time": t.get("timestamp", ""),
+            })
+        # Also include any WTA bot trades
+        for t in wta_all:
+            if t.get("strategy") != "wta_wheel":
+                bets.append({
+                    "ticker": t.get("ticker", ""),
+                    "title": t.get("title", t.get("ticker", "")),
+                    "side": t.get("side", ""),
+                    "price": t.get("price_cents", 0),
+                    "count": t.get("count", 0),
+                    "cost": round(float(t.get("cost_usd") or 0), 2),
+                    "result": t.get("result"),
+                    "pnl": round(float(t.get("pnl") or 0), 2),
+                    "time": t.get("timestamp", ""),
+                    "source": "bot",
+                })
+
+        total_bets = len(wta_settled)
+        win_rate = round(wta_wins / max(1, wta_wins + wta_losses) * 100, 1) if total_bets > 0 else 0
+
+        return jsonify({
+            "total_bets": len(wta_all),
+            "settled": len(wta_settled),
+            "wins": wta_wins,
+            "losses": wta_losses,
+            "win_rate": win_rate,
+            "pnl": round(wta_pnl, 2),
+            "open_count": len(wta_open),
+            "unrealized": round(sum(p.get("unrealized_pnl_cents", 0) for p in wta_open) / 100, 2),
+            "wheel_bets": len(wta_wheel),
+            "wheel_wins": wheel_wins,
+            "wheel_losses": wheel_losses,
+            "wheel_pnl": round(wheel_pnl, 2),
+            "bets": bets[-20:],  # last 20
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "total_bets": 0, "bets": []})
 
 
 # ---------------------------------------------------------------------------
@@ -12238,19 +12321,15 @@ a:hover { color: #7da5f5; }
         <button id="spin-btn" onclick="spinWheel()" style="margin-top:14px;background:linear-gradient(135deg,#00d4ff,#0088aa);border:none;color:#000;padding:10px 28px;border-radius:8px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;letter-spacing:1px">&#x1F988; SPIN!</button>
         <div id="wheel-result" style="margin-top:10px;min-height:40px;font-size:12px;color:#ccc"></div>
       </div>
-      <!-- Top Opportunities - 2 columns -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-        <div style="background:#0a1a22;border:1px solid #1a3a4a;border-radius:12px;padding:16px">
-          <div style="color:#00d4ff;font-size:13px;font-weight:700;margin-bottom:12px">&#x1F3AF; Best Opportunities</div>
-          <div id="moonshark-opps" style="display:flex;flex-direction:column;gap:8px">
-            <div class="loading">Scanning markets...</div>
-          </div>
+      <!-- WTA Wheel Stats -->
+      <div style="background:#0a1a22;border:1px solid #e040fb;border-radius:12px;padding:16px">
+        <div style="color:#e040fb;font-size:15px;font-weight:800;margin-bottom:14px">&#x1F3BE; Ladies Tennis Tracker</div>
+        <div id="wta-wheel-stats" style="display:flex;flex-direction:column;gap:10px">
+          <div class="loading">Loading stats...</div>
         </div>
-        <div style="background:#0a1a22;border:1px solid #e040fb;border-radius:12px;padding:16px">
-          <div style="color:#e040fb;font-size:13px;font-weight:700;margin-bottom:12px">&#x1F3BE; Live WTA Tennis</div>
-          <div id="wta-opps" style="display:flex;flex-direction:column;gap:8px">
-            <div class="loading">Scanning WTA markets...</div>
-          </div>
+        <div style="color:#e040fb;font-size:12px;font-weight:700;margin-top:16px;margin-bottom:8px">Wheel Bets</div>
+        <div id="wta-wheel-bets" style="display:flex;flex-direction:column;gap:6px;max-height:300px;overflow-y:auto">
+          <div style="color:#555;font-size:10px">No wheel bets yet — spin to play!</div>
         </div>
       </div>
     </div>
@@ -14468,7 +14547,7 @@ function spinWheel() {
         '<div style="color:#00d4ff;font-weight:700;font-size:14px">🎯 ' + pick.title + '</div>' +
         '<div style="color:#ffb400;font-size:12px;margin-top:6px">' + pick.side.toUpperCase() + ' @ ' + pick.price + '¢ · ' + pick.win_prob + '% implied · $' + pick.payout + ' potential payout</div>' +
         '<div style="display:flex;gap:12px;justify-content:center;margin-top:10px">' +
-        '<button onclick="placeMoonsharkBet(&quot;' + pick.ticker + '&quot;,&quot;' + pick.side + '&quot;,' + pick.price + ')" style="background:#00dc5a;border:none;color:#000;padding:10px 30px;border-radius:8px;font-size:14px;font-weight:800;cursor:pointer;min-width:100px">✅ YES</button>' +
+        '<button onclick="placeMoonsharkBet(&quot;' + pick.ticker + '&quot;,&quot;' + pick.side + '&quot;,' + pick.price + ',true)" style="background:#00dc5a;border:none;color:#000;padding:10px 30px;border-radius:8px;font-size:14px;font-weight:800;cursor:pointer;min-width:100px">✅ YES</button>' +
         '<button onclick="skipWheelPick()" style="background:#ff3030;border:none;color:#fff;padding:10px 30px;border-radius:8px;font-size:14px;font-weight:800;cursor:pointer;min-width:100px">❌ NO</button>' +
         '</div></div>';
       btn.disabled = false;
@@ -14488,9 +14567,24 @@ async function loadMoonsharkOpps() {
   try {
     var data = await fetch(API + '/moonshark-opportunities').then(r => r.json());
     var opps = data.opportunities || [];
-    _wheelOpps = opps.slice(0, 5);
+    // Wheel uses WTA tennis only
+    var wtaForWheel = data.wta_opportunities || opps;
+    _wheelOpps = wtaForWheel.slice(0, 8);
     if (_wheelOpps.length > 0) {
       drawWheel(_wheelOpps, -1);
+    } else {
+      var canvas = document.getElementById('moonshark-wheel');
+      if (canvas) {
+        var ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, 280, 280);
+        ctx.fillStyle = '#0a1a22';
+        ctx.fillRect(0, 0, 280, 280);
+        ctx.fillStyle = '#555';
+        ctx.font = '13px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('No live WTA matches right now', 140, 130);
+        ctx.fillText('Check back during match hours!', 140, 150);
+      }
     }
     var el = document.getElementById('moonshark-opps');
     if (!el) return;
@@ -14546,21 +14640,108 @@ async function loadMoonsharkOpps() {
   }
 }
 
-async function placeMoonsharkBet(ticker, side, price) {
+async function placeMoonsharkBet(ticker, side, price, fromWheel) {
   if (!confirm('Place MoonShark bet on ' + ticker + '?')) return;
   try {
     var resp = await fetch(API + '/moonshot-bet', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ticker: ticker, side: side})
+      body: JSON.stringify({ticker: ticker, side: side, source: fromWheel ? 'wheel' : 'manual'})
     }).then(r => r.json());
     if (resp.error) { alert('Error: ' + resp.error); }
-    else { alert('Bet placed! 🦈'); loadMoonshark(); loadBetsFeed(); }
+    else { alert('Bet placed! 🎾🦈'); loadMoonshark(); loadBetsFeed(); loadWtaWheelStats(); }
   } catch(e) { alert('Error placing bet'); }
+}
+
+async function loadWtaWheelStats() {
+  try {
+    var data = await fetch(API + '/wta-wheel-stats').then(function(r) { return r.json(); });
+    var statsEl = document.getElementById('wta-wheel-stats');
+    var betsEl = document.getElementById('wta-wheel-bets');
+    if (!statsEl) return;
+
+    var pnl = data.pnl || 0;
+    var unrealized = data.unrealized || 0;
+    var totalPnl = pnl + unrealized;
+    var pnlColor = totalPnl >= 0 ? '#00dc5a' : '#ff5000';
+    var pnlSign = totalPnl >= 0 ? '+' : '-';
+
+    var sh = '';
+    sh += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">';
+    sh += '<div style="background:#1a0a22;border-radius:8px;padding:10px;text-align:center">';
+    sh += '<div style="font-size:9px;color:#888">Total Bets</div>';
+    sh += '<div style="font-size:20px;font-weight:800;color:#e040fb">' + (data.total_bets || 0) + '</div>';
+    sh += '</div>';
+    sh += '<div style="background:#1a0a22;border-radius:8px;padding:10px;text-align:center">';
+    sh += '<div style="font-size:9px;color:#888">Win Rate</div>';
+    sh += '<div style="font-size:20px;font-weight:800;color:' + (data.win_rate > 0 ? '#00dc5a' : '#888') + '">' + (data.win_rate || 0) + '%</div>';
+    sh += '</div>';
+    sh += '<div style="background:#1a0a22;border-radius:8px;padding:10px;text-align:center">';
+    sh += '<div style="font-size:9px;color:#888">W / L</div>';
+    sh += '<div style="font-size:20px;font-weight:800"><span style="color:#00dc5a">' + (data.wins || 0) + 'W</span> / <span style="color:#ff5000">' + (data.losses || 0) + 'L</span></div>';
+    sh += '</div>';
+    sh += '<div style="background:#1a0a22;border-radius:8px;padding:10px;text-align:center">';
+    sh += '<div style="font-size:9px;color:#888">P&L</div>';
+    sh += '<div style="font-size:20px;font-weight:800;color:' + pnlColor + '">' + pnlSign + '$' + Math.abs(totalPnl).toFixed(2) + '</div>';
+    sh += '</div>';
+    sh += '</div>';
+
+    // Open positions
+    if (data.open_count > 0) {
+      var uColor = unrealized >= 0 ? '#00dc5a' : '#ff5000';
+      sh += '<div style="margin-top:10px;padding:8px 10px;background:#1a0a22;border-radius:8px;display:flex;justify-content:space-between">';
+      sh += '<span style="color:#888;font-size:10px">' + data.open_count + ' open positions</span>';
+      sh += '<span style="color:' + uColor + ';font-size:10px;font-weight:700">' + (unrealized >= 0 ? '+' : '-') + '$' + Math.abs(unrealized).toFixed(2) + ' unrealized</span>';
+      sh += '</div>';
+    }
+
+    // Wheel-specific stats
+    if (data.wheel_bets > 0) {
+      var wPnlColor = data.wheel_pnl >= 0 ? '#00dc5a' : '#ff5000';
+      sh += '<div style="margin-top:8px;padding:8px 10px;background:#002a3a;border:1px solid #004a6a;border-radius:8px;display:flex;justify-content:space-between">';
+      sh += '<span style="color:#00d4ff;font-size:10px;font-weight:600">Wheel Bets: ' + data.wheel_bets + '</span>';
+      sh += '<span style="color:' + wPnlColor + ';font-size:10px;font-weight:700">' + (data.wheel_pnl >= 0 ? '+' : '-') + '$' + Math.abs(data.wheel_pnl).toFixed(2) + '</span>';
+      sh += '</div>';
+    }
+
+    statsEl.innerHTML = sh;
+
+    // Bet list
+    var bets = data.bets || [];
+    if (bets.length === 0) {
+      betsEl.innerHTML = '<div style="color:#555;font-size:10px;text-align:center;padding:8px">No WTA bets yet — spin the wheel!</div>';
+    } else {
+      var bh = '';
+      bets.reverse().forEach(function(b) {
+        var isWin = b.result === 'win';
+        var isLoss = b.result === 'loss';
+        var isPending = b.result === null || b.result === undefined;
+        var borderColor = isWin ? '#00dc5a' : isLoss ? '#ff5000' : '#e040fb';
+        var resultText = isWin ? 'WON' : isLoss ? 'LOST' : 'OPEN';
+        var resultColor = isWin ? '#00dc5a' : isLoss ? '#ff5000' : '#e040fb';
+        var pnlText = isPending ? '$' + b.cost.toFixed(2) + ' bet' : ((b.pnl >= 0 ? '+$' : '-$') + Math.abs(b.pnl).toFixed(2));
+        var title = (b.title || b.ticker || '').substring(0, 35);
+        var isWheel = b.source !== 'bot';
+        bh += '<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border-left:3px solid ' + borderColor + ';background:rgba(224,64,251,0.03);border-radius:4px">';
+        bh += '<div style="flex:1;min-width:0">';
+        bh += '<div style="font-size:10px;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (isWheel ? '🎡 ' : '🤖 ') + title + '</div>';
+        bh += '<div style="font-size:9px;color:#888">' + (b.side || '').toUpperCase() + ' @ ' + b.price + 'c x' + b.count + '</div>';
+        bh += '</div>';
+        bh += '<div style="text-align:right;flex-shrink:0">';
+        bh += '<div style="font-size:11px;font-weight:700;color:' + resultColor + '">' + pnlText + '</div>';
+        bh += '<div style="font-size:8px;color:' + resultColor + '">' + resultText + '</div>';
+        bh += '</div></div>';
+      });
+      betsEl.innerHTML = bh;
+    }
+  } catch(e) {
+    console.log('wta-wheel-stats error', e);
+  }
 }
 
 async function loadMoonshark() {
   loadMoonsharkOpps();
+  loadWtaWheelStats();
   try {
     var data = await fetch(API + '/moonshark').then(r => r.json());
     var today = data.today || {};
