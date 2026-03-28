@@ -10229,8 +10229,11 @@ def moonshark_opportunities():
             ticker = m.get("ticker") or m.get("id") or ""
             if not ticker or not ticker.upper().startswith("KX"):
                 continue
-            # Must be a GAME/MATCH/FIGHT (binary outcome, not futures/props)
+            # Only women's tennis (WTA) markets for the wheel
             _tk_upper = ticker.upper()
+            if not _tk_upper.startswith("KXWTA"):
+                continue
+            # Must be a GAME/MATCH/FIGHT (binary outcome, not futures/props)
             if not any(kw in _tk_upper for kw in ["GAME", "MATCH", "FIGHT"]):
                 continue
             # Must close within 18h (same-day settlement only)
@@ -12044,10 +12047,10 @@ a:hover { color: #7da5f5; }
 <!-- Tabs -->
 <div class="tabs">
   <button class="tab active" onclick="switchTab('positions')">Dashboard</button>
-  <button class="tab" onclick="switchTab('moonshark')" style="color:#00d4ff">&#x1F988; MoonShark</button>
   <button class="tab" onclick="switchTab('history')">History</button>
   <button class="tab" onclick="switchTab('analytics')">Analytics</button>
   <button class="tab" onclick="switchTab('trends')" style="color:#e040fb">Trends</button>
+  <button class="tab" onclick="switchTab('moonshark')" style="color:#00d4ff;margin-left:auto">&#x1F988; MoonShark</button>
 </div>
 
 <!-- Positions Tab -->
