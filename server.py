@@ -6695,8 +6695,19 @@ def settled_positions():
             if _tk and _ts and _tk not in _trade_dates:
                 _trade_dates[_tk] = _ts
 
-        # Cache market titles
+        # Cache market titles — pre-populate from trade journal to avoid API calls
         _title_cache = {}
+        for _jt in _TRADE_JOURNAL:
+            _tk = _jt.get("ticker", "")
+            _tt = _jt.get("title", "")
+            if _tk and _tt:
+                _title_cache[_tk] = _tt
+        # Also check all_trades
+        for _at in BOT_STATE.get("all_trades", []):
+            _tk = _at.get("ticker", "")
+            _tt = _at.get("title", "")
+            if _tk and _tt and _tk not in _title_cache:
+                _title_cache[_tk] = _tt
         def _get_title(ticker):
             if ticker in _title_cache:
                 return _title_cache[ticker]
