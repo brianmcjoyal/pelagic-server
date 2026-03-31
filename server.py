@@ -2558,7 +2558,7 @@ BOT_STATE["snipe_losses"] = 0
 BOT_STATE["snipe_profit_usd"] = 0.0
 
 # MoonShark settings — underdog sniper (20-45c contracts, decent chance + big payout)
-MOONSHARK_MIN_PRICE = 20   # cents — skip sub-20c lottery tickets (data shows <10c never wins)
+MOONSHARK_MIN_PRICE = 25   # cents — skip sub-25c lottery tickets (data shows <25c rarely wins)
 MOONSHARK_MAX_PRICE = 45   # cents — wider range, 20-45c sweet spot for value
 MOONSHARK_MAX_DAILY = 75.0  # budget per day
 MOONSHARK_BET_USD = 5.0     # ~$5 per MoonShark bet (Kelly-adjusted)
@@ -3290,11 +3290,11 @@ def moonshark_snipe():
                             ms_conviction += 1  # deficit shrinking = momentum
                             _conv_reasons.append("momentum")
 
-                # Signal 6: Price in sweet spot (20-30c = best MoonShark range)
-                if 20 <= price <= 30:
+                # Signal 6: Price in sweet spot (25-30c = best MoonShark range)
+                if 25 <= price <= 30:
                     ms_conviction += 1
 
-                # Require minimum conviction — lower threshold when below daily floor
+                # Require minimum conviction — never drop below 3, even in floor mode
                 _ms_min_conviction = 3 if _ms_below_floor else 4
                 if ms_conviction < _ms_min_conviction:
                     _ms_reasons["low_conviction"] = _ms_reasons.get("low_conviction", 0) + 1
@@ -3302,14 +3302,14 @@ def moonshark_snipe():
                 if _ms_below_floor:
                     _conv_reasons.append("FLOOR_MODE")
 
-                # Use real edge if available, otherwise estimate
+                # Use real edge if available — SKIP if no ESPN data (no guessing)
                 if espn_edge is not None and espn_edge > 0:
                     edge_estimate = espn_edge
                     win_prob = min(espn_implied, 0.45)  # use sportsbook probability
                 else:
-                    # Fallback: assume small edge (5-10%)
-                    edge_estimate = 0.05 + (0.05 * (30 - price) / 20)
-                    win_prob = min(implied_prob + edge_estimate, 0.45)
+                    # No real edge data — skip this trade instead of guessing
+                    _ms_reasons["no_espn_edge"] = _ms_reasons.get("no_espn_edge", 0) + 1
+                    continue
                 remaining_budget = MOONSHARK_MAX_DAILY - BOT_STATE["moonshark_daily_spent"]
                 trades_left = MOONSHARK_MAX_TRADES - len(BOT_STATE.get("moonshark_trades_today", []))
                 # Kelly sizes based on remaining daily budget (not full bankroll)
@@ -4924,7 +4924,7 @@ def _category_multiplier(ticker, title):
     elif win_rate > 0:
         mult = 0.5   # weak — reduce exposure
     else:
-        mult = 0.25  # 0% win rate — reduce heavily but keep exploring
+        mult = 0.0   # 0% win rate with 3+ trades — hard block, stop burning money
 
     # Always block weather
     if cat == "weather":
@@ -5153,9 +5153,8 @@ def _learning_multiplier(ticker, title, price_cents=None, game_info=None, espn_e
     cat = classify_market_category(title or "", ticker or "")
     cat_w = params.get("category_weights", {}).get(cat, {})
     if cat_w.get("confidence", 0) >= 0.5:
-        # Never hard-block sports categories — use floor of 0.15 so the bot
-        # keeps exploring.  Only weather is truly zero.
-        w = max(cat_w["weight"], 0.15) if cat != "weather" else cat_w["weight"]
+        # Hard-block 0% win rate categories — stop burning money on proven losers
+        w = cat_w["weight"]
         multipliers.append(w)
 
     # Sport type weight
