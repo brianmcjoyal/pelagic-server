@@ -2733,7 +2733,7 @@ def live_game_snipe():
 
                 # Liquidity check — use order book depth (volume field doesn't exist in API)
                 _ask_size = float(str(mkt.get("yes_ask_size_fp") or mkt.get("no_ask_size_fp") or 0))
-                if _ask_size < 10:
+                if _ask_size < 50:
                     _ms_reasons["low_liquidity"] = _ms_reasons.get("low_liquidity", 0) + 1
                     continue
 
@@ -3123,7 +3123,7 @@ def moonshark_snipe():
 
                 # Liquidity check — use order book depth (volume field doesn't exist in API)
                 _ask_size = float(str(mkt.get("yes_ask_size_fp") or mkt.get("no_ask_size_fp") or 0))
-                if _ask_size < 10:
+                if _ask_size < 50:
                     _ms_reasons["low_liquidity"] = _ms_reasons.get("low_liquidity", 0) + 1
                     continue
 
@@ -3339,7 +3339,9 @@ def moonshark_snipe():
                     except Exception:
                         pass
 
-                bet_usd = max(3.0, min(kelly_usd, max_per_trade, remaining_budget)) * cat_mult * live_boost
+                # Apply multipliers BEFORE capping — so Kelly cap is never exceeded
+                adjusted_kelly = kelly_usd * cat_mult * live_boost
+                bet_usd = max(3.0, min(adjusted_kelly, max_per_trade, remaining_budget))
                 bet_usd = min(bet_usd, BOT_CONFIG["max_bet_usd"], remaining_budget)  # respect ceiling
                 count = max(1, int(bet_usd * 100 / price))
                 cost_usd = (price * count) / 100.0
@@ -3691,21 +3693,35 @@ def closegame_snipe():
                 if not side:
                     continue
 
-                # Calculate real edge based on game state
-                # Teams down 1-3 in late game win ~35-42% of the time
-                # Teams tied would be 50% but we skip ties
-                # Use historical win rate model for data-driven probabilities
-                estimated_win_prob = _lookup_win_prob(cg["sport"], cg["margin"], cg["period"])
-
+                # Validate edge with ESPN sportsbook odds (same as MoonShark)
                 kalshi_implied = price / 100.0
-                edge = estimated_win_prob - kalshi_implied
+                espn_edge_cg = None
+                espn_win_prob_cg = None
+                try:
+                    _cg_scores = _fetch_all_espn_scores()
+                    _cg_team_key = underdog.lower()
+                    _cg_game = _cg_scores.get(_cg_team_key)
+                    if _cg_game and _cg_game.get("odds"):
+                        _cg_odds = _cg_game["odds"]
+                        if _cg_game["home_abbrev"] == underdog:
+                            espn_win_prob_cg = _cg_odds.get("home_implied", 0)
+                        elif _cg_game["away_abbrev"] == underdog:
+                            espn_win_prob_cg = _cg_odds.get("away_implied", 0)
+                        if espn_win_prob_cg and espn_win_prob_cg > 0:
+                            espn_edge_cg = espn_win_prob_cg - kalshi_implied
+                except Exception:
+                    pass
 
-                if edge < 0.015:
+                # Require real ESPN edge — no more guessing with hardcoded model
+                if espn_edge_cg is None or espn_edge_cg < 0.03:
                     _log_activity(
-                        f"CLOSEGAME SKIP: {title[:35]} — thin edge ({estimated_win_prob:.0%} vs {kalshi_implied:.0%})",
+                        f"CLOSEGAME SKIP: {title[:35]} — no ESPN edge (need 3%+, got {espn_edge_cg:.1%} )" if espn_edge_cg else f"CLOSEGAME SKIP: {title[:35]} — no ESPN odds data",
                         "info"
                     )
                     continue
+
+                estimated_win_prob = espn_win_prob_cg
+                edge = espn_edge_cg
 
                 # Size the bet
                 remaining = CLOSEGAME_MAX_DAILY - BOT_STATE.get("closegame_daily_spent", 0)
