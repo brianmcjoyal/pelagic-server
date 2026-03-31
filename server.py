@@ -2557,9 +2557,9 @@ BOT_STATE["snipe_wins"] = 0
 BOT_STATE["snipe_losses"] = 0
 BOT_STATE["snipe_profit_usd"] = 0.0
 
-# MoonShark settings — underdog sniper (10-45c contracts, decent chance + big payout)
-MOONSHARK_MIN_PRICE = 15   # cents — skip sub-15c pure lottery tickets (almost never win)
-MOONSHARK_MAX_PRICE = 35   # cents — tighter range, better win probability
+# MoonShark settings — underdog sniper (20-45c contracts, decent chance + big payout)
+MOONSHARK_MIN_PRICE = 20   # cents — skip sub-20c lottery tickets (data shows <10c never wins)
+MOONSHARK_MAX_PRICE = 45   # cents — wider range, 20-45c sweet spot for value
 MOONSHARK_MAX_DAILY = 75.0  # budget per day
 MOONSHARK_BET_USD = 5.0     # ~$5 per MoonShark bet (Kelly-adjusted)
 MOONSHARK_MIN_TRADES = 5    # floor — at least 5 per day
@@ -2968,6 +2968,10 @@ def moonshark_snipe():
     if len(BOT_STATE.get("moonshark_trades_today", [])) >= MOONSHARK_MAX_TRADES:
         return []
 
+    _ms_count = len(BOT_STATE.get("moonshark_trades_today", []))
+    if _ms_count < MOONSHARK_MIN_TRADES:
+        _log_activity(f"🦈 MoonShark FLOOR MODE: {_ms_count}/{MOONSHARK_MIN_TRADES} trades — relaxing filters", "info")
+
     # Check balance
     bal = 0
     try:
@@ -3165,13 +3169,17 @@ def moonshark_snipe():
                 except Exception:
                     continue
 
-                # Find the cheap longshot side (10-30c)
+                # FLOOR MODE: widen price range when below daily minimum trades
+                _ms_below_floor = len(BOT_STATE.get("moonshark_trades_today", [])) < MOONSHARK_MIN_TRADES
+                _ms_max_price = MOONSHARK_MAX_PRICE + 5 if _ms_below_floor else MOONSHARK_MAX_PRICE  # 50c vs 45c
+
+                # Find the cheap longshot side (20-45c, or 20-50c in floor mode)
                 side = None
                 price = None
-                if yes_ask and MOONSHARK_MIN_PRICE <= yes_ask <= MOONSHARK_MAX_PRICE:
+                if yes_ask and MOONSHARK_MIN_PRICE <= yes_ask <= _ms_max_price:
                     side = "yes"
                     price = yes_ask
-                elif no_ask and MOONSHARK_MIN_PRICE <= no_ask <= MOONSHARK_MAX_PRICE:
+                elif no_ask and MOONSHARK_MIN_PRICE <= no_ask <= _ms_max_price:
                     side = "no"
                     price = no_ask
 
@@ -3286,10 +3294,13 @@ def moonshark_snipe():
                 if 20 <= price <= 30:
                     ms_conviction += 1
 
-                # Require minimum conviction of 4 (need real edge signals)
-                if ms_conviction < 4:
+                # Require minimum conviction — lower threshold when below daily floor
+                _ms_min_conviction = 3 if _ms_below_floor else 4
+                if ms_conviction < _ms_min_conviction:
                     _ms_reasons["low_conviction"] = _ms_reasons.get("low_conviction", 0) + 1
                     continue
+                if _ms_below_floor:
+                    _conv_reasons.append("FLOOR_MODE")
 
                 # Use real edge if available, otherwise estimate
                 if espn_edge is not None and espn_edge > 0:
