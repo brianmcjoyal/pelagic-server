@@ -15548,7 +15548,7 @@ async function loadNewsFeed(forceRefresh) {
         } catch(e) {}
       }
 
-      html += '<div style="background:#141414;border:1px solid #1f1f1f;border-left:4px solid ' + borderColor + ';border-radius:10px;padding:16px;transition:background 0.2s" onmouseover="this.style.background=\'#1a1a1a\'" onmouseout="this.style.background=\'#141414\'">';
+      html += '<div style="background:#141414;border:1px solid #1f1f1f;border-left:4px solid ' + borderColor + ';border-radius:10px;padding:16px">';
 
       // Header: number + title + meta
       html += '<div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:10px">';
