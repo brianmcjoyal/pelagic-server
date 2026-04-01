@@ -12828,7 +12828,13 @@ async function loadStatus() {
     document.getElementById('balance').textContent = '$' + (bal.balance_usd || 0).toFixed(2);
     document.getElementById('markets-scanned').textContent = status.last_scan_markets || 0;
     document.getElementById('mispriced-count').textContent = status.last_scan_mispriced || 0;
-    document.getElementById('trades-today').textContent = status.trades_today || 0;
+    // Use trades-today endpoint count (consolidated, matches "Bets Placed Today" badge)
+    try {
+      var ttData = await fetch(API + '/trades-today').then(function(r){ return r.json(); });
+      document.getElementById('trades-today').textContent = (ttData.trades || []).length;
+    } catch(e) {
+      document.getElementById('trades-today').textContent = status.trades_today || 0;
+    }
     document.getElementById('daily-spent').textContent = '$' + (status.daily_spent_usd || 0).toFixed(2);
     // Update toggle switch
     var tog = document.getElementById('auto-trade-toggle');
@@ -12999,7 +13005,7 @@ async function loadPortfolio() {
     } catch(e) { /* keep fallback values from portfolio-summary */ }
     // Now render P&L Since Day 1 (after settled data is available)
     if (totalPlEl) {
-      totalPlEl.textContent = (totalPl >= 0 ? '+' : '') + '$' + Math.abs(totalPl).toFixed(2);
+      totalPlEl.textContent = (totalPl >= 0 ? '+$' : '-$') + Math.abs(totalPl).toFixed(2);
       totalPlEl.style.color = totalPl >= 0 ? '#00dc5a' : '#ff5000';
     }
     var wrEl = document.getElementById('pf-winrate');
