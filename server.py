@@ -6374,6 +6374,13 @@ def _ensure_bg_thread():
     _cg_thread.start()
     print("[STARTUP] Close-Game Sniper thread started (10s)")
 
+    # Start keep-alive watchdog (only once)
+    global _keepalive_thread
+    if _keepalive_thread is None or not _keepalive_thread.is_alive():
+        _keepalive_thread = threading.Thread(target=_keep_alive_loop, daemon=True)
+        _keepalive_thread.start()
+        print("[STARTUP] Keep-alive watchdog started (5 min)")
+
 # Background thread starts on first request via before_request hook
 # (not at import time, to avoid issues with gunicorn --preload)
 
@@ -6406,8 +6413,7 @@ def _keep_alive_loop():
             print(f"[KEEPALIVE] ❌ Self-ping failed: {e}")
         _time.sleep(300)  # every 5 minutes
 
-_keepalive_thread = threading.Thread(target=_keep_alive_loop, daemon=True)
-_keepalive_thread.start()
+_keepalive_thread = None  # started on first request, not at import time
 
 # Keep scheduler object for status endpoint compatibility
 class _FakeScheduler:
