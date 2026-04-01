@@ -66,7 +66,7 @@ BOT_CONFIG = {
     "enabled": True,  # default ON — safety floor will auto-disable if needed
     "max_bet_usd": 12.0,          # max $12 per single trade — higher ceiling for Kelly sizing
     "max_daily_usd": 150.0,        # max $150/day — scales with bankroll via smart sizing
-    "min_balance_usd": 10.0,      # stop all trading if cash below $10
+    "min_balance_usd": 250.0,     # SAFETY FLOOR: stop all trading if cash below $250
     "min_cash_reserve_pct": 0.05, # keep 5% of portfolio in cash — legacy positions skew ratio
     "max_open_positions": 150,    # high limit — legacy positions settling, bot uses daily trade cap instead
     "min_deviation": 0.08,        # 8% mispricing — catch more edges
@@ -2570,13 +2570,13 @@ BOT_STATE["snipe_wins"] = 0
 BOT_STATE["snipe_losses"] = 0
 BOT_STATE["snipe_profit_usd"] = 0.0
 
-# MoonShark settings — underdog sniper (REDUCED — 7% win rate, demoted to scout mode)
+# MoonShark settings — DATA COLLECTION MODE: more bets to learn faster
 MOONSHARK_MIN_PRICE = 25   # cents — skip sub-25c lottery tickets
 MOONSHARK_MAX_PRICE = 40   # cents — tighter range, only best underdogs
-MOONSHARK_MAX_DAILY = 25.0  # budget per day — REDUCED from $75 (scout mode)
-MOONSHARK_BET_USD = 3.0     # ~$3 per MoonShark bet (smaller while we learn)
+MOONSHARK_MAX_DAILY = 40.0  # budget per day — bumped for data collection
+MOONSHARK_BET_USD = 3.0     # ~$3 per MoonShark bet (small while we learn)
 MOONSHARK_MIN_TRADES = 0    # no floor — only trade when edge is real
-MOONSHARK_MAX_TRADES = 5    # max 5 per day — quality over quantity
+MOONSHARK_MAX_TRADES = 10   # 10/day for data collection (was 5)
 
 BOT_STATE["moonshark_trades_today"] = []
 BOT_STATE["moonshark_daily_spent"] = 0.0
