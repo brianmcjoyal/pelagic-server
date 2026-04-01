@@ -7955,11 +7955,39 @@ def _fetch_news_feed():
     all_stories.sort(key=_sort_key, reverse=True)
     result = all_stories[:10]
 
-    # Enrich each story with economic impact + stock picks
+    # Enrich each story with economic impact, stock picks, and 3 bullet points
     for story in result:
         impact, stocks = _analyze_news_impact(story["title"], story.get("summary", ""))
         story["economic_impact"] = impact
         story["stock_picks"] = stocks
+
+        # Match to keyword rules for rich analysis
+        text = (story["title"] + " " + story.get("summary", "")).lower()
+        matched_rule = None
+        for rule in _NEWS_KEYWORD_RULES:
+            if any(kw in text for kw in rule["keywords"]):
+                matched_rule = rule
+                break
+
+        if matched_rule:
+            story["category"] = matched_rule["category"]
+            story["color"] = matched_rule.get("color", "#888")
+            story["sentiment"] = matched_rule.get("sentiment", "neutral")
+            # 3 bullet points
+            story["plain_english"] = story.get("summary", "") or story["title"]
+            story["market_impact"] = matched_rule["market_take"]
+            story["trade_idea"] = matched_rule["profit_angle"]
+        else:
+            story["category"] = "general"
+            story["color"] = "#888"
+            story["sentiment"] = "neutral"
+            story["plain_english"] = story.get("summary", "") or story["title"]
+            story["market_impact"] = impact
+            story["trade_idea"] = "Monitor for developments — look for prediction markets related to this story."
+        # Add stock ticker suggestions as trade ideas
+        if stocks:
+            stock_str = ", ".join([f"{s[0]} ({s[1]})" for s in stocks[:3]])
+            story["trade_idea"] += f" Tickers to watch: {stock_str}"
 
     _NEWS_FEED_CACHE["stories"] = result
     _NEWS_FEED_CACHE["ts"] = now
@@ -12484,32 +12512,20 @@ a:hover { color: #7da5f5; }
 <!-- Analytics Tab -->
 <!-- Analytics tab removed — merged into Performance tab -->
 
-<!-- Trends Tab -->
+<!-- News Feed Tab (was Trends) -->
 <div class="tab-content" id="tab-trends">
-  <div class="section">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-      <div>
-        <div style="color:#e040fb;font-size:18px;font-weight:800;letter-spacing:0.5px">&#x1F4CA; Daily Trends</div>
-        <div style="color:#888;font-size:10px;margin-top:2px">Updated daily from trade data &bull; Learning engine v<span id="trend-version">0</span></div>
-      </div>
-      <button class="refresh-btn" onclick="loadTrends()">Refresh</button>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+    <div>
+      <div style="color:#e040fb;font-size:18px;font-weight:800;letter-spacing:0.5px">&#x1F30D; Global Markets Brief</div>
+      <div style="color:#666;font-size:10px;margin-top:2px">Top 10 stories moving markets today</div>
     </div>
-    <div id="trends-date" style="color:#555;font-size:11px;margin-bottom:16px">Last updated: --</div>
-    <div id="trends-list" style="display:flex;flex-direction:column;gap:14px">
-      <div class="loading">Analyzing trade patterns...</div>
+    <div style="display:flex;align-items:center;gap:8px">
+      <span id="news-updated-time" style="color:#555;font-size:10px"></span>
+      <button class="refresh-btn" onclick="loadNewsFeed(true)">Refresh</button>
     </div>
-    <div style="margin-top:24px">
-      <div style="color:#00d4ff;font-size:14px;font-weight:700;margin-bottom:10px">&#x1F527; Enhancements Deployed</div>
-      <div id="trends-enhancements" style="display:flex;flex-direction:column;gap:8px">
-        <div class="loading">Loading...</div>
-      </div>
-    </div>
-    <div style="margin-top:24px">
-      <div style="color:#ffb400;font-size:14px;font-weight:700;margin-bottom:10px">&#x1F9E0; Learning Parameters</div>
-      <div id="trends-params" style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:12px;overflow-x:auto">
-        <div class="loading">Loading...</div>
-      </div>
-    </div>
+  </div>
+  <div id="global-news-feed" style="display:flex;flex-direction:column;gap:12px">
+    <div class="loading">Loading global markets brief...</div>
   </div>
 </div>
 
@@ -12587,7 +12603,7 @@ function switchTab(name) {
   if (name === 'performance') { loadPerformance(); }
   if (name === 'history') { loadPerformance(); }  // legacy redirect
   if (name === 'analytics') { loadPerformance(); }  // legacy redirect
-  if (name === 'trends') { loadTrends(); }
+  if (name === 'trends') { loadNewsFeed(); }
   // Legacy support for hidden tabs
   if (name === 'activity') { loadActivity(); loadBetsFeed(); loadAllBets(); }
 }
@@ -15494,6 +15510,99 @@ async function loadInsights() {
 }
 
 // --- Trends Tab ---
+// === GLOBAL NEWS FEED ===
+async function loadNewsFeed(forceRefresh) {
+  try {
+    var url = forceRefresh ? API + '/news/refresh' : API + '/news';
+    var data = await fetch(url).then(function(r) { return r.json(); });
+    var stories = data.stories || [];
+    var feedEl = document.getElementById('global-news-feed');
+    var timeEl = document.getElementById('news-updated-time');
+
+    if (timeEl && data.cached_at) {
+      try {
+        var d = new Date(data.cached_at * 1000);
+        timeEl.textContent = 'Updated ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+      } catch(e) { timeEl.textContent = ''; }
+    }
+
+    if (stories.length === 0) {
+      feedEl.innerHTML = '<div style="color:#555;font-size:12px;padding:20px;text-align:center">No stories available right now. Try refreshing.</div>';
+      return;
+    }
+
+    var html = '';
+    stories.slice(0, 10).forEach(function(story, idx) {
+      var borderColor = story.color || '#888';
+      var sentIcon = story.sentiment === 'bullish' ? String.fromCodePoint(0x1F7E2) : story.sentiment === 'bearish' ? String.fromCodePoint(0x1F534) : String.fromCodePoint(0x26AA);
+      var catLabel = (story.category || 'general').replace('-', ' ');
+      var timeAgo = '';
+      if (story.published) {
+        try {
+          var pubDate = new Date(story.published);
+          var now = new Date();
+          var diffH = Math.round((now - pubDate) / 3600000);
+          if (diffH < 1) timeAgo = 'Just now';
+          else if (diffH < 24) timeAgo = diffH + 'h ago';
+          else timeAgo = Math.round(diffH / 24) + 'd ago';
+        } catch(e) {}
+      }
+
+      html += '<div style="background:#141414;border:1px solid #1f1f1f;border-left:4px solid ' + borderColor + ';border-radius:10px;padding:16px;transition:background 0.2s" onmouseover="this.style.background=\'#1a1a1a\'" onmouseout="this.style.background=\'#141414\'">';
+
+      // Header: number + title + meta
+      html += '<div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:10px">';
+      html += '<div style="color:' + borderColor + ';font-size:14px;font-weight:800;min-width:24px;text-align:center;padding-top:1px">' + (idx + 1) + '</div>';
+      html += '<div style="flex:1">';
+      html += '<div style="color:#eee;font-size:14px;font-weight:700;line-height:1.3">' + story.title + '</div>';
+      html += '<div style="display:flex;gap:8px;align-items:center;margin-top:4px">';
+      html += '<span style="color:' + borderColor + ';font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;background:' + borderColor + '22;padding:2px 6px;border-radius:4px">' + catLabel + '</span>';
+      html += '<span style="color:#555;font-size:10px">' + (story.source || '') + '</span>';
+      if (timeAgo) html += '<span style="color:#444;font-size:10px">' + sentIcon + ' ' + timeAgo + '</span>';
+      html += '</div></div></div>';
+
+      // 3 bullet points
+      html += '<div style="margin-left:34px;display:flex;flex-direction:column;gap:8px">';
+
+      // Bullet 1: What it means (plain English)
+      html += '<div style="display:flex;gap:8px;align-items:flex-start">';
+      html += '<div style="color:#ffb400;font-size:10px;font-weight:700;min-width:70px;text-transform:uppercase;padding-top:1px">What it is</div>';
+      html += '<div style="color:#bbb;font-size:12px;line-height:1.4">' + (story.plain_english || story.summary || 'Breaking story — details emerging.') + '</div>';
+      html += '</div>';
+
+      // Bullet 2: Market impact
+      html += '<div style="display:flex;gap:8px;align-items:flex-start">';
+      html += '<div style="color:#5b8def;font-size:10px;font-weight:700;min-width:70px;text-transform:uppercase;padding-top:1px">Impact</div>';
+      html += '<div style="color:#999;font-size:11px;line-height:1.4">' + (story.market_impact || story.economic_impact || '') + '</div>';
+      html += '</div>';
+
+      // Bullet 3: Trade idea
+      html += '<div style="display:flex;gap:8px;align-items:flex-start">';
+      html += '<div style="color:#00dc5a;font-size:10px;font-weight:700;min-width:70px;text-transform:uppercase;padding-top:1px">Trade Idea</div>';
+      html += '<div style="color:#999;font-size:11px;line-height:1.4">' + (story.trade_idea || '') + '</div>';
+      html += '</div>';
+
+      html += '</div>';
+
+      // Link
+      if (story.link) {
+        html += '<div style="margin-left:34px;margin-top:8px">';
+        html += '<a href="' + story.link + '" target="_blank" style="color:#555;font-size:10px;text-decoration:none;border-bottom:1px dotted #333">Read full story &rarr;</a>';
+        html += '</div>';
+      }
+
+      html += '</div>';
+    });
+
+    feedEl.innerHTML = html;
+  } catch(e) {
+    console.error('News feed error', e);
+    var el = document.getElementById('global-news-feed');
+    if (el) el.innerHTML = '<div style="color:#ff5000;font-size:12px">Error loading news: ' + e.message + '</div>';
+  }
+}
+
+// Legacy — kept for backward compat
 async function loadTrends() {
   try {
     var data = await fetch(API + '/trends').then(function(r){ return r.json(); });
