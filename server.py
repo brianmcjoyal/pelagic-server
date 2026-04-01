@@ -2565,6 +2565,27 @@ BOT_STATE["moonshark_trades_today"] = []
 BOT_STATE["moonshark_daily_spent"] = 0.0
 BOT_STATE["moonshark_date"] = None
 
+# GLOBAL event lock — prevents ALL strategies from betting both sides of the same game
+# Key = event (e.g. "KXMLBGAME-26APR012020CLELAD"), resets daily
+import threading as _threading
+_EVENT_LOCK = _threading.Lock()
+_EVENTS_BET_TODAY = set()  # shared across all strategies
+_EVENTS_BET_DATE = None
+
+def _check_and_claim_event(event_key):
+    """Thread-safe check: returns True if this event hasn't been bet yet (and claims it).
+    Returns False if we already bet on this event today."""
+    global _EVENTS_BET_DATE
+    today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+    with _EVENT_LOCK:
+        if _EVENTS_BET_DATE != today:
+            _EVENTS_BET_DATE = today
+            _EVENTS_BET_TODAY.clear()
+        if event_key in _EVENTS_BET_TODAY:
+            return False
+        _EVENTS_BET_TODAY.add(event_key)
+        return True
+
 def live_game_snipe():
     """Scan LIVE SPORTS markets for high-probability outcomes (70-90c).
     Strategy: only live sports + vetted short-term markets with volume.
@@ -2675,6 +2696,9 @@ def live_game_snipe():
                 _parts = ticker.split("-") if ticker else []
                 event_key = "-".join(_parts[:2]) if len(_parts) >= 2 else (ticker or "")
                 if event_key in existing_events:
+                    continue
+                # Global cross-strategy dedup — prevents betting both sides
+                if event_key in _EVENTS_BET_TODAY:
                     continue
 
                 # STRICT FILTERING — only bet on what we understand
@@ -2877,6 +2901,11 @@ def live_game_snipe():
                     "info"
                 )
 
+                # Thread-safe claim — prevents other strategies from betting same game
+                if not _check_and_claim_event(event_key):
+                    _log_activity(f"SNIPE SKIP: {ticker} — already bet this event", "info")
+                    continue
+
                 result = place_kalshi_order(ticker, side, price, count=count)
                 success = "error" not in result
 
@@ -3060,7 +3089,7 @@ def moonshark_snipe():
                     continue
                 _parts = ticker.split("-") if ticker else []
                 event_key = "-".join(_parts[:2]) if len(_parts) >= 2 else (ticker or "")
-                if event_key in existing_events:
+                if event_key in existing_events or event_key in _EVENTS_BET_TODAY:
                     _ms_reasons["event_held"] = _ms_reasons.get("event_held", 0) + 1
                     continue
 
@@ -3392,6 +3421,11 @@ def moonshark_snipe():
                     "info"
                 )
 
+                # Thread-safe claim — prevents other strategies from betting same game
+                if not _check_and_claim_event(event_key):
+                    _log_activity(f"MOONSHARK SKIP: {ticker} — already bet this event", "info")
+                    continue
+
                 result = place_kalshi_order(ticker, side, price, count=count)
                 success = "error" not in result
 
@@ -3658,8 +3692,8 @@ def closegame_snipe():
 
                 if ticker in existing_tickers:
                     continue
-                event_key = ticker.split("-")[0] if ticker else ""
-                if event_key in existing_events:
+                event_key = "-".join(ticker.split("-")[:2]) if ticker else ""
+                if event_key in existing_events or event_key in _EVENTS_BET_TODAY:
                     continue
 
                 # Parse prices
@@ -3735,6 +3769,11 @@ def closegame_snipe():
                     f"(${cost_usd:.2f}) | {score_str} | edge={edge:.0%} winP={estimated_win_prob:.0%}",
                     "info"
                 )
+
+                # Thread-safe claim — prevents other strategies from betting same game
+                if not _check_and_claim_event(event_key):
+                    _log_activity(f"CLOSEGAME SKIP: {ticker} — already bet this event", "info")
+                    continue
 
                 result = place_kalshi_order(ticker, side, price, count=count)
                 success = "error" not in result
