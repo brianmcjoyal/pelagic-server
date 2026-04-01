@@ -8395,7 +8395,7 @@ def status():
         "last_scan": BOT_STATE["last_scan"],
         "last_scan_markets": markets,
         "last_scan_mispriced": mispriced,
-        "trades_today": len(BOT_STATE["trades_today"]) + len(BOT_STATE.get("snipe_trades_today", [])) + len(BOT_STATE.get("moonshark_trades_today", [])) + len(BOT_STATE.get("manual_trades_today", [])),
+        "trades_today": len(BOT_STATE.get("snipe_trades_today", [])) + len(BOT_STATE.get("moonshark_trades_today", [])) + len(BOT_STATE.get("closegame_trades_today", [])) + len(BOT_STATE.get("manual_trades_today", [])),
         "daily_spent_usd": BOT_STATE["daily_spent_usd"] + BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0),
         "total_trades_all_time": len(BOT_STATE["all_trades"]),
         "recent_errors": BOT_STATE["errors"][-5:],
@@ -8441,11 +8441,13 @@ def category_stats():
 
 @app.route("/trades-today")
 def trades_today_endpoint():
-    """Return all trades placed today (bot + sniper + quant + moonshark + manual)."""
-    bot_trades = BOT_STATE.get("trades_today", [])
+    """Return all trades placed today (sniper + moonshark + closegame + manual).
+    NOTE: Excludes BOT_STATE['trades_today'] — that list is hydrated from Kalshi
+    fills API and double-counts trades already in the per-strategy lists."""
     sniper_trades = BOT_STATE.get("snipe_trades_today", [])
     quant_trades = BOT_STATE.get("quant_trades", [])
     moonshark_trades = BOT_STATE.get("moonshark_trades_today", [])
+    closegame_trades = BOT_STATE.get("closegame_trades_today", [])
     manual_trades = BOT_STATE.get("manual_trades_today", [])
     today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
 
@@ -8461,21 +8463,6 @@ def trades_today_endpoint():
             return ts_str[:10] == today_str
 
     all_today = []
-    # Bot trades from trades_today array — already filtered to today (daily reset), skip date check
-    for t in bot_trades:
-        ts = t.get("timestamp", "") or ""
-        all_today.append({
-            "ticker": t.get("ticker", ""),
-            "title": t.get("question", t.get("ticker", "")),
-            "side": t.get("side", ""),
-            "price_cents": t.get("price_cents", 0),
-            "count": t.get("count", 0),
-            "cost_usd": round(t.get("cost_usd", 0), 2),
-            "time": ts,
-            "strategy": t.get("strategy", "bot"),
-            "success": t.get("success", False),
-            "source": "bot",
-        })
     for t in sniper_trades:
         ts = t.get("time", "") or ""
         all_today.append({
@@ -8519,6 +8506,20 @@ def trades_today_endpoint():
             "success": True,
             "source": "bot",
         })
+    for t in closegame_trades:
+        ts = t.get("time", "") or ""
+        all_today.append({
+            "ticker": t.get("ticker", ""),
+            "title": t.get("title", t.get("ticker", "")),
+            "side": t.get("side", ""),
+            "price_cents": t.get("price", 0),
+            "count": t.get("count", 0),
+            "cost_usd": round(t.get("cost", 0), 2),
+            "time": ts,
+            "strategy": "closegame",
+            "success": True,
+            "source": "bot",
+        })
     for t in manual_trades:
         all_today.append({
             "ticker": t.get("ticker", ""),
@@ -8537,7 +8538,7 @@ def trades_today_endpoint():
     seen_tickers = set(t.get("ticker", "") for t in all_today)
     # Build set of tickers the bot ACTUALLY placed (from in-memory daily arrays)
     _bot_placed_tickers = set()
-    for _blist in [bot_trades, sniper_trades, moonshark_trades, quant_trades]:
+    for _blist in [sniper_trades, moonshark_trades, closegame_trades, quant_trades]:
         for _bt in _blist:
             _bot_placed_tickers.add(_bt.get("ticker", ""))
     for t in BOT_STATE.get("all_trades", []):
