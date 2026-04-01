@@ -6377,6 +6377,38 @@ def _ensure_bg_thread():
 # Background thread starts on first request via before_request hook
 # (not at import time, to avoid issues with gunicorn --preload)
 
+# ---------------------------------------------------------------------------
+# SELF-PING KEEP-ALIVE — prevents Railway from idling the service
+# Also acts as a watchdog: restarts dead trading threads via /health
+# ---------------------------------------------------------------------------
+def _keep_alive_loop():
+    """Ping our own /health endpoint every 5 minutes to prevent Railway idle timeout.
+    Also triggers _ensure_bg_thread() via before_request hook, restarting dead threads."""
+    _time.sleep(120)  # wait for server to fully start
+    print("[KEEPALIVE] Self-ping watchdog started (5 min interval)")
+    _server_url = None
+    while True:
+        try:
+            if _server_url is None:
+                import os as _ka_os
+                _port = _ka_os.environ.get("PORT", "8080")
+                _railway_url = _ka_os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+                if _railway_url:
+                    _server_url = f"https://{_railway_url}/health"
+                else:
+                    _server_url = f"http://127.0.0.1:{_port}/health"
+            resp = requests.get(_server_url, timeout=30)
+            if resp.ok:
+                print(f"[KEEPALIVE] ✅ Health OK")
+            else:
+                print(f"[KEEPALIVE] ⚠️ Health returned {resp.status_code}")
+        except Exception as e:
+            print(f"[KEEPALIVE] ❌ Self-ping failed: {e}")
+        _time.sleep(300)  # every 5 minutes
+
+_keepalive_thread = threading.Thread(target=_keep_alive_loop, daemon=True)
+_keepalive_thread.start()
+
 # Keep scheduler object for status endpoint compatibility
 class _FakeScheduler:
     running = True
@@ -6388,10 +6420,8 @@ scheduler = _FakeScheduler()
 
 @app.before_request
 def _ensure_bg_on_request():
-    """Ensure background thread is running on first HTTP request (skip health checks)."""
-    from flask import request as _req
-    if _req.path == "/health":
-        return
+    """Ensure background thread is running on EVERY HTTP request (including health checks).
+    This way Railway's health check can auto-restart dead trading threads."""
     _ensure_bg_thread()
 
 # ---------------------------------------------------------------------------
@@ -6413,7 +6443,13 @@ def debug_scheduler():
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok"})
+    _bg_alive = _bg_thread is not None and _bg_thread.is_alive()
+    return jsonify({
+        "status": "ok" if _bg_alive else "degraded",
+        "trading_thread": "alive" if _bg_alive else "dead",
+        "auto_trade": BOT_CONFIG.get("enabled", False),
+        "uptime_cycles": BOT_STATE.get("cycle", 0),
+    })
 
 
 @app.route("/test-fetch")
