@@ -190,7 +190,7 @@ def _save_state():
             # Learning engine state
             "learning_state": _LEARNING_STATE,
             # Timestamp for date-check on load
-            "save_date": datetime.datetime.utcnow().strftime("%Y-%m-%d"),
+            "save_date": datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d"),
         }
         with open(_STATE_FILE, "w") as f:
             _json.dump(data, f)
@@ -208,7 +208,8 @@ def _load_state():
         BOT_STATE["pick_history"] = data.get("pick_history", [])
 
         saved_date = data.get("save_date") or data.get("trade_date", None)
-        today_str = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+        # Use Pacific time consistently (matches MoonShark/Snipe daily reset)
+        today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
         is_same_day = (saved_date == today_str)
 
         # --- Daily counters: reset if new day, restore if same day ---
@@ -393,11 +394,27 @@ def _hydrate_from_kalshi():
         BOT_STATE["trade_date"] = today_str
         today_trades = [t for t in all_trades_rebuilt if (t.get("timestamp") or "")[:10] == today_str and t.get("action") == "buy"]
         BOT_STATE["trades_today"] = today_trades
-        # DON'T override daily_spent — only count what the bot spends THIS session
-        # Hydrated trades are historical and shouldn't block new trades
-        BOT_STATE["hydrated_today_spent"] = round(today_spent, 2)
+        # Rebuild per-strategy daily counters from today's fills so the bot
+        # respects daily caps after a deploy (was ignoring pre-deploy trades)
+        _ms_today = [t for t in today_trades if t.get("strategy") == "moonshark"]
+        _snipe_today = [t for t in today_trades if t.get("strategy") == "snipe"]
+        if len(_ms_today) > len(BOT_STATE.get("moonshark_trades_today", [])):
+            BOT_STATE["moonshark_trades_today"] = _ms_today
+            BOT_STATE["moonshark_daily_spent"] = round(sum(t.get("cost_usd", 0) for t in _ms_today), 2)
+            BOT_STATE["moonshark_date"] = today_str
+        if len(_snipe_today) > len(BOT_STATE.get("snipe_trades_today", [])):
+            BOT_STATE["snipe_trades_today"] = _snipe_today
+            BOT_STATE["snipe_daily_spent"] = round(sum(t.get("cost_usd", 0) for t in _snipe_today), 2)
+            BOT_STATE["snipe_date"] = today_str
+        BOT_STATE["daily_spent_usd"] = round(today_spent, 2)
+        # Also seed global event lock with today's events
+        for t in today_trades:
+            tk = t.get("ticker", "")
+            parts = tk.split("-")
+            if len(parts) >= 2:
+                _EVENTS_BET_TODAY.add("-".join(parts[:2]))
         _save_state()
-        print(f"[HYDRATE] Rebuilt {len(all_trades_rebuilt)} trades from Kalshi ({new_count} new), today: {today_count} trades, ${today_spent:.2f} spent, titles: {len(title_map)}")
+        print(f"[HYDRATE] Rebuilt {len(all_trades_rebuilt)} trades from Kalshi ({new_count} new), today: {today_count} trades (MS:{len(_ms_today)} SN:{len(_snipe_today)}), ${today_spent:.2f} spent, titles: {len(title_map)}")
     except Exception as e:
         print(f"[HYDRATE] Error: {e}")
         import traceback
