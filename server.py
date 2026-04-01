@@ -6068,7 +6068,10 @@ def _background_loop():
             _br_e = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
                                 headers=_bh_e, timeout=10)
             if _br_e.ok:
-                _bal_early = _br_e.json().get("balance", 0) / 100
+                _bal_data = _br_e.json()
+                _bal_early = _bal_data.get("balance", 0) / 100
+                # Use Kalshi's own portfolio_balance if available (matches their UI exactly)
+                _kalshi_portfolio = _bal_data.get("portfolio_balance", 0) / 100
         except Exception:
             pass
         _pos_early = []
@@ -6079,10 +6082,12 @@ def _background_loop():
         _mv_early = sum((p.get("current_price") or p.get("entry_price") or 0) * p.get("count", 0)
                        for p in _pos_early) / 100
         _inv_early = sum(p.get("market_exposure_cents", 0) for p in _pos_early) / 100
+        # Prefer Kalshi's portfolio value (matches their UI), fallback to our calculation
+        _pf_value = _kalshi_portfolio if _kalshi_portfolio > 0 else round(_bal_early + _mv_early, 2)
         _PORTFOLIO_CACHE["data"] = {
             "balance_usd": round(_bal_early, 2),
-            "portfolio_value_usd": round(_bal_early + _mv_early, 2),
-            "positions_value_usd": round(_mv_early, 2),
+            "portfolio_value_usd": round(_pf_value, 2),
+            "positions_value_usd": round(_pf_value - _bal_early, 2) if _kalshi_portfolio > 0 else round(_mv_early, 2),
             "open_positions": _pos_early,
             "open_count": len(_pos_early),
             "total_invested_usd": round(_inv_early, 2),
@@ -6255,12 +6260,15 @@ def _background_loop():
             # Refresh portfolio cache so dashboard always has data
             try:
                 _bal2 = 0
+                _kalshi_portfolio2 = 0
                 try:
                     _bh2 = signed_headers("GET", "/portfolio/balance")
                     _br2 = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
                                        headers=_bh2, timeout=10)
                     if _br2.ok:
-                        _bal2 = _br2.json().get("balance", 0) / 100
+                        _bal2_data = _br2.json()
+                        _bal2 = _bal2_data.get("balance", 0) / 100
+                        _kalshi_portfolio2 = _bal2_data.get("portfolio_balance", 0) / 100
                 except Exception:
                     if _PORTFOLIO_CACHE["data"]:
                         _bal2 = _PORTFOLIO_CACHE["data"].get("balance_usd", 0)
@@ -6335,10 +6343,12 @@ def _background_loop():
                 except Exception:
                     pass
 
+                # Prefer Kalshi's portfolio value (matches their UI), fallback to our calculation
+                _pf_value2 = _kalshi_portfolio2 if _kalshi_portfolio2 > 0 else round(_bal2 + _mv2, 2)
                 _PORTFOLIO_CACHE["data"] = {
                     "balance_usd": round(_bal2, 2),
-                    "portfolio_value_usd": round(_bal2 + _mv2, 2),
-                    "positions_value_usd": round(_mv2, 2),
+                    "portfolio_value_usd": round(_pf_value2, 2),
+                    "positions_value_usd": round(_pf_value2 - _bal2, 2) if _kalshi_portfolio2 > 0 else round(_mv2, 2),
                     "open_positions": _pos2,
                     "open_count": len(_pos2),
                     "total_invested_usd": round(sum(p.get("market_exposure_cents", 0) for p in _pos2) / 100, 2),
