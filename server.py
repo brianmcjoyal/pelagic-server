@@ -2541,8 +2541,8 @@ LIVE_GAME_SERIES = [
 ]
 
 # Sniper settings
-SNIPE_MIN_PRICE = 70   # cents — buy if price >= 70c (Brian's winning range)
-SNIPE_MAX_PRICE = 88   # cents — tighter cap, 88c max (need 12%+ profit margin)
+SNIPE_MIN_PRICE = 65   # cents — catch games earlier when edge is bigger
+SNIPE_MAX_PRICE = 85   # cents — cap at 85c (need 15%+ profit margin, one upset can't wipe 6 wins)
 SNIPE_BET_USD = 15.0   # fallback — now uses _smart_bet_size() for bankroll scaling
 SNIPE_MAX_DAILY = 150.0  # budget per day — PRIMARY STRATEGY, 2x budget
 SNIPE_MAX_TRADES = 20    # more room — this is our best strategy
@@ -6378,10 +6378,11 @@ def _background_loop():
             _log_activity(f"Background error: {str(e)[:80]}", "error")
             print(f"[BG] Error in background loop: {e}")
             traceback.print_exc()
-        # Dynamic scan interval — aggressive during game hours
+        # Dynamic scan interval — fastest during peak game hours
         _now_pt = datetime.datetime.now(tz=_PACIFIC)
+        _is_peak_hours = 16 <= _now_pt.hour <= 22  # 4PM-10PM PT — most games live
         _is_game_hours = 10 <= _now_pt.hour <= 23
-        _sleep_time = 30 if _is_game_hours else 300
+        _sleep_time = 15 if _is_peak_hours else (30 if _is_game_hours else 300)
         _time.sleep(_sleep_time)
 
 _bg_thread = None
