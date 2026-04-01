@@ -12188,8 +12188,7 @@ a:hover { color: #7da5f5; }
 <!-- Tabs -->
 <div class="tabs">
   <button class="tab active" onclick="switchTab('positions')">Dashboard</button>
-  <button class="tab" onclick="switchTab('history')">History</button>
-  <button class="tab" onclick="switchTab('analytics')">Analytics</button>
+  <button class="tab" onclick="switchTab('performance')">Performance</button>
   <button class="tab" onclick="switchTab('trends')" style="color:#e040fb">Trends</button>
   <button class="tab" onclick="switchTab('moonshark')" style="color:#00d4ff;margin-left:auto">&#x1F988; MoonShark</button>
 </div>
@@ -12295,23 +12294,68 @@ a:hover { color: #7da5f5; }
 </div>
 
 <!-- History Tab -->
-<div class="tab-content" id="tab-history">
-  <div class="section">
-    <div class="section-title">Scorecard <button class="refresh-btn" onclick="loadSettled()">Refresh</button></div>
-    <div style="text-align:right;margin-bottom:6px"><label style="font-size:11px;color:#888;cursor:pointer"><input type="checkbox" id="hide-history-junk" checked onchange="loadSettled()" style="margin-right:4px"> Hide old bot trades &amp; penny positions</label></div>
-    <div id="settled-stats" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
-      <span style="color:#666">Loading...</span>
+<div class="tab-content" id="tab-performance">
+  <!-- Row 1: Core KPIs -->
+  <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-bottom:12px" id="perf-kpis">
+    <span style="color:#666">Loading...</span>
+  </div>
+
+  <!-- Row 2: P&L Chart + Strategy Breakdown side by side -->
+  <div style="display:grid;grid-template-columns:1.5fr 1fr;gap:12px;margin-bottom:12px">
+    <!-- P&L Equity Curve -->
+    <div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:14px">
+      <div style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Equity Curve</div>
+      <div style="position:relative;height:140px">
+        <canvas id="perf-pl-chart" style="width:100%;height:100%"></canvas>
+      </div>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start">
-      <div id="settled-categories"></div>
-      <div id="settled-table"></div>
+    <!-- Strategy Breakdown -->
+    <div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:14px">
+      <div style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">By Strategy</div>
+      <div id="perf-strategies"></div>
     </div>
   </div>
-  <div class="section">
-    <div class="section-title">Trade Log <span class="badge" id="trade-badge">0</span><button class="refresh-btn" onclick="loadTrades()">Refresh</button></div>
-    <div id="trade-table"><div class="loading">Loading trades...</div></div>
+
+  <!-- Row 3: Category + Price Range + Time of Day -->
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px">
+    <div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:14px">
+      <div style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">By Sport</div>
+      <div id="perf-by-sport"></div>
+    </div>
+    <div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:14px">
+      <div style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">By Price Range</div>
+      <div id="perf-by-price"></div>
+    </div>
+    <div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:14px">
+      <div style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">By Time of Day</div>
+      <div id="perf-by-time"></div>
+    </div>
+  </div>
+
+  <!-- Row 4: Daily Insights -->
+  <div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:14px;margin-bottom:12px">
+    <div style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Daily Insights</div>
+    <div id="daily-insights-feed" style="display:flex;flex-direction:column;gap:6px">
+      <div class="loading">Generating insights...</div>
+    </div>
+  </div>
+
+  <!-- Row 5: Recent Trades -->
+  <div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:14px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <div style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Recent Trades <span class="badge" id="trade-badge" style="margin-left:6px">0</span></div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <label style="font-size:10px;color:#666;cursor:pointer"><input type="checkbox" id="hide-history-junk" checked onchange="loadPerformance()" style="margin-right:3px;accent-color:#00dc5a"> Hide old bot trades</label>
+        <button class="refresh-btn" onclick="loadPerformance()">Refresh</button>
+      </div>
+    </div>
+    <div id="settled-table"></div>
   </div>
 </div>
+
+<!-- Legacy hidden tab-content for backward compat -->
+<div class="tab-content" id="tab-history" style="display:none"></div>
+<div class="tab-content" id="tab-analytics" style="display:none"></div>
 
 <!-- 75%'ers Tab -->
 <div class="tab-content" id="tab-seventyfivers">
@@ -12432,48 +12476,7 @@ a:hover { color: #7da5f5; }
 </div>
 
 <!-- Analytics Tab -->
-<div class="tab-content" id="tab-analytics">
-  <div class="section">
-    <!-- Daily Insights Feed -->
-    <div style="margin-bottom:24px">
-      <div style="color:#00d4ff;font-size:14px;font-weight:700;margin-bottom:10px">Daily Insights</div>
-      <div id="daily-insights-feed" style="display:flex;flex-direction:column;gap:8px">
-        <div class="loading">Generating insights...</div>
-      </div>
-    </div>
-
-    <!-- Key Insights Summary -->
-    <div id="analytics-insights" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin-bottom:20px">
-      <div class="loading">Loading analytics...</div>
-    </div>
-
-    <!-- Win Rate by Sport -->
-    <div style="margin-bottom:24px">
-      <div style="color:#00d4ff;font-size:14px;font-weight:700;margin-bottom:10px">Win Rate by Sport</div>
-      <div id="analytics-sport" style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:12px;overflow-x:auto">
-        <div class="loading">Loading...</div>
-      </div>
-    </div>
-
-    <!-- Win Rate by Price Range -->
-    <div style="margin-bottom:24px">
-      <div style="color:#00d4ff;font-size:14px;font-weight:700;margin-bottom:10px">Win Rate by Price Range</div>
-      <div id="analytics-price" style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:12px;overflow-x:auto">
-        <div class="loading">Loading...</div>
-      </div>
-    </div>
-
-    <!-- Time of Day Performance -->
-    <div style="margin-bottom:24px">
-      <div style="color:#00d4ff;font-size:14px;font-weight:700;margin-bottom:10px">Time of Day Performance</div>
-      <div id="analytics-time" style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:12px;overflow-x:auto">
-        <div class="loading">Loading...</div>
-      </div>
-    </div>
-
-    <div style="font-size:10px;color:#555;text-align:center;margin-top:12px">Data from trade journal. Updates every 30s.</div>
-  </div>
-</div>
+<!-- Analytics tab removed — merged into Performance tab -->
 
 <!-- Trends Tab -->
 <div class="tab-content" id="tab-trends">
@@ -12575,8 +12578,9 @@ function switchTab(name) {
   // Lazy-load tab data
   if (name === 'positions') { loadActivityDash(); loadBetsFeedDash(); }
   if (name === 'moonshark') loadMoonshark();
-  if (name === 'history') { loadSettled(); loadTrades(); }
-  if (name === 'analytics') { loadAnalytics(); loadInsights(); loadSeventyFivers(); loadQuantPicks(); loadNews(); loadNewsIdeas(); }
+  if (name === 'performance') { loadPerformance(); }
+  if (name === 'history') { loadPerformance(); }  // legacy redirect
+  if (name === 'analytics') { loadPerformance(); }  // legacy redirect
   if (name === 'trends') { loadTrends(); }
   // Legacy support for hidden tabs
   if (name === 'activity') { loadActivity(); loadBetsFeed(); loadAllBets(); }
@@ -14260,7 +14264,403 @@ async function loadSettled() {
       tableEl.innerHTML = tbl;
     }
   } catch(e) {
-    document.getElementById('settled-stats').innerHTML = '<span style="color:#ff5000">Error: ' + e.message + '</span>';
+    var ss = document.getElementById('settled-stats');
+    if (ss) ss.innerHTML = '<span style="color:#ff5000">Error: ' + e.message + '</span>';
+  }
+}
+
+// === COMBINED PERFORMANCE TAB ===
+async function loadPerformance() {
+  try {
+    // Fetch all data in parallel
+    var [settledData, analyticsData, tradesData, insightsData] = await Promise.all([
+      fetch(API + '/settled').then(r => r.json()),
+      fetch(API + '/analytics').then(r => r.json()),
+      fetch(API + '/trades').then(r => r.json()),
+      fetch(API + '/insights').then(r => r.json()).catch(function() { return {insights:[]}; })
+    ]);
+
+    var allSettled = settledData.settled || [];
+    var hideJunk = document.getElementById('hide-history-junk') && document.getElementById('hide-history-junk').checked;
+    var settled = hideJunk ? allSettled : allSettled;
+    window._settledData = settled;
+
+    // === COMPUTE ALL KPIs ===
+    var wins = 0, losses = 0, totalPnl = 0, totalWagered = 0, bigWin = 0, bigLoss = 0;
+    var winPnls = [], lossPnls = [], allPnls = [];
+    var streak = 0, streakType = 'none', maxStreak = 0, maxDrawdown = 0, peak = 0, cumPnl = 0;
+    var dailyPnls = {};
+
+    settled.forEach(function(s) {
+      var pnl = s.pnl_usd || 0;
+      allPnls.push(pnl);
+      totalPnl += pnl;
+      totalWagered += s.total_traded || 0;
+      cumPnl += pnl;
+      if (cumPnl > peak) peak = cumPnl;
+      var dd = peak - cumPnl;
+      if (dd > maxDrawdown) maxDrawdown = dd;
+
+      if (s.won === true) {
+        wins++;
+        winPnls.push(pnl);
+        bigWin = Math.max(bigWin, pnl);
+      } else if (s.won === false) {
+        losses++;
+        lossPnls.push(pnl);
+        bigLoss = Math.min(bigLoss, pnl);
+      }
+
+      // Daily P&L tracking
+      var day = s.trade_date || 'unknown';
+      if (!dailyPnls[day]) dailyPnls[day] = 0;
+      dailyPnls[day] += pnl;
+    });
+
+    var total = wins + losses;
+    var winRate = total > 0 ? (wins / total * 100) : 0;
+    var roi = totalWagered > 0 ? (totalPnl / totalWagered * 100) : 0;
+    var avgWin = winPnls.length > 0 ? winPnls.reduce(function(a,b){return a+b;},0) / winPnls.length : 0;
+    var avgLoss = lossPnls.length > 0 ? Math.abs(lossPnls.reduce(function(a,b){return a+b;},0) / lossPnls.length) : 0;
+    var profitFactor = avgLoss > 0 ? (avgWin * wins) / (avgLoss * losses) : 0;
+    var expectancy = total > 0 ? totalPnl / total : 0;
+    var payoffRatio = avgLoss > 0 ? avgWin / avgLoss : 0;
+
+    // Sharpe-like ratio (daily P&L volatility)
+    var dailyVals = Object.values(dailyPnls);
+    var dailyMean = dailyVals.length > 0 ? dailyVals.reduce(function(a,b){return a+b;},0) / dailyVals.length : 0;
+    var dailyVar = dailyVals.length > 1 ? dailyVals.reduce(function(a,b){return a + Math.pow(b - dailyMean, 2);},0) / (dailyVals.length - 1) : 0;
+    var dailyStd = Math.sqrt(dailyVar);
+    var sharpe = dailyStd > 0 ? (dailyMean / dailyStd).toFixed(2) : '--';
+
+    // Streak
+    var currStreak = settledData.streak || 0;
+    var currStreakType = settledData.streak_type || 'none';
+
+    // === RENDER KPIs ===
+    var kpiEl = document.getElementById('perf-kpis');
+    function kpi(label, value, color, sub) {
+      return '<div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:10px 12px;text-align:center">' +
+        '<div style="color:#555;font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px">' + label + '</div>' +
+        '<div style="color:' + color + ';font-size:20px;font-weight:800">' + value + '</div>' +
+        (sub ? '<div style="color:#444;font-size:9px;margin-top:1px">' + sub + '</div>' : '') +
+        '</div>';
+    }
+    var wrColor = winRate >= 50 ? '#00dc5a' : winRate >= 30 ? '#ffb400' : '#ff5000';
+    var pnlColor = totalPnl >= 0 ? '#00dc5a' : '#ff5000';
+    var roiColor = roi >= 0 ? '#00dc5a' : '#ff5000';
+    var pfColor = profitFactor >= 1.5 ? '#00dc5a' : profitFactor >= 1.0 ? '#ffb400' : '#ff5000';
+    var expColor = expectancy >= 0 ? '#00dc5a' : '#ff5000';
+    var streakColor = currStreakType === 'win' ? '#00dc5a' : currStreakType === 'loss' ? '#ff5000' : '#888';
+    var streakLabel = currStreakType === 'win' ? currStreak + 'W' : currStreakType === 'loss' ? currStreak + 'L' : '--';
+
+    var khtml = '';
+    // Row 1: Core trading metrics
+    khtml += kpi('Total P&L', (totalPnl >= 0 ? '+$' : '-$') + Math.abs(totalPnl).toFixed(2), pnlColor, wins + 'W / ' + losses + 'L');
+    khtml += kpi('Win Rate', winRate.toFixed(1) + '%', wrColor, total + ' trades');
+    khtml += kpi('ROI', roi.toFixed(1) + '%', roiColor, '$' + totalWagered.toFixed(0) + ' wagered');
+    khtml += kpi('Profit Factor', profitFactor.toFixed(2), pfColor, avgWin > 0 ? '$' + avgWin.toFixed(2) + ' avg W' : '');
+    khtml += kpi('Expectancy', (expectancy >= 0 ? '+$' : '-$') + Math.abs(expectancy).toFixed(2), expColor, 'per trade');
+
+    // Row 2
+    khtml += kpi('Max Drawdown', '-$' + maxDrawdown.toFixed(2), maxDrawdown > 20 ? '#ff5000' : '#ffb400', 'from peak');
+    khtml += kpi('Avg Win', '+$' + avgWin.toFixed(2), '#00dc5a', bigWin > 0 ? 'best +$' + bigWin.toFixed(2) : '');
+    khtml += kpi('Avg Loss', '-$' + avgLoss.toFixed(2), '#ff5000', bigLoss < 0 ? 'worst -$' + Math.abs(bigLoss).toFixed(2) : '');
+    khtml += kpi('Payoff Ratio', payoffRatio.toFixed(2) + 'x', payoffRatio >= 1 ? '#00dc5a' : '#ff5000', 'win/loss size');
+    khtml += kpi('Streak', streakLabel, streakColor, 'Sharpe: ' + sharpe);
+
+    kpiEl.innerHTML = khtml;
+
+    // === EQUITY CURVE ===
+    var canvas = document.getElementById('perf-pl-chart');
+    if (canvas) {
+      var ctx = canvas.getContext('2d');
+      var dpr = window.devicePixelRatio || 1;
+      var rect = canvas.parentElement.getBoundingClientRect();
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      ctx.scale(dpr, dpr);
+      var w = rect.width, h = rect.height;
+      ctx.clearRect(0, 0, w, h);
+
+      var points = [{x: 0, y: 0}];
+      var cum = 0;
+      settled.forEach(function(s, i) {
+        cum += s.pnl_usd || 0;
+        points.push({x: i + 1, y: cum});
+      });
+
+      if (points.length > 1) {
+        var minY = Math.min.apply(null, points.map(function(p){return p.y;}));
+        var maxY = Math.max.apply(null, points.map(function(p){return p.y;}));
+        var range = Math.max(maxY - minY, 1);
+        var pad = 16;
+
+        // Zero line
+        var zeroY = h - pad - ((0 - minY) / range) * (h - 2 * pad);
+        ctx.strokeStyle = '#333';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(0, zeroY);
+        ctx.lineTo(w, zeroY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Equity line
+        ctx.beginPath();
+        points.forEach(function(p, i) {
+          var px = (p.x / (points.length - 1)) * (w - 2 * pad) + pad;
+          var py = h - pad - ((p.y - minY) / range) * (h - 2 * pad);
+          if (i === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        });
+        ctx.strokeStyle = cum >= 0 ? '#00dc5a' : '#ff5000';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Gradient fill
+        var lastPt = points[points.length - 1];
+        var lastPx = (lastPt.x / (points.length - 1)) * (w - 2 * pad) + pad;
+        ctx.lineTo(lastPx, h - pad);
+        ctx.lineTo(pad, h - pad);
+        ctx.closePath();
+        var grad = ctx.createLinearGradient(0, 0, 0, h);
+        if (cum >= 0) {
+          grad.addColorStop(0, 'rgba(0,220,90,0.15)');
+          grad.addColorStop(1, 'rgba(0,220,90,0)');
+        } else {
+          grad.addColorStop(0, 'rgba(255,80,0,0.15)');
+          grad.addColorStop(1, 'rgba(255,80,0,0)');
+        }
+        ctx.fillStyle = grad;
+        ctx.fill();
+
+        // End label
+        ctx.fillStyle = cum >= 0 ? '#00dc5a' : '#ff5000';
+        ctx.font = '11px Inter';
+        ctx.textAlign = 'right';
+        ctx.fillText((cum >= 0 ? '+$' : '-$') + Math.abs(cum).toFixed(2), w - 4, 14);
+      }
+    }
+
+    // === STRATEGY BREAKDOWN ===
+    var stratEl = document.getElementById('perf-strategies');
+    var strategies = {};
+    settled.forEach(function(s) {
+      var strat = s.strategy || s.source || 'unknown';
+      if (strat === 'kalshi_fill') strat = 'manual';
+      if (!strategies[strat]) strategies[strat] = {wins:0, losses:0, pnl:0};
+      if (s.won === true) strategies[strat].wins++;
+      else if (s.won === false) strategies[strat].losses++;
+      strategies[strat].pnl += s.pnl_usd || 0;
+    });
+    var stratKeys = Object.keys(strategies).sort(function(a,b) { return strategies[b].pnl - strategies[a].pnl; });
+    if (stratKeys.length > 0) {
+      var shtml = '';
+      stratKeys.forEach(function(k) {
+        var s = strategies[k];
+        var st = s.wins + s.losses;
+        var swr = st > 0 ? Math.round(s.wins / st * 100) : 0;
+        var swrc = swr >= 50 ? '#00dc5a' : swr >= 30 ? '#ffb400' : '#ff5000';
+        var spnlc = s.pnl >= 0 ? '#00dc5a' : '#ff5000';
+        var barW = st > 0 ? Math.round(s.wins / st * 100) : 0;
+        shtml += '<div style="margin-bottom:8px">';
+        shtml += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">';
+        shtml += '<span style="color:#ccc;font-size:11px;font-weight:600;text-transform:capitalize">' + k + '</span>';
+        shtml += '<span style="color:' + spnlc + ';font-size:11px;font-weight:700">' + (s.pnl >= 0 ? '+' : '') + '$' + Math.abs(s.pnl).toFixed(2) + '</span>';
+        shtml += '</div>';
+        shtml += '<div style="display:flex;align-items:center;gap:6px">';
+        shtml += '<div style="flex:1;height:6px;background:#222;border-radius:3px;overflow:hidden">';
+        shtml += '<div style="width:' + barW + '%;height:100%;background:' + swrc + ';border-radius:3px"></div>';
+        shtml += '</div>';
+        shtml += '<span style="color:#888;font-size:9px;white-space:nowrap">' + swr + '% (' + s.wins + 'W/' + s.losses + 'L)</span>';
+        shtml += '</div></div>';
+      });
+      stratEl.innerHTML = shtml;
+    } else {
+      stratEl.innerHTML = '<div style="color:#555;font-size:11px">No strategy data yet</div>';
+    }
+
+    // === BY SPORT ===
+    var sportEl = document.getElementById('perf-by-sport');
+    var cats = {};
+    settled.forEach(function(s) {
+      var cat = s.category || 'other';
+      if (!cats[cat]) cats[cat] = {wins:0, losses:0, pnl:0};
+      if (s.won === true) cats[cat].wins++;
+      else if (s.won === false) cats[cat].losses++;
+      cats[cat].pnl += s.pnl_usd || 0;
+    });
+    var catKeys = Object.keys(cats).filter(function(k) { var c = cats[k]; return (c.wins + c.losses) > 0; })
+      .sort(function(a,b) { return cats[b].pnl - cats[a].pnl; });
+    if (catKeys.length > 0) {
+      var chtml = '';
+      catKeys.forEach(function(k) {
+        var c = cats[k];
+        var ct = c.wins + c.losses;
+        var cwr = Math.round(c.wins / ct * 100);
+        var cwrc = cwr >= 50 ? '#00dc5a' : cwr >= 30 ? '#ffb400' : '#ff5000';
+        var cpnlc = c.pnl >= 0 ? '#00dc5a' : '#ff5000';
+        chtml += '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #1a1a1a">';
+        chtml += '<span style="color:#ccc;font-size:11px;text-transform:capitalize">' + k + '</span>';
+        chtml += '<div style="display:flex;gap:10px;align-items:center">';
+        chtml += '<span style="color:' + cwrc + ';font-size:11px;font-weight:700">' + cwr + '%</span>';
+        chtml += '<span style="color:#666;font-size:10px">' + c.wins + 'W/' + c.losses + 'L</span>';
+        chtml += '<span style="color:' + cpnlc + ';font-size:10px;font-weight:600;min-width:50px;text-align:right">' + (c.pnl >= 0 ? '+' : '') + '$' + Math.abs(c.pnl).toFixed(2) + '</span>';
+        chtml += '</div></div>';
+      });
+      sportEl.innerHTML = chtml;
+    } else {
+      sportEl.innerHTML = '<div style="color:#555;font-size:11px">No data yet</div>';
+    }
+
+    // === BY PRICE RANGE ===
+    var priceEl = document.getElementById('perf-by-price');
+    var byPrice = analyticsData.by_price || {};
+    // Fallback: compute from settled
+    if (Object.keys(byPrice).length === 0 && settled.length > 0) {
+      var pMap = {};
+      settled.forEach(function(s) {
+        var pc = s.entry_cents || 0;
+        var bk = pc >= 90 ? '90-100' : pc >= 80 ? '80-89' : pc >= 70 ? '70-79' : pc >= 50 ? '50-69' : '<50';
+        if (!pMap[bk]) pMap[bk] = {wins:0, losses:0, pnl:0, total:0};
+        pMap[bk].total++;
+        if (s.won === true) pMap[bk].wins++;
+        else if (s.won === false) pMap[bk].losses++;
+        pMap[bk].pnl += s.pnl_usd || 0;
+      });
+      Object.keys(pMap).forEach(function(k) {
+        var b = pMap[k];
+        b.win_rate = Math.round(b.wins / Math.max(1, b.wins + b.losses) * 100 * 10) / 10;
+      });
+      byPrice = pMap;
+    }
+    var priceKeys = Object.keys(byPrice).filter(function(k) { return (byPrice[k].total || 0) > 0; })
+      .sort(function(a,b) { return (byPrice[b].win_rate || 0) - (byPrice[a].win_rate || 0); });
+    if (priceKeys.length > 0) {
+      var phtml = '';
+      priceKeys.forEach(function(k) {
+        var b = byPrice[k];
+        var bwr = b.win_rate || 0;
+        var bwrc = bwr >= 50 ? '#00dc5a' : bwr >= 30 ? '#ffb400' : '#ff5000';
+        var bpnlc = (b.pnl || 0) >= 0 ? '#00dc5a' : '#ff5000';
+        phtml += '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #1a1a1a">';
+        phtml += '<span style="color:#ccc;font-size:11px">' + k + String.fromCharCode(162) + '</span>';
+        phtml += '<div style="display:flex;gap:10px;align-items:center">';
+        phtml += '<span style="color:' + bwrc + ';font-size:11px;font-weight:700">' + bwr.toFixed(0) + '%</span>';
+        phtml += '<span style="color:#666;font-size:10px">' + (b.wins||0) + 'W/' + (b.losses||0) + 'L</span>';
+        phtml += '<span style="color:' + bpnlc + ';font-size:10px;font-weight:600;min-width:50px;text-align:right">' + ((b.pnl||0) >= 0 ? '+' : '') + '$' + Math.abs(b.pnl||0).toFixed(2) + '</span>';
+        phtml += '</div></div>';
+      });
+      priceEl.innerHTML = phtml;
+    } else {
+      priceEl.innerHTML = '<div style="color:#555;font-size:11px">No data yet</div>';
+    }
+
+    // === BY TIME OF DAY ===
+    var timeEl = document.getElementById('perf-by-time');
+    var byTime = analyticsData.by_time || {};
+    var timeKeys = Object.keys(byTime).filter(function(k) { return (byTime[k].total || 0) > 0; })
+      .sort(function(a,b) { return (byTime[b].pnl || 0) - (byTime[a].pnl || 0); });
+    if (timeKeys.length > 0) {
+      var thtml = '';
+      timeKeys.forEach(function(k) {
+        var t = byTime[k];
+        var twr = t.win_rate || 0;
+        var twrc = twr >= 50 ? '#00dc5a' : twr >= 30 ? '#ffb400' : '#ff5000';
+        var tpnlc = (t.pnl || 0) >= 0 ? '#00dc5a' : '#ff5000';
+        // Shorten label
+        var shortLabel = k.replace(' (6am-12pm)','').replace(' (12pm-6pm)','').replace(' (6pm-12am)','').replace(' (12am-6am)','');
+        thtml += '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #1a1a1a">';
+        thtml += '<span style="color:#ccc;font-size:11px">' + shortLabel + '</span>';
+        thtml += '<div style="display:flex;gap:10px;align-items:center">';
+        thtml += '<span style="color:' + twrc + ';font-size:11px;font-weight:700">' + twr.toFixed(0) + '%</span>';
+        thtml += '<span style="color:#666;font-size:10px">' + (t.wins||0) + 'W/' + (t.losses||0) + 'L</span>';
+        thtml += '<span style="color:' + tpnlc + ';font-size:10px;font-weight:600;min-width:50px;text-align:right">' + ((t.pnl||0) >= 0 ? '+' : '') + '$' + Math.abs(t.pnl||0).toFixed(2) + '</span>';
+        thtml += '</div></div>';
+      });
+      timeEl.innerHTML = thtml;
+    } else {
+      timeEl.innerHTML = '<div style="color:#555;font-size:11px">No data yet</div>';
+    }
+
+    // === DAILY INSIGHTS ===
+    var insData = insightsData.insights || [];
+    var feedEl = document.getElementById('daily-insights-feed');
+    if (insData.length > 0) {
+      var ihtml = '';
+      insData.forEach(function(ins) {
+        var icon = ins.trend === 'positive' ? String.fromCodePoint(0x1F4C8) : ins.trend === 'negative' ? String.fromCodePoint(0x1F4C9) : String.fromCodePoint(0x27A1);
+        var borderColor = ins.trend === 'positive' ? '#00dc5a' : ins.trend === 'negative' ? '#ff5000' : '#333';
+        ihtml += '<div style="border-left:3px solid ' + borderColor + ';padding:8px 12px;border-radius:6px;background:#0d0d0d">';
+        ihtml += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">';
+        ihtml += '<span style="font-size:14px">' + icon + '</span>';
+        ihtml += '<span style="color:#ddd;font-size:12px;font-weight:700">' + ins.title + '</span>';
+        ihtml += '</div>';
+        ihtml += '<div style="color:#888;font-size:10px;line-height:1.4">' + ins.detail + '</div>';
+        ihtml += '</div>';
+      });
+      feedEl.innerHTML = ihtml;
+    } else {
+      feedEl.innerHTML = '<div style="color:#555;font-size:11px">No insights yet</div>';
+    }
+
+    // === RECENT TRADES ===
+    var tableEl = document.getElementById('settled-table');
+    var hiddenCount = allSettled.length - settled.length;
+    if (settled.length === 0) {
+      tableEl.innerHTML = '<div style="color:#555;font-size:11px;padding:8px">No settled trades yet.</div>';
+    } else {
+      var tbl = '<div style="display:flex;flex-direction:column;gap:4px">';
+      settled.slice(0, 30).forEach(function(s) {
+        var isWin = s.won === true;
+        var isLoss = s.won === false;
+        var pnlAbs = Math.abs(s.pnl_usd).toFixed(2);
+        var borderColor = isWin ? '#00dc5a' : isLoss ? '#ff5000' : '#555';
+        var pnlColor = isWin ? '#00dc5a' : isLoss ? '#ff5000' : '#888';
+        var pnlSign = isWin ? '+$' : '-$';
+        var resultLabel = isWin ? 'WON' : isLoss ? 'LOST' : 'EVEN';
+        var dateStr = '';
+        var tdRaw = s.trade_date || '';
+        if (tdRaw) {
+          try {
+            var parts = tdRaw.split('-');
+            var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+            dateStr = months[parseInt(parts[1])-1] + ' ' + parseInt(parts[2]);
+          } catch(e) { dateStr = tdRaw; }
+        }
+        var costStr = s.total_traded ? '$' + s.total_traded.toFixed(2) : '';
+        var catLabel = s.category ? s.category.charAt(0).toUpperCase() + s.category.slice(1) : '';
+        tbl += '<div style="border-left:3px solid ' + borderColor + ';padding:8px 12px;border-radius:4px;display:flex;justify-content:space-between;align-items:center;background:rgba(20,20,20,0.5)">';
+        tbl += '<div style="flex:1;min-width:0">';
+        tbl += '<div style="color:#ddd;font-size:11px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + s.title + '</div>';
+        tbl += '<div style="color:#666;font-size:9px;margin-top:2px">';
+        if (dateStr) tbl += dateStr;
+        if (costStr) tbl += ' &middot; ' + costStr;
+        if (catLabel) tbl += ' &middot; ' + catLabel;
+        if (s.side) tbl += ' &middot; ' + s.side.toUpperCase();
+        tbl += '</div></div>';
+        tbl += '<div style="text-align:right;margin-left:12px;flex-shrink:0">';
+        tbl += '<div style="color:' + pnlColor + ';font-size:14px;font-weight:800">' + pnlSign + pnlAbs + '</div>';
+        tbl += '<div style="color:' + pnlColor + ';font-size:9px;font-weight:600;letter-spacing:0.5px">' + resultLabel + '</div>';
+        tbl += '</div></div>';
+      });
+      tbl += '</div>';
+      if (settled.length > 30) {
+        tbl += '<div style="color:#555;font-size:9px;padding:6px 4px;text-align:center">' + (settled.length - 30) + ' more trades not shown</div>';
+      }
+      tableEl.innerHTML = tbl;
+    }
+
+    // Update trade badge
+    var badge = document.getElementById('trade-badge');
+    if (badge) badge.textContent = settled.length;
+
+  } catch(e) {
+    console.error('Performance tab error', e);
+    var kpiEl = document.getElementById('perf-kpis');
+    if (kpiEl) kpiEl.innerHTML = '<span style="color:#ff5000">Error loading: ' + e.message + '</span>';
   }
 }
 
@@ -15336,7 +15736,7 @@ loadMoonshark();
 // Auto-refresh: ticker every 60s, activity every 10s, portfolio every 30s
 setInterval(() => { loadTicker(); }, 60000);
 setInterval(() => { loadActivity(); loadBetsFeed(); checkForNotifications(); }, 10000);
-setInterval(() => { loadStatus(); loadPortfolio(); loadTopPicks(); loadTodayPicks(); loadPositions(); loadSettled(); loadTrades(); checkNotifications(); }, 30000);
+setInterval(() => { loadStatus(); loadPortfolio(); loadTopPicks(); loadTodayPicks(); loadPositions(); loadSettled(); loadTrades(); checkNotifications(); if (document.getElementById('tab-performance') && document.getElementById('tab-performance').classList.contains('active')) loadPerformance(); }, 30000);
 
 // --- Notification Bell ---
 var _notifItems = [];
