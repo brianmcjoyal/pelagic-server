@@ -6171,6 +6171,13 @@ def _background_loop():
             pass
         _PORTFOLIO_CACHE["ts"] = _time.time()
         print(f"[BG] Early cache warm: ${_bal_early:.2f} cash, {len(_pos_early)} positions, P&L ${_early_realized:+.2f}")
+        # Pre-warm settled cache so Performance tab loads instantly
+        try:
+            with app.test_request_context():
+                settled_positions()
+                print(f"[BG] Settled cache warmed: {_SETTLED_CACHE['data']['wins']}W/{_SETTLED_CACHE['data']['losses']}L, P&L ${_SETTLED_CACHE['data']['total_pnl_usd']:+.2f}")
+        except Exception as _se:
+            print(f"[BG] Settled cache warm failed (non-fatal): {_se}")
     except Exception as e:
         print(f"[BG] Early cache warm failed (non-fatal): {e}")
     # Hydrate trade history from Kalshi on startup
@@ -6371,15 +6378,17 @@ def _background_loop():
                     "total_invested_usd": round(sum(p.get("market_exposure_cents", 0) for p in _pos2) / 100, 2),
                     "total_unrealized_usd": _total_unrealized,
                     "daily_pnl_usd": _daily_pnl,
-                    "wins": _d1_wins,
-                    "losses": _d1_losses,
+                    # Use /settled cache as single source of truth for W/L/P&L
+                    # This ensures header and Performance tab always match
+                    "wins": _SETTLED_CACHE["data"]["wins"] if _SETTLED_CACHE.get("data") else _d1_wins,
+                    "losses": _SETTLED_CACHE["data"]["losses"] if _SETTLED_CACHE.get("data") else _d1_losses,
                     "wins_all_time": _wins2,
                     "losses_all_time": _losses2,
                     "breakeven": 0,
-                    "win_rate": _d1_wr,
+                    "win_rate": round(_SETTLED_CACHE["data"]["wins"] / max(1, _SETTLED_CACHE["data"]["wins"] + _SETTLED_CACHE["data"]["losses"]) * 100, 1) if _SETTLED_CACHE.get("data") else _d1_wr,
                     "win_rate_all_time": _wr2,
                     "win_rate_7d": _7d_wr,
-                    "total_realized_usd": round(sum(t.get("pnl", 0) for t in _TRADE_JOURNAL) if _TRADE_JOURNAL else _realized2, 2),
+                    "total_realized_usd": _SETTLED_CACHE["data"]["total_pnl_usd"] if _SETTLED_CACHE.get("data") else round(sum(t.get("pnl", 0) for t in _TRADE_JOURNAL) if _TRADE_JOURNAL else _realized2, 2),
                     "total_realized_all": round(_realized2, 2),
                     "settled_history": _settled_list2[-20:],
                 }
@@ -6777,7 +6786,7 @@ def positions():
 
 
 _SETTLED_CACHE = {"data": None, "ts": 0}
-_SETTLED_CACHE_TTL = 120  # 2 minutes
+_SETTLED_CACHE_TTL = 300  # 5 minutes — expensive call, data changes slowly
 
 @app.route("/settled")
 def settled_positions():
