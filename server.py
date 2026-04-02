@@ -8384,6 +8384,24 @@ def ticker_prices():
 # Bot endpoints (NEW)
 # ---------------------------------------------------------------------------
 
+def _count_trades_today():
+    """Count unique trades placed today (deduplicated by ticker+side).
+    Uses the same logic as /trades-today to ensure both numbers match."""
+    seen = set()
+    count = 0
+    for _tlist in [BOT_STATE.get("snipe_trades_today", []),
+                   BOT_STATE.get("moonshark_trades_today", []),
+                   BOT_STATE.get("closegame_trades_today", []),
+                   BOT_STATE.get("manual_trades_today", [])]:
+        for t in _tlist:
+            tk = t.get("ticker", "")
+            side = t.get("side", "")
+            key = (tk, side)
+            if key not in seen:
+                seen.add(key)
+                count += 1
+    return count
+
 @app.route("/status")
 def status():
     markets = BOT_STATE["last_scan_markets"]
@@ -8395,8 +8413,8 @@ def status():
         "last_scan": BOT_STATE["last_scan"],
         "last_scan_markets": markets,
         "last_scan_mispriced": mispriced,
-        "trades_today": len(BOT_STATE.get("snipe_trades_today", [])) + len(BOT_STATE.get("moonshark_trades_today", [])) + len(BOT_STATE.get("closegame_trades_today", [])) + len(BOT_STATE.get("manual_trades_today", [])),
-        "daily_spent_usd": BOT_STATE["daily_spent_usd"] + BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0),
+        "trades_today": _count_trades_today(),
+        "daily_spent_usd": BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0) + BOT_STATE.get("closegame_daily_spent", 0),
         "total_trades_all_time": len(BOT_STATE["all_trades"]),
         "recent_errors": BOT_STATE["errors"][-5:],
         "scheduler_running": scheduler.running,
