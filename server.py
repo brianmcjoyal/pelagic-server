@@ -15925,7 +15925,7 @@ loadMoonshark();
 // Auto-refresh: ticker every 60s, activity every 10s, portfolio every 30s
 setInterval(() => { loadTicker(); }, 60000);
 setInterval(() => { loadActivity(); loadBetsFeed(); checkForNotifications(); }, 10000);
-setInterval(() => { loadStatus(); loadPortfolio(); loadTopPicks(); loadTodayPicks(); loadPositions(); loadSettled(); loadTrades(); checkNotifications(); if (document.getElementById('tab-performance') && document.getElementById('tab-performance').classList.contains('active')) loadPerformance(); }, 30000);
+setInterval(() => { loadStatus(); loadPortfolio(); loadTopPicks(); loadTodayPicks(); loadPositions(); loadSettled(); loadTrades(); checkNotifications(); if (document.getElementById('tab-performance') && document.getElementById('tab-performance').classList.contains('active')) loadPerformance(); }, 15000);
 
 // --- Notification Bell ---
 var _notifItems = [];
