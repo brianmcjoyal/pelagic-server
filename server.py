@@ -8463,59 +8463,65 @@ def trades_today_endpoint():
             return ts_str[:10] == today_str
 
     all_today = []
+    # Helper: extract time from trade (handles both "time" and "timestamp" field names)
+    def _get_time(t):
+        return t.get("time", "") or t.get("timestamp", "") or ""
+    # Helper: extract price (handles both "price" and "price_cents")
+    def _get_price(t):
+        return t.get("price", 0) or t.get("price_cents", 0)
+    # Helper: extract cost (handles both "cost" and "cost_usd")
+    def _get_cost(t):
+        return t.get("cost", 0) or t.get("cost_usd", 0)
+
     for t in sniper_trades:
-        ts = t.get("time", "") or ""
         all_today.append({
             "ticker": t.get("ticker", ""),
-            "title": t.get("title", t.get("ticker", "")),
+            "title": t.get("title", t.get("question", t.get("ticker", ""))),
             "side": t.get("side", ""),
-            "price_cents": t.get("price", 0),
+            "price_cents": _get_price(t),
             "count": t.get("count", 0),
-            "cost_usd": round(t.get("cost", 0), 2),
-            "time": ts,
+            "cost_usd": round(_get_cost(t), 2),
+            "time": _get_time(t),
             "strategy": "sniper",
             "success": True,
             "source": "bot",
         })
     for t in quant_trades:
-        if True:
-            all_today.append({
-                "ticker": t.get("ticker", ""),
-                "title": t.get("title", t.get("ticker", "")),
-                "side": t.get("side", ""),
-                "price_cents": t.get("price_cents", 0),
-                "count": t.get("count", 0),
-                "cost_usd": round(t.get("cost_usd", 0), 2),
-                "time": t.get("time", ""),
-                "strategy": "quant",
-                "success": True,
-                "source": "bot",
-            })
-
-    for t in moonshark_trades:
-        ts = t.get("time", "") or ""
         all_today.append({
             "ticker": t.get("ticker", ""),
-            "title": t.get("title", t.get("ticker", "")),
+            "title": t.get("title", t.get("question", t.get("ticker", ""))),
             "side": t.get("side", ""),
-            "price_cents": t.get("price", 0),
+            "price_cents": _get_price(t),
             "count": t.get("count", 0),
-            "cost_usd": round(t.get("cost", 0), 2),
-            "time": ts,
+            "cost_usd": round(_get_cost(t), 2),
+            "time": _get_time(t),
+            "strategy": "quant",
+            "success": True,
+            "source": "bot",
+        })
+
+    for t in moonshark_trades:
+        all_today.append({
+            "ticker": t.get("ticker", ""),
+            "title": t.get("title", t.get("question", t.get("ticker", ""))),
+            "side": t.get("side", ""),
+            "price_cents": _get_price(t),
+            "count": t.get("count", 0),
+            "cost_usd": round(_get_cost(t), 2),
+            "time": _get_time(t),
             "strategy": "moonshark",
             "success": True,
             "source": "bot",
         })
     for t in closegame_trades:
-        ts = t.get("time", "") or ""
         all_today.append({
             "ticker": t.get("ticker", ""),
-            "title": t.get("title", t.get("ticker", "")),
+            "title": t.get("title", t.get("question", t.get("ticker", ""))),
             "side": t.get("side", ""),
-            "price_cents": t.get("price", 0),
+            "price_cents": _get_price(t),
             "count": t.get("count", 0),
-            "cost_usd": round(t.get("cost", 0), 2),
-            "time": ts,
+            "cost_usd": round(_get_cost(t), 2),
+            "time": _get_time(t),
             "strategy": "closegame",
             "success": True,
             "source": "bot",
@@ -8523,12 +8529,12 @@ def trades_today_endpoint():
     for t in manual_trades:
         all_today.append({
             "ticker": t.get("ticker", ""),
-            "title": t.get("title", t.get("ticker", "")),
+            "title": t.get("title", t.get("question", t.get("ticker", ""))),
             "side": t.get("side", ""),
-            "price_cents": t.get("price", 0),
+            "price_cents": _get_price(t),
             "count": t.get("count", 0),
-            "cost_usd": round(t.get("cost", 0), 2),
-            "time": t.get("time", ""),
+            "cost_usd": round(_get_cost(t), 2),
+            "time": _get_time(t),
             "strategy": t.get("strategy", "manual"),
             "success": True,
             "source": "you",
