@@ -64,7 +64,7 @@ BOT_VERSION_DATE = "2026-03-15"
 # ---------------------------------------------------------------------------
 BOT_CONFIG = {
     "enabled": True,  # default ON — safety floor will auto-disable if needed
-    "max_bet_usd": 12.0,          # max $12 per single trade — higher ceiling for Kelly sizing
+    "max_bet_usd": 25.0,          # max $25 per single trade — let Kelly size up on high-edge bets
     "max_daily_usd": 150.0,        # max $150/day — scales with bankroll via smart sizing
     "min_balance_usd": 250.0,     # SAFETY FLOOR: stop all trading if cash below $250
     "min_cash_reserve_pct": 0.05, # keep 5% of portfolio in cash — legacy positions skew ratio
@@ -2561,7 +2561,7 @@ LIVE_GAME_SERIES = [
 SNIPE_MIN_PRICE = 65   # cents — catch games earlier when edge is bigger
 SNIPE_MAX_PRICE = 85   # cents — cap at 85c (need 15%+ profit margin, one upset can't wipe 6 wins)
 SNIPE_BET_USD = 15.0   # fallback — now uses _smart_bet_size() for bankroll scaling
-SNIPE_MAX_DAILY = 150.0  # budget per day — PRIMARY STRATEGY, 2x budget
+SNIPE_MAX_DAILY = 150.0  # daily safety cap — Kelly sizes the actual bets
 SNIPE_MAX_TRADES = 20    # more room — this is our best strategy
 
 BOT_STATE["snipe_trades_today"] = []
@@ -2570,13 +2570,13 @@ BOT_STATE["snipe_wins"] = 0
 BOT_STATE["snipe_losses"] = 0
 BOT_STATE["snipe_profit_usd"] = 0.0
 
-# MoonShark settings — DATA COLLECTION MODE: more bets to learn faster
+# MoonShark settings — KELLY-SIZED: fewer bets, larger when edge is real
 MOONSHARK_MIN_PRICE = 25   # cents — skip sub-25c lottery tickets
 MOONSHARK_MAX_PRICE = 40   # cents — tighter range, only best underdogs
-MOONSHARK_MAX_DAILY = 40.0  # budget per day — bumped for data collection
-MOONSHARK_BET_USD = 3.0     # ~$3 per MoonShark bet (small while we learn)
+MOONSHARK_MAX_DAILY = 75.0  # daily safety cap (not used for Kelly sizing)
+MOONSHARK_BET_USD = 3.0     # fallback only — Kelly sizes most bets
 MOONSHARK_MIN_TRADES = 0    # no floor — only trade when edge is real
-MOONSHARK_MAX_TRADES = 10   # 10/day for data collection (was 5)
+MOONSHARK_MAX_TRADES = 10   # max 10/day
 
 BOT_STATE["moonshark_trades_today"] = []
 BOT_STATE["moonshark_daily_spent"] = 0.0
@@ -3354,12 +3354,12 @@ def moonshark_snipe():
                     continue
                 remaining_budget = MOONSHARK_MAX_DAILY - BOT_STATE["moonshark_daily_spent"]
                 trades_left = MOONSHARK_MAX_TRADES - len(BOT_STATE.get("moonshark_trades_today", []))
-                # Kelly sizes based on remaining daily budget (not full bankroll)
-                kelly_bankroll = min(remaining_budget, MOONSHARK_MAX_DAILY)
+                # Kelly sizes against REAL bankroll (actual cash), not daily budget
+                kelly_bankroll = bal
                 profit_if_win = (100 - price) / 100.0
                 odds_decimal = profit_if_win / (price / 100.0)
                 kelly_usd = kelly_bet_size(kelly_bankroll, win_prob, odds_decimal)
-                # Floor $3, cap at fair share of remaining budget
+                # No artificial floor — if Kelly says $0, don't bet
                 max_per_trade = remaining_budget / max(trades_left, 1)
                 # Learning multiplier — bet bigger on proven patterns, skip losers
                 cat_mult = _learning_multiplier(ticker, title, price)
@@ -3383,8 +3383,11 @@ def moonshark_snipe():
 
                 # Apply multipliers BEFORE capping — so Kelly cap is never exceeded
                 adjusted_kelly = kelly_usd * cat_mult * live_boost
-                bet_usd = max(3.0, min(adjusted_kelly, max_per_trade, remaining_budget))
-                bet_usd = min(bet_usd, BOT_CONFIG["max_bet_usd"], remaining_budget)  # respect ceiling
+                # No artificial $3 floor — trust Kelly. If edge is small, bet small.
+                if adjusted_kelly < 1.0:
+                    _ms_reasons["kelly_too_small"] = _ms_reasons.get("kelly_too_small", 0) + 1
+                    continue  # Kelly says edge isn't worth it
+                bet_usd = min(adjusted_kelly, max_per_trade, remaining_budget, BOT_CONFIG["max_bet_usd"])
                 count = max(1, int(bet_usd * 100 / price))
                 cost_usd = (price * count) / 100.0
 
@@ -3900,8 +3903,10 @@ def kelly_bet_size(bankroll, win_prob, odds_decimal):
     # Cap at 5% of bankroll per trade (risk management)
     capped = min(half_kelly, 0.05)
     bet = bankroll * capped
-    # Floor and ceiling
-    return max(1.0, min(bet, BOT_CONFIG["max_bet_usd"]))
+    # No artificial floor — trust Kelly. Ceiling from config.
+    if bet < 1.0:
+        return 0  # Kelly says edge isn't worth it
+    return min(bet, BOT_CONFIG["max_bet_usd"])
 
 
 def kelly_count(bankroll, price_cents, consensus_price):
@@ -9802,17 +9807,15 @@ def _smart_bet_size(price_cents, bankroll=None, edge=0.05):
     """Edge-driven bet sizing using half-Kelly criterion.
 
     Only bets when edge > 1.5%. Sizes proportional to edge, not price.
-    Smaller bets = survive losing streaks. Quality over quantity.
-
-    Floor: $3 min, Cap: $15 max per trade (conservative until win rate improves).
+    Bigger edge = bigger bet. Trust Kelly to size appropriately.
     """
     if bankroll is None:
         try:
-            bankroll = (_PORTFOLIO_CACHE.get("data") or {}).get("portfolio_value_usd", 0)
+            bankroll = (_PORTFOLIO_CACHE.get("data") or {}).get("balance_usd", 0)
         except Exception:
             bankroll = 0
     if bankroll <= 0:
-        bankroll = 500
+        bankroll = 400
 
     if edge < 0.015:
         return 0  # No edge, no bet
@@ -9820,12 +9823,16 @@ def _smart_bet_size(price_cents, bankroll=None, edge=0.05):
     # Half-Kelly: bet size proportional to edge magnitude
     # Higher edge = bigger bet, but always conservative
     odds = (100 - price_cents) / max(1, price_cents)
-    win_prob = min(price_cents / 100.0 + edge, 0.50)
+    win_prob = min(price_cents / 100.0 + edge, 0.95)
     kelly_frac = (odds * win_prob - (1 - win_prob)) / max(0.01, odds)
     kelly_frac = max(0, kelly_frac) / 2  # half-Kelly for safety
+    # Cap at 5% of bankroll per trade (risk management)
+    kelly_frac = min(kelly_frac, 0.05)
 
     bet = bankroll * kelly_frac
-    bet = max(3.0, min(15.0, bet))  # $3 floor, $15 cap (conservative)
+    if bet < 1.0:
+        return 0  # Kelly says not worth it
+    bet = min(bet, BOT_CONFIG.get("max_bet_usd", 25.0))
     return round(bet, 2)
 
 
