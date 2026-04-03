@@ -14076,10 +14076,13 @@ async function executePickTrade(btn, idx) {
 async function loadTrades() {
   try {
     const data = await fetch(API + '/trades').then(r => r.json());
-    document.getElementById('trade-badge').textContent = data.total;
+    var _tradeBadge = document.getElementById('trade-badge');
+    if (_tradeBadge) _tradeBadge.textContent = data.total;
     drawPLChart(data.trades || []);
+    var _tradeTable = document.getElementById('trade-table');
+    if (!_tradeTable) return; // element removed — skip rendering
     if (!data.trades || data.trades.length === 0) {
-      document.getElementById('trade-table').innerHTML = '<div class="empty">No trades yet. Enable the bot or click Trade on an opportunity.</div>';
+      _tradeTable.innerHTML = '<div class="empty">No trades yet. Enable the bot or click Trade on an opportunity.</div>';
       return;
     }
     let html = '<table><tr><th>Time</th><th>Market</th><th>Side</th><th>Qty</th><th>Cost</th><th>Deviation</th><th>Result</th><th>Source</th></tr>';
@@ -14128,9 +14131,10 @@ async function loadTrades() {
       html += '</tr>';
     });
     html += '</table>';
-    document.getElementById('trade-table').innerHTML = html;
+    if (_tradeTable) _tradeTable.innerHTML = html;
   } catch(e) {
-    document.getElementById('trade-table').innerHTML = '<div class="empty">Error loading trades</div>';
+    var _tt2 = document.getElementById('trade-table');
+    if (_tt2) _tt2.innerHTML = '<div class="empty">Error loading trades</div>';
   }
 }
 
