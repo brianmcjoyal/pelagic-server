@@ -6905,9 +6905,9 @@ def settled_positions():
             _ts = (_jt.get("trade_date") or (_jt.get("timestamp", "") or "")[:10] or "")
             if _tk and _ts and _tk not in _trade_dates:
                 _trade_dates[_tk] = _ts
-        # If trade history is empty (post-deploy before hydration), fetch fills from Kalshi
-        # so we can still show settled positions. Limit to 1 fast page to avoid blocking startup.
-        if not _trade_dates:
+        # Fetch fills from Kalshi to fill in any missing trade dates
+        # This ensures recent bot trades show up even after Railway deploy resets BOT_STATE
+        if True:  # Always try to hydrate from fills API
             try:
                 _fills_h = signed_headers("GET", "/portfolio/fills")
                 _fills_r = requests.get(
@@ -6979,12 +6979,11 @@ def settled_positions():
                 continue
 
             ticker = pos.get("ticker", "")
-            # Filter: only Day 1+ trades that are in our trade history
+            # Filter: only Day 1+ trades
             trade_date = _trade_dates.get(ticker, "")
-            if not trade_date:
-                continue  # Not in recent trade history — skip
-            if trade_date < _day1_cutoff:
+            if trade_date and trade_date < _day1_cutoff:
                 continue  # Pre-Day-1 — skip
+            # If no trade_date found, still include (could be a recent trade after deploy)
 
             title = _get_title(ticker)
             # total_traded from Kalshi includes settlement payouts, not just cost
