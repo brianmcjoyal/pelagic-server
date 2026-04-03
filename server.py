@@ -7067,8 +7067,14 @@ def settled_positions():
 
             category = classify_market_category(title, ticker)
 
-            # Get settlement time from position data
-            settle_time = pos.get("settlement_time") or pos.get("last_updated") or ""
+            # Get settlement time - prefer trade journal (has market close_time), then position data
+            settle_time = ""
+            for _jcheck in _TRADE_JOURNAL:
+                if _jcheck.get("ticker") == ticker and _jcheck.get("settlement_time"):
+                    settle_time = _jcheck["settlement_time"]
+                    break
+            if not settle_time:
+                settle_time = pos.get("settlement_time") or pos.get("last_updated") or ""
 
             # Look up edge reasoning from trade journal
             _edge_reasons = []
