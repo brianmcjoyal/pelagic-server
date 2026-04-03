@@ -54,6 +54,7 @@ STOP_WORDS = {
 }
 
 TIMEOUT = 8
+API_SECRET = os.environ.get("TRADESHARK_API_SECRET", "")
 
 # ---------------------------------------------------------------------------
 # Bot version — tags every trade so we can separate old vs new performance
@@ -114,6 +115,15 @@ def _send_discord(msg, color=0x00dc5a):
     except Exception:
         pass
 
+def _require_auth():
+    """Check API secret for POST endpoints. Returns error response or None if OK."""
+    if not API_SECRET:
+        return None  # No secret configured — allow (dev mode)
+    token = request.headers.get("X-API-Secret") or request.args.get("api_secret") or ""
+    if token != API_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+    return None
+
 # Discord alert levels — only important events get pushed
 _DISCORD_TRIGGERS = {
     "MOONSHARK HIT": 0x00d4ff,    # cyan — new bet placed
@@ -168,6 +178,9 @@ def _save_state():
     and _rebuild_journal_from_kalshi() rebuild from the Kalshi API as source of truth.
     """
     try:
+        # Cap all_trades to prevent unbounded memory growth
+        if len(BOT_STATE["all_trades"]) > 1000:
+            BOT_STATE["all_trades"] = BOT_STATE["all_trades"][-500:]
         data = {
             "all_trades": BOT_STATE["all_trades"],
             "trades_today": BOT_STATE["trades_today"],
@@ -187,6 +200,10 @@ def _save_state():
             "moonshark_date": BOT_STATE.get("moonshark_date"),
             # Persist manual trades today
             "manual_trades_today": BOT_STATE.get("manual_trades_today", []),
+            # Persist CloseGame daily counters
+            "closegame_daily_spent": BOT_STATE.get("closegame_daily_spent", 0.0),
+            "closegame_trades_today": BOT_STATE.get("closegame_trades_today", []),
+            "closegame_date": BOT_STATE.get("closegame_date"),
             # Learning engine state
             "learning_state": _LEARNING_STATE,
             # Timestamp for date-check on load
@@ -408,11 +425,12 @@ def _hydrate_from_kalshi():
             BOT_STATE["snipe_date"] = today_str
         BOT_STATE["daily_spent_usd"] = round(today_spent, 2)
         # Also seed global event lock with today's events
-        for t in today_trades:
-            tk = t.get("ticker", "")
-            parts = tk.split("-")
-            if len(parts) >= 2:
-                _EVENTS_BET_TODAY.add("-".join(parts[:2]))
+        with _EVENT_LOCK:
+            for t in today_trades:
+                tk = t.get("ticker", "")
+                parts = tk.split("-")
+                if len(parts) >= 2:
+                    _EVENTS_BET_TODAY.add("-".join(parts[:2]))
         _save_state()
         print(f"[HYDRATE] Rebuilt {len(all_trades_rebuilt)} trades from Kalshi ({new_count} new), today: {today_count} trades (MS:{len(_ms_today)} SN:{len(_snipe_today)}), ${today_spent:.2f} spent, titles: {len(title_map)}")
     except Exception as e:
@@ -904,7 +922,7 @@ def fetch_kalshi():
                         if isinstance(v, str):
                             try:
                                 return max(0, int(round(float(v) * 100)))
-                            except:
+                            except (ValueError, TypeError):
                                 continue
                         elif isinstance(v, (int, float)):
                             return int(v) if v > 1 else int(round(v * 100))
@@ -1635,7 +1653,7 @@ def similarity(a, b, raw_a="", raw_b=""):
     ent_overlap = len(ents_a & ents_b) / max(1, min(len(ents_a), len(ents_b))) if (ents_a and ents_b) else (1.0 if not ents_a and not ents_b else 0.5)
     act_overlap = len(acts_a & acts_b) / max(1, min(len(acts_a), len(acts_b))) if (acts_a and acts_b) else (1.0 if not acts_a and not acts_b else 0.5)
     tf_compat = 1.0 if _timeframes_compatible(tf_a, tf_b) else 0.0
-    similarity._last_match_details = {
+    _similarity_local.last_match_details = {
         "seq_ratio": round(seq, 3),
         "kw_overlap": round(kw, 3),
         "entity_overlap": round(ent_overlap, 3),
@@ -1651,7 +1669,7 @@ def match_quality_score(sim_score, details=None):
     """Compute a 0-100 match quality score for an opportunity.
     Uses the similarity score plus sub-component details."""
     if details is None:
-        details = getattr(similarity, '_last_match_details', {})
+        details = getattr(_similarity_local, 'last_match_details', {})
     if not details:
         return int(min(100, sim_score * 100))
 
@@ -1725,7 +1743,7 @@ def find_opportunities(all_markets, min_similarity=0.85, max_cost=0.98):
         if sim < min_similarity:
             continue
         # Capture match quality details before they get overwritten
-        details = getattr(similarity, '_last_match_details', {}).copy()
+        details = getattr(_similarity_local, 'last_match_details', {}).copy()
         quality = match_quality_score(sim, details)
         seen.add(pair_key)
 
@@ -1825,7 +1843,7 @@ def find_consensus_mispricings(all_markets):
             if sim >= 0.75:
                 if om["yes"] < 0.03 or om["yes"] > 0.97:
                     continue
-                details = getattr(similarity, '_last_match_details', {}).copy()
+                details = getattr(_similarity_local, 'last_match_details', {}).copy()
                 quality = match_quality_score(sim, details)
                 matches.append({"platform": om["platform"], "yes": om["yes"], "similarity": round(sim, 3), "match_quality": quality})
 
@@ -2349,6 +2367,21 @@ def run_bot_scan():
         BOT_STATE["trades_today"] = []
         BOT_STATE["daily_spent_usd"] = 0.0
         BOT_STATE["manual_trades_today"] = []
+        # Reset per-strategy counters atomically with main reset
+        BOT_STATE["snipe_trades_today"] = []
+        BOT_STATE["snipe_daily_spent"] = 0.0
+        BOT_STATE["snipe_date"] = today
+        BOT_STATE["moonshark_trades_today"] = []
+        BOT_STATE["moonshark_daily_spent"] = 0.0
+        BOT_STATE["moonshark_date"] = today
+        BOT_STATE["closegame_trades_today"] = []
+        BOT_STATE["closegame_daily_spent"] = 0.0
+        BOT_STATE["closegame_date"] = today
+        # Clean up stale tracking data to prevent memory leaks
+        _game_score_tracker.clear()
+        _price_averages.clear()
+        _volatility_scores.clear()
+        _price_history.clear()
         _log_activity("Daily reset — new trading day started")
         # Send daily summary to Discord
         try:
@@ -2587,6 +2620,7 @@ BOT_STATE["moonshark_date"] = None
 import threading as _threading
 _EVENT_LOCK = _threading.Lock()
 _EVENTS_BET_TODAY = set()  # shared across all strategies
+_similarity_local = _threading.local()
 _EVENTS_BET_DATE = None
 
 def _check_and_claim_event(event_key):
@@ -8623,7 +8657,7 @@ def status():
         "last_scan_markets": markets,
         "last_scan_mispriced": mispriced,
         "trades_today": _count_trades_today(),
-        "daily_spent_usd": BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0) + BOT_STATE.get("closegame_daily_spent", 0),
+        "daily_spent_usd": BOT_STATE.get("daily_spent_usd", 0) + BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0) + BOT_STATE.get("closegame_daily_spent", 0),
         "total_trades_all_time": len(BOT_STATE["all_trades"]),
         "recent_errors": BOT_STATE["errors"][-5:],
         "scheduler_running": scheduler.running,
@@ -9129,11 +9163,20 @@ def _extract_teams_from_title(title):
     if m:
         return [m.group(1).strip().lower(), m.group(2).strip().lower()]
     # Try to find any known team name in the title
+    # Use longest-match-first to avoid "miami" matching when "miami heat" is in title
     title_lower = title.lower()
     found = []
-    for team_name in _TEAM_ALIASES:
-        if team_name in title_lower:
-            found.append(team_name)
+    sorted_teams = sorted(_TEAM_ALIASES.keys(), key=len, reverse=True)
+    for team_name in sorted_teams:
+        if team_name in title_lower and team_name not in found:
+            # Avoid substring collisions (e.g. "miami" inside "miami heat")
+            already_covered = False
+            for existing in found:
+                if team_name in existing or existing in team_name:
+                    already_covered = True
+                    break
+            if not already_covered:
+                found.append(team_name)
     return found[:2]
 
 
@@ -9489,12 +9532,24 @@ def _check_arbitrage():
             # Buy both sides
             # Budget check — arb trades must respect daily limits
             daily_spent = BOT_STATE.get("daily_spent_usd", 0)
-            daily_max = BOT_CONFIG.get("max_daily_spend_usd", 150)
+            daily_max = BOT_CONFIG.get("max_daily_usd", 150)
             remaining_budget = max(0, daily_max - daily_spent)
             max_contracts = min(50, int(BOT_CONFIG.get("max_bet_usd", 5) * 100 / total))
             arb_cost = (total * max_contracts) / 100.0
             if arb_cost > remaining_budget:
                 max_contracts = int(remaining_budget * 100 / total)
+            # Balance floor check
+            try:
+                _arb_bal_h = signed_headers("GET", "/portfolio/balance")
+                _arb_bal_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
+                                          headers=_arb_bal_h, timeout=TIMEOUT)
+                if _arb_bal_r.ok:
+                    _arb_balance = _arb_bal_r.json().get("balance", 0) / 100
+                    if _arb_balance < BOT_CONFIG.get("min_balance_usd", 250):
+                        _log_activity(f"ARB: Skipping — balance ${_arb_balance:.2f} below safety floor", "warning")
+                        continue
+            except Exception:
+                continue  # Can't check balance — skip (fail closed)
             if max_contracts > 0:
                 try:
                     # Place YES side first with immediate_or_cancel to avoid partial exposure
@@ -9621,7 +9676,7 @@ def _blowout_exit():
         score_str = _format_score_string(game)
         sell_side = "no" if side == "yes" else "yes"
         # Sell at market (1c) to guarantee exit
-        sell_price = max(1, current_price - 1)
+        sell_price = 1  # sell at 1c to guarantee fill — these are hopeless blowout positions
 
         _log_activity(
             f"💀 BLOWOUT EXIT: Selling {ticker} — down {deficit} in {period} | {score_str} | salvaging {count} contracts @ ~{current_price}c",
@@ -10011,6 +10066,11 @@ def _track_line(ticker, price_cents):
     _line_history[ticker].append((now, price_cents))
     # Keep last 30 minutes of data
     _line_history[ticker] = [(t, p) for t, p in _line_history[ticker] if now - t < 1800]
+    # Prune stale tickers (no updates in 2 hours)
+    if len(_line_history) > 500:
+        stale = [k for k, v in _line_history.items() if v and now - v[-1][0] > 7200]
+        for k in stale:
+            del _line_history[k]
 
 def _get_line_movement(ticker, price_cents):
     """Get line movement info for a ticker. Returns (direction, drop_cents, trend)."""
@@ -10293,6 +10353,9 @@ def trade_journal():
 @app.route("/quick-bet", methods=["POST"])
 def quick_bet():
     """One-click bet from the 75%'ers tab."""
+    auth_err = _require_auth()
+    if auth_err:
+        return auth_err
     body = request.get_json(force=True)
     ticker = body.get("ticker", "")
     side = body.get("side", "")
@@ -10766,6 +10829,9 @@ def moonshark_opportunities():
 @app.route("/moonshark/toggle", methods=["POST"])
 def moonshark_toggle():
     """Toggle MoonShark enabled/disabled."""
+    auth_err = _require_auth()
+    if auth_err:
+        return auth_err
     current = BOT_CONFIG.get("moonshark_enabled", True)
     BOT_CONFIG["moonshark_enabled"] = not current
     _save_state()
@@ -10970,6 +11036,9 @@ def moonshots():
 @app.route("/moonshot-bet", methods=["POST"])
 def moonshot_bet():
     """Place a moonshot bet from the fund."""
+    auth_err = _require_auth()
+    if auth_err:
+        return auth_err
     body = request.get_json(force=True)
     ticker = body.get("ticker", "")
     side = body.get("side", "")
@@ -10986,6 +11055,18 @@ def moonshot_bet():
         return jsonify({"error": f"Moonshot fund only has ${fund:.2f}"}), 400
     if bet_usd > 50:
         return jsonify({"error": "Max moonshot bet is $50"}), 400
+
+    # Balance floor check
+    try:
+        bal_h = signed_headers("GET", "/portfolio/balance")
+        bal_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
+                             headers=bal_h, timeout=TIMEOUT)
+        if bal_r.ok:
+            real_bal = bal_r.json().get("balance", 0) / 100
+            if real_bal < BOT_CONFIG.get("min_balance_usd", 250):
+                return jsonify({"error": f"Balance ${real_bal:.2f} below safety floor"}), 400
+    except Exception as e:
+        return jsonify({"error": f"Balance check failed: {e}"}), 500
 
     count = max(1, int(bet_usd * 100 / max(1, price_cents)))
     try:
@@ -11032,6 +11113,9 @@ def moonshot_bet():
 @app.route("/moonshot-fund", methods=["POST"])
 def moonshot_fund_add():
     """Manually add to the moonshot fund."""
+    auth_err = _require_auth()
+    if auth_err:
+        return auth_err
     body = request.get_json(force=True)
     amount = body.get("amount", 0)
     if amount > 0:
@@ -11237,6 +11321,9 @@ def quant_picks():
 @app.route("/quant-bet", methods=["POST"])
 def quant_bet():
     """Place a quant trade from the Quant tab."""
+    auth_err = _require_auth()
+    if auth_err:
+        return auth_err
     body = request.get_json(force=True) or {}
     ticker = body.get("ticker", "")
     side = body.get("side", "yes")
@@ -11386,7 +11473,7 @@ def _generate_picks():
             if sim >= 0.75:
                 if om["yes"] < 0.03 or om["yes"] > 0.97:
                     continue
-                details = getattr(similarity, '_last_match_details', {}).copy()
+                details = getattr(_similarity_local, 'last_match_details', {}).copy()
                 quality = match_quality_score(sim, details)
                 matches.append({
                     "platform": om["platform"], "yes": om["yes"], "no": om["no"],
@@ -11587,7 +11674,7 @@ def _generate_picks():
             if sim >= 0.75:
                 if om["yes"] < 0.03 or om["yes"] > 0.97:
                     continue
-                details = getattr(similarity, '_last_match_details', {}).copy()
+                details = getattr(_similarity_local, 'last_match_details', {}).copy()
                 quality = match_quality_score(sim, details)
                 xplat_matches.append({
                     "platform": om["platform"], "yes": om["yes"],
@@ -11962,6 +12049,9 @@ def today_picks():
 @app.route("/scan", methods=["POST"])
 def manual_scan():
     """Trigger an immediate bot scan + quant strategy run."""
+    auth_err = _require_auth()
+    if auth_err:
+        return auth_err
     import threading
     def _do_scan():
         try:
@@ -11980,6 +12070,9 @@ def manual_scan():
 
 @app.route("/config", methods=["POST"])
 def config():
+    auth_err = _require_auth()
+    if auth_err:
+        return auth_err
     data = request.get_json(force=True)
     allowed = {"enabled", "max_bet_usd", "max_daily_usd", "min_balance_usd", "min_deviation",
                 "min_platforms", "min_volume", "min_cash_reserve_pct", "max_open_positions",
@@ -11994,14 +12087,35 @@ def config():
 
 @app.route("/execute-trade", methods=["POST"])
 def execute_trade():
+    auth_err = _require_auth()
+    if auth_err:
+        return auth_err
     data = request.get_json(force=True)
     ticker = data.get("ticker")
     side = data.get("side")
     price_cents = data.get("price_cents")
     if not all([ticker, side, price_cents]):
         return jsonify({"error": "Missing ticker, side, or price_cents"}), 400
+    # Safety checks — balance floor + daily limit
+    try:
+        bal_h = signed_headers("GET", "/portfolio/balance")
+        bal_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
+                             headers=bal_h, timeout=TIMEOUT)
+        if bal_r.ok:
+            balance = bal_r.json().get("balance", 0) / 100
+            if balance < BOT_CONFIG.get("min_balance_usd", 250):
+                return jsonify({"error": f"Balance ${balance:.2f} below safety floor"}), 400
+        else:
+            return jsonify({"error": "Balance check failed — cannot trade"}), 500
+    except Exception as e:
+        return jsonify({"error": f"Balance check error: {e}"}), 500
     pc = int(price_cents)
     count = max(1, 500 // pc) if pc > 0 else 1  # target $5 per trade
+    cost_usd = (pc * count) / 100.0
+    daily_spent = BOT_STATE.get("daily_spent_usd", 0)
+    daily_max = BOT_CONFIG.get("max_daily_usd", 150)
+    if daily_spent + cost_usd > daily_max:
+        return jsonify({"error": f"Would exceed daily limit (${daily_spent:.2f} + ${cost_usd:.2f} > ${daily_max:.2f})"}), 400
     result = place_kalshi_order(ticker, side, pc, count=count)
     trade_record = {
         "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -12030,6 +12144,9 @@ def execute_trade():
 @app.route("/sell-position", methods=["POST"])
 def sell_position():
     """Sell an open position."""
+    auth_err = _require_auth()
+    if auth_err:
+        return auth_err
     data = request.get_json(force=True)
     ticker = data.get("ticker")
     side = data.get("side")
@@ -12056,6 +12173,9 @@ def sell_position():
 @app.route("/sell-all-losers", methods=["POST"])
 def sell_all_losers():
     """Sell all positions that are currently underwater."""
+    auth_err = _require_auth()
+    if auth_err:
+        return auth_err
     positions = check_position_prices()
     sold = []
     skipped = []
