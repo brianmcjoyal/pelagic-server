@@ -6916,10 +6916,11 @@ def settled_positions():
                 continue  # Pre-Day-1 — skip
 
             title = _get_title(ticker)
+            # total_traded from Kalshi includes settlement payouts, not just cost
+            # We'll compute actual cost from entry_price * count after side detection
             traded_cents = _parse_kalshi_dollars(pos.get("total_traded_dollars") or pos.get("total_traded"))
 
             total_pnl += pnl
-            total_wagered += traded_cents / 100
 
             if pnl > 0.005:
                 wins += 1
@@ -6943,31 +6944,55 @@ def settled_positions():
                 breakeven += 1
                 won = None
 
-            # Derive side from position data, fall back to trade history
-            _, pos_side = _parse_kalshi_position(pos)
-            side = pos_side if pos_side else ""
+            # Derive side: for settled positions, position_fp is 0 so
+            # _parse_kalshi_position defaults to "yes". Instead, determine side
+            # from which average price is non-zero, or fall back to trade history.
+            side = ""
             count = 0
             try:
                 count = int(float(str(pos.get("total_count_fp") or pos.get("total_count") or 0)))
             except Exception:
                 pass
-            # If side is empty or defaulted, check trade history
+            # Check which side has a non-zero average price
+            _avg_yes = float(str(pos.get("average_yes_price_dollars") or pos.get("average_yes_price") or 0))
+            _avg_no = float(str(pos.get("average_no_price_dollars") or pos.get("average_no_price") or 0))
+            if _avg_yes > 0 and _avg_no > 0:
+                # Both have prices — use trade history to determine which side we bought
+                pass
+            elif _avg_yes > 0:
+                side = "yes"
+            elif _avg_no > 0:
+                side = "no"
+            # Fall back to trade history for side and strategy
             trade_strategy = "unknown"
+            _trade_date_from_history = ""
             for t in BOT_STATE.get("all_trades", []):
                 if t.get("ticker") == ticker:
-                    if not side or (side == "yes" and not pos.get("position_fp") and not pos.get("position")):
+                    if not side:
                         side = t.get("side") or side
                     trade_strategy = t.get("strategy") or "unknown"
+                    _td = (t.get("timestamp") or "")[:10]
+                    if _td and (not _trade_date_from_history or _td < _trade_date_from_history):
+                        _trade_date_from_history = _td
                     break
+            if not side:
+                side = "yes"  # last resort default
+            # Use trade history date if the lookup table date seems wrong
+            if _trade_date_from_history and _trade_date_from_history != trade_date:
+                trade_date = _trade_date_from_history
 
             entry_cents = 0
             try:
                 if side == "yes":
-                    entry_cents = int(round(float(str(pos.get("average_yes_price_dollars") or pos.get("average_yes_price") or 0)) * 100))
+                    entry_cents = int(round(_avg_yes * 100))
                 else:
-                    entry_cents = int(round(float(str(pos.get("average_no_price_dollars") or pos.get("average_no_price") or 0)) * 100))
+                    entry_cents = int(round(_avg_no * 100))
             except Exception:
                 pass
+
+            # Calculate actual cost wagered (entry_price * count)
+            actual_cost = (entry_cents * count) / 100 if entry_cents > 0 and count > 0 else traded_cents / 100
+            total_wagered += actual_cost
 
             category = classify_market_category(title, ticker)
 
@@ -6979,7 +7004,7 @@ def settled_positions():
                 "title": title,
                 "pnl_usd": round(pnl, 2),
                 "won": won,
-                "total_traded": round(traded_cents / 100, 2),
+                "total_traded": round(actual_cost, 2),
                 "category": category,
                 "strategy": trade_strategy,
                 "side": side,
