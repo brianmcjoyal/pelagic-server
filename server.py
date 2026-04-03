@@ -6344,6 +6344,9 @@ def _background_loop():
                         _bal2_data = _br2.json()
                         _bal2 = _bal2_data.get("balance", 0) / 100
                         _kalshi_portfolio2 = _bal2_data.get("portfolio_balance", 0) / 100
+                        # Log ALL fields so we can match Kalshi's UI exactly
+                        print(f"[PORTFOLIO] Kalshi balance API fields: {list(_bal2_data.keys())}")
+                        print(f"[PORTFOLIO] Kalshi API: cash=${_bal2:.2f} portfolio_balance=${_kalshi_portfolio2:.2f}")
                 except Exception:
                     if _PORTFOLIO_CACHE["data"]:
                         _bal2 = _PORTFOLIO_CACHE["data"].get("balance_usd", 0)
@@ -6844,8 +6847,10 @@ def settled_positions():
     """Get settled positions from Kalshi realized P&L. Cached for 2 min."""
     import time as _t
     now = _t.time()
+    # Only serve cache if it has actual settled data (don't cache empty results)
     if _SETTLED_CACHE["data"] and (now - _SETTLED_CACHE["ts"]) < _SETTLED_CACHE_TTL:
-        return jsonify(_SETTLED_CACHE["data"])
+        if _SETTLED_CACHE["data"].get("settled") or _SETTLED_CACHE["data"].get("wins", 0) + _SETTLED_CACHE["data"].get("losses", 0) > 0:
+            return jsonify(_SETTLED_CACHE["data"])
     path = "/portfolio/positions"
     headers = signed_headers("GET", path)
     if not headers:
@@ -6900,6 +6905,37 @@ def settled_positions():
             _ts = (_jt.get("trade_date") or (_jt.get("timestamp", "") or "")[:10] or "")
             if _tk and _ts and _tk not in _trade_dates:
                 _trade_dates[_tk] = _ts
+        # If trade history is empty (post-deploy before hydration), fetch fills from Kalshi
+        # so we can still show settled positions
+        if not _trade_dates:
+            try:
+                _fills_h = signed_headers("GET", "/portfolio/fills")
+                _fills_cursor = None
+                for _ in range(5):
+                    _fp = {"limit": 200}
+                    if _fills_cursor:
+                        _fp["cursor"] = _fills_cursor
+                    _fills_r = requests.get(
+                        KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/fills",
+                        headers=_fills_h, params=_fp, timeout=15,
+                    )
+                    if _fills_r.ok:
+                        _fills_data = _fills_r.json()
+                        for _f in _fills_data.get("fills", []):
+                            _fk = _f.get("ticker", "")
+                            _ft = (_f.get("created_time", "") or "")[:10]
+                            _fa = _f.get("action", "buy")
+                            if _fk and _ft and _fa != "sell":
+                                if _fk not in _trade_dates or _ft < _trade_dates[_fk]:
+                                    _trade_dates[_fk] = _ft
+                        _fills_cursor = _fills_data.get("cursor")
+                        if not _fills_cursor:
+                            break
+                    else:
+                        break
+                print(f"[SETTLED] Hydrated {len(_trade_dates)} trade dates from fills API (post-deploy)")
+            except Exception as _fe:
+                print(f"[SETTLED] Fills fetch error: {_fe}")
 
         # Cache market titles — pre-populate from trade journal to avoid API calls
         _title_cache = {}
