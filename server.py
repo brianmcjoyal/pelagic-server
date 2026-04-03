@@ -7041,8 +7041,9 @@ def settled_positions():
                 "settle_time": settle_time,
             })
 
-        # Sort by settlement time descending (newest settled first), fall back to trade date
-        settled.sort(key=lambda s: s.get("settle_time") or s.get("trade_date") or "", reverse=True)
+        # Sort by trade_date descending (newest first), then settle_time as tiebreaker
+        # trade_date reflects when we BOUGHT, which is what users see in the UI
+        settled.sort(key=lambda s: (s.get("trade_date") or "", s.get("settle_time") or ""), reverse=True)
 
         total_bets = wins + losses + breakeven
         roi = round(total_pnl / max(0.01, total_wagered) * 100, 1) if total_wagered > 0 else 0
@@ -14275,11 +14276,14 @@ async function loadPositions() {
       if (settled.length === 0) {
         document.getElementById('pos-table-closed').innerHTML = '<div style="color:#555;font-size:9px;padding:8px;text-align:center">No settled positions yet</div>';
       } else {
-        // Sort newest first: parse dates properly to handle mixed formats
+        // Sort newest first by trade_date (when we bought), then settle_time as tiebreaker
         settled.sort(function(a, b) {
-          var aTime = new Date(a.settle_time || a.trade_date || '2000-01-01').getTime();
-          var bTime = new Date(b.settle_time || b.trade_date || '2000-01-01').getTime();
-          return bTime - aTime;
+          var aDate = a.trade_date || '2000-01-01';
+          var bDate = b.trade_date || '2000-01-01';
+          if (aDate !== bDate) return bDate > aDate ? 1 : -1;
+          var aTime = a.settle_time || '';
+          var bTime = b.settle_time || '';
+          return bTime > aTime ? 1 : (bTime < aTime ? -1 : 0);
         });
         var ch = '<table style="font-size:10px"><tr><th>Settled</th><th>Market</th><th>Side</th><th>Result</th><th>P&L</th></tr>';
         settled.forEach(function(s) {
