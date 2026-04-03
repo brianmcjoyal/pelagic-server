@@ -6922,33 +6922,22 @@ def settled_positions():
             if _tk and _ts and _tk not in _trade_dates:
                 _trade_dates[_tk] = _ts
         # If trade history is empty (post-deploy before hydration), fetch fills from Kalshi
-        # so we can still show settled positions
+        # so we can still show settled positions. Limit to 1 fast page to avoid blocking startup.
         if not _trade_dates:
             try:
                 _fills_h = signed_headers("GET", "/portfolio/fills")
-                _fills_cursor = None
-                for _ in range(5):
-                    _fp = {"limit": 200}
-                    if _fills_cursor:
-                        _fp["cursor"] = _fills_cursor
-                    _fills_r = requests.get(
-                        KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/fills",
-                        headers=_fills_h, params=_fp, timeout=15,
-                    )
-                    if _fills_r.ok:
-                        _fills_data = _fills_r.json()
-                        for _f in _fills_data.get("fills", []):
-                            _fk = _f.get("ticker", "")
-                            _ft = (_f.get("created_time", "") or "")[:10]
-                            _fa = _f.get("action", "buy")
-                            if _fk and _ft and _fa != "sell":
-                                if _fk not in _trade_dates or _ft < _trade_dates[_fk]:
-                                    _trade_dates[_fk] = _ft
-                        _fills_cursor = _fills_data.get("cursor")
-                        if not _fills_cursor:
-                            break
-                    else:
-                        break
+                _fills_r = requests.get(
+                    KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/fills",
+                    headers=_fills_h, params={"limit": 200}, timeout=10,
+                )
+                if _fills_r.ok:
+                    for _f in _fills_r.json().get("fills", []):
+                        _fk = _f.get("ticker", "")
+                        _ft = (_f.get("created_time", "") or "")[:10]
+                        _fa = _f.get("action", "buy")
+                        if _fk and _ft and _fa != "sell":
+                            if _fk not in _trade_dates or _ft < _trade_dates[_fk]:
+                                _trade_dates[_fk] = _ft
                 print(f"[SETTLED] Hydrated {len(_trade_dates)} trade dates from fills API (post-deploy)")
             except Exception as _fe:
                 print(f"[SETTLED] Fills fetch error: {_fe}")
