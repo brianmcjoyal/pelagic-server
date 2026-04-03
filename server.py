@@ -12922,6 +12922,11 @@ function switchTab(name) {
 
 const API = window.location.origin;
 
+// Safe DOM helpers — prevent null reference crashes when elements are missing
+function _el(id) { return document.getElementById(id); }
+function _setText(id, val) { var e = document.getElementById(id); if (e) e.textContent = val; }
+function _setHTML(id, val) { var e = document.getElementById(id); if (e) e.innerHTML = val; }
+
 // Sports classification is now done server-side via is_sports field
 function isSports(pick) {
   return !!pick.is_sports;
@@ -13069,17 +13074,17 @@ async function loadStatus() {
       fetch(API + '/balance').then(r => r.json()),
     ]);
     window._currentBalance = bal.balance_usd || 0;
-    document.getElementById('balance').textContent = '$' + (bal.balance_usd || 0).toFixed(2);
-    document.getElementById('markets-scanned').textContent = status.last_scan_markets || 0;
-    document.getElementById('mispriced-count').textContent = status.last_scan_mispriced || 0;
+    _setText('balance', '$' + (bal.balance_usd || 0).toFixed(2));
+    _setText('markets-scanned', status.last_scan_markets || 0);
+    _setText('mispriced-count', status.last_scan_mispriced || 0);
     // Use trades-today endpoint count (consolidated, matches "Bets Placed Today" badge)
     try {
       var ttData = await fetch(API + '/trades-today').then(function(r){ return r.json(); });
-      document.getElementById('trades-today').textContent = (ttData.trades || []).length;
+      _setText('trades-today', (ttData.trades || []).length);
     } catch(e) {
-      document.getElementById('trades-today').textContent = status.trades_today || 0;
+      _setText('trades-today', status.trades_today || 0);
     }
-    document.getElementById('daily-spent').textContent = '$' + (status.daily_spent_usd || 0).toFixed(2);
+    _setText('daily-spent', '$' + (status.daily_spent_usd || 0).toFixed(2));
     // Update toggle switch
     var tog = document.getElementById('auto-trade-toggle');
     var togLabel = document.getElementById('toggle-label');
@@ -13102,7 +13107,8 @@ async function toggleBot() {
 }
 
 async function triggerScan() {
-  var btn = document.getElementById('scan-btn');
+  var btn = _el('scan-btn');
+  if (!btn) return;
   btn.disabled = true;
   btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="animation:spin 1s linear infinite"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Scanning...';
   btn.style.borderColor = '#555';
@@ -13155,16 +13161,18 @@ async function loadPortfolio() {
 
     // Big portfolio value at top — flash green/red on change
     var pfVal = data.portfolio_value_usd || 0;
-    var pfValEl = document.getElementById('pf-value');
-    var prevVal = parseFloat(pfValEl.getAttribute('data-prev') || '0');
-    pfValEl.textContent = '$' + pfVal.toFixed(2);
-    pfValEl.style.color = '#fff';
-    if (prevVal > 0 && Math.abs(pfVal - prevVal) > 0.01) {
-      pfValEl.classList.remove('pl-flash-green', 'pl-flash-red');
-      void pfValEl.offsetWidth; // force reflow
-      pfValEl.classList.add(pfVal > prevVal ? 'pl-flash-green' : 'pl-flash-red');
+    var pfValEl = _el('pf-value');
+    if (pfValEl) {
+      var prevVal = parseFloat(pfValEl.getAttribute('data-prev') || '0');
+      pfValEl.textContent = '$' + pfVal.toFixed(2);
+      pfValEl.style.color = '#fff';
+      if (prevVal > 0 && Math.abs(pfVal - prevVal) > 0.01) {
+        pfValEl.classList.remove('pl-flash-green', 'pl-flash-red');
+        void pfValEl.offsetWidth; // force reflow
+        pfValEl.classList.add(pfVal > prevVal ? 'pl-flash-green' : 'pl-flash-red');
+      }
+      pfValEl.setAttribute('data-prev', pfVal.toFixed(2));
     }
-    pfValEl.setAttribute('data-prev', pfVal.toFixed(2));
 
     // Update progress bar to $1M — pfVal already includes cash + invested
     var totalVal = pfVal;
@@ -13203,8 +13211,8 @@ async function loadPortfolio() {
     // Quick stats
     var totalEl = document.getElementById('pf-total');
     if (totalEl) totalEl.textContent = '$' + pfVal.toFixed(2);
-    document.getElementById('pf-cash').textContent = '$' + (data.balance_usd || 0).toFixed(2);
-    document.getElementById('pf-invested').textContent = '$' + Math.max(0, investedVal).toFixed(2);
+    _setText('pf-cash', '$' + (data.balance_usd || 0).toFixed(2));
+    _setText('pf-invested', '$' + Math.max(0, investedVal).toFixed(2));
 
     // Daily P&L (today's settled + current unrealized)
     var dailyPl = (data.daily_pnl_usd !== undefined) ? data.daily_pnl_usd : (data.total_unrealized_usd || 0);
@@ -13590,9 +13598,9 @@ async function loadAllBets() {
   try {
     const data = await fetch(API + '/trades').then(r => r.json());
     const trades = data.trades || [];
-    document.getElementById('all-bets-count').textContent = trades.length;
+    _setText('all-bets-count', trades.length);
     if (trades.length === 0) {
-      document.getElementById('all-bets-table').innerHTML = '<div class="empty">No bets yet</div>';
+      _setHTML('all-bets-table', '<div class="empty">No bets yet</div>');
       return;
     }
     let html = '<table><tr><th>Date</th><th>Market</th><th>Side</th><th>Qty</th><th>Entry</th><th>Cost</th><th>Result</th><th>Source</th></tr>';
@@ -13637,21 +13645,21 @@ async function loadAllBets() {
       html += '</tr>';
     });
     html += '</table>';
-    document.getElementById('all-bets-table').innerHTML = html;
+    _setHTML('all-bets-table', html);
   } catch(e) {
-    document.getElementById('all-bets-table').innerHTML = '<div class="empty">Error loading bets</div>';
+    _setHTML('all-bets-table', '<div class="empty">Error loading bets</div>');
   }
 }
 
 let _mispricedFirstLoad = true;
 async function loadMispriced() {
-  if (_mispricedFirstLoad) document.getElementById('opp-table').innerHTML = '<div class="loading">Scanning markets...</div>';
+  if (_mispricedFirstLoad) _setHTML('opp-table', '<div class="loading">Scanning markets...</div>');
   try {
     const data = await fetch(API + '/mispriced').then(r => r.json());
     _mispricedFirstLoad = false;
-    document.getElementById('opp-badge').textContent = data.mispriced_count;
+    _setText('opp-badge', data.mispriced_count);
     if (!data.mispricings || data.mispricings.length === 0) {
-      document.getElementById('opp-table').innerHTML = '<div class="empty">No mispriced markets found right now. The bot scans every 10 minutes.</div>';
+      _setHTML('opp-table', '<div class="empty">No mispriced markets found right now. The bot scans every 10 minutes.</div>');
       return;
     }
     let html = '<table><tr><th>Market</th><th>Signal</th><th>Kalshi</th><th>Consensus</th><th>Deviation</th><th>Confidence</th><th>Platforms</th><th>Action</th></tr>';
@@ -13677,9 +13685,9 @@ async function loadMispriced() {
       html += '</tr>';
     });
     html += '</table>';
-    document.getElementById('opp-table').innerHTML = html;
+    _setHTML('opp-table', html);
   } catch(e) {
-    document.getElementById('opp-table').innerHTML = '<div class="empty">Error loading: ' + e.message + '</div>';
+    _setHTML('opp-table', '<div class="empty">Error loading: ' + e.message + '</div>');
   }
 }
 
@@ -14020,7 +14028,7 @@ async function loadTopPicks() {
     }
 
     // Also update hidden elements for backward compat
-    document.getElementById('hero-badge').textContent = top10.length;
+    _setText('hero-badge', top10.length);
   } catch(e) {
     if (gsGrid) gsGrid.innerHTML = '<div class="empty" style="grid-column:1/-1">Analysis error: ' + e.message + '</div>';
   }
@@ -14270,8 +14278,8 @@ async function loadTodayPicks() {
     renderTodayTable(sports, 'today-table-sports', 'today-badge-sports');
     renderTodayTable(nonSports, 'today-table-nonsports', 'today-badge-nonsports');
   } catch(e) {
-    document.getElementById('today-table-sports').innerHTML = '<div class="empty">Error: ' + e.message + '</div>';
-    document.getElementById('today-table-nonsports').innerHTML = '<div class="empty">Error: ' + e.message + '</div>';
+    _setHTML('today-table-sports', '<div class="empty">Error: ' + e.message + '</div>');
+    _setHTML('today-table-nonsports', '<div class="empty">Error: ' + e.message + '</div>');
   }
 }
 
@@ -14342,7 +14350,7 @@ async function loadPositions() {
       });
     }
     var hiddenCount = allPositions.length - positions.length;
-    document.getElementById('pos-badge').textContent = positions.length;
+    _setText('pos-badge', positions.length);
 
     // Build open positions table
     function buildPosRows(arr) {
@@ -14387,9 +14395,9 @@ async function loadPositions() {
     // Calculate open P&L
     var openPnl = positions.reduce(function(s, p) { return s + (p.unrealized_pnl_cents || 0); }, 0);
     var openPnlColor = openPnl >= 0 ? '#00dc5a' : '#ff5000';
-    document.getElementById('pos-open-count').textContent = '(' + positions.length + ')';
-    document.getElementById('pos-open-pnl').innerHTML = '<span style="color:' + openPnlColor + '">' + (openPnl >= 0 ? '+' : '') + '$' + (Math.abs(openPnl) / 100).toFixed(2) + '</span>';
-    document.getElementById('pos-table-open').innerHTML = buildPosRows(positions);
+    _setText('pos-open-count', '(' + positions.length + ')');
+    _setHTML('pos-open-pnl', '<span style="color:' + openPnlColor + '">' + (openPnl >= 0 ? '+' : '') + '$' + (Math.abs(openPnl) / 100).toFixed(2) + '</span>');
+    _setHTML('pos-table-open', buildPosRows(positions));
     if (hiddenCount > 0) {
       document.getElementById('pos-table-open').innerHTML += '<div style="font-size:8px;color:#555;margin-top:4px">' + hiddenCount + ' old bot positions hidden</div>';
     }
@@ -14400,10 +14408,10 @@ async function loadPositions() {
       var settled = settledData.settled || [];
       var closedPnl = settled.reduce(function(s, p) { return s + (p.pnl_usd || 0); }, 0);
       var closedPnlColor = closedPnl >= 0 ? '#00dc5a' : '#ff5000';
-      document.getElementById('pos-closed-count').textContent = '(' + settled.length + ')';
-      document.getElementById('pos-closed-pnl').innerHTML = '<span style="color:' + closedPnlColor + '">' + (closedPnl >= 0 ? '+' : '') + '$' + Math.abs(closedPnl).toFixed(2) + '</span>';
+      _setText('pos-closed-count', '(' + settled.length + ')');
+      _setHTML('pos-closed-pnl', '<span style="color:' + closedPnlColor + '">' + (closedPnl >= 0 ? '+' : '') + '$' + Math.abs(closedPnl).toFixed(2) + '</span>');
       if (settled.length === 0) {
-        document.getElementById('pos-table-closed').innerHTML = '<div style="color:#555;font-size:9px;padding:8px;text-align:center">No settled positions yet</div>';
+        _setHTML('pos-table-closed', '<div style="color:#555);font-size:9px;padding:8px;text-align:center">No settled positions yet</div>';
       } else {
         // Sort newest first by trade_date (when we bought), then settle_time as tiebreaker
         settled.sort(function(a, b) {
@@ -14437,13 +14445,13 @@ async function loadPositions() {
           ch += '</tr>';
         });
         ch += '</table>';
-        document.getElementById('pos-table-closed').innerHTML = ch;
+        _setHTML('pos-table-closed', ch);
       }
     } catch(e) {
-      document.getElementById('pos-table-closed').innerHTML = '<div style="color:#555;font-size:9px">Error loading settled</div>';
+      _setHTML('pos-table-closed', '<div style="color:#555);font-size:9px">Error loading settled</div>';
     }
   } catch(e) {
-    document.getElementById('pos-table').innerHTML = '<div class="empty">Error: ' + e.message + '</div>';
+    _setHTML('pos-table', '<div class="empty">Error: ' + e.message + '</div>');
   }
 }
 
@@ -15202,7 +15210,7 @@ async function loadSeventyFivers() {
     profEl.style.color = pf >= 0 ? '#00dc5a' : '#ff5000';
 
     // Filter
-    var liveOnly = document.getElementById('sf-live-only').checked;
+    var _sfEl = _el('sf-live-only'); var liveOnly = _sfEl ? _sfEl.checked : false;
     var picks = (data.picks || []).filter(function(p) { return liveOnly ? p.is_live : true; });
 
     var cardsEl = document.getElementById('sf-cards');
@@ -15261,7 +15269,7 @@ async function loadSeventyFivers() {
     cardsEl.innerHTML = html;
   } catch(e) {
     console.error('75%ers error', e);
-    document.getElementById('sf-cards').innerHTML = '<div style="color:#ff5000;text-align:center;padding:40px;grid-column:1/-1">Error loading picks</div>';
+    _setHTML('sf-cards', '<div style="color:#ff5000);text-align:center;padding:40px;grid-column:1/-1">Error loading picks</div>';
   }
 }
 
@@ -15411,7 +15419,7 @@ async function loadQuantPicks() {
     }
   } catch(e) {
     console.error('Quant error', e);
-    document.getElementById('quant-cards').innerHTML = '<div style="color:#ff5000;text-align:center;padding:40px;grid-column:1/-1">Error loading quant picks</div>';
+    _setHTML('quant-cards', '<div style="color:#ff5000);text-align:center;padding:40px;grid-column:1/-1">Error loading quant picks</div>';
   }
 }
 
@@ -15495,7 +15503,7 @@ function drawWheel(opps, highlightIdx) {
 }
 
 function skipWheelPick() {
-  document.getElementById('wheel-result').innerHTML = '<div style="color:#888;font-size:11px;padding:8px">Skipped — spin again!</div>';
+  _setHTML('wheel-result', '<div style="color:#888);font-size:11px;padding:8px">Skipped — spin again!</div>';
 }
 
 function spinWheel() {
@@ -15880,7 +15888,7 @@ async function loadMoonshark() {
       + '</div>';
 
   } catch(e) {
-    document.getElementById('mshark-stats-bar').innerHTML = '<div class="empty" style="color:#ff5000">Error loading MoonShark: ' + e.message + '</div>';
+    _setHTML('mshark-stats-bar', '<div class="empty" style="color:#ff5000">Error loading MoonShark: ' + e.message + '</div>');
   }
 }
 
@@ -15998,7 +16006,7 @@ async function loadInsights() {
     feed.innerHTML = html;
   } catch(e) {
     console.error('Insights load error', e);
-    document.getElementById('daily-insights-feed').innerHTML = '<div style="color:#ff5000;font-size:12px">Error loading insights: ' + e.message + '</div>';
+    _setHTML('daily-insights-feed', '<div style="color:#ff5000);font-size:12px">Error loading insights: ' + e.message + '</div>';
   }
 }
 
@@ -16164,7 +16172,7 @@ async function loadTrends() {
       pEl.innerHTML = '<div style="color:#555;font-size:10px;text-align:center;padding:8px">Learning engine has not run yet</div>';
     }
   } catch(e) {
-    document.getElementById('trends-list').innerHTML = '<div style="color:#ff5000;font-size:11px">Error: ' + e.message + '</div>';
+    _setHTML('trends-list', '<div style="color:#ff5000);font-size:11px">Error: ' + e.message + '</div>';
   }
 }
 
@@ -16319,7 +16327,7 @@ async function loadAnalytics() {
 
   } catch(e) {
     console.error('Analytics load error', e);
-    document.getElementById('analytics-insights').innerHTML = '<div style="color:#ff5000;font-size:12px">Error loading analytics: ' + e.message + '</div>';
+    _setHTML('analytics-insights', '<div style="color:#ff5000);font-size:12px">Error loading analytics: ' + e.message + '</div>';
   }
 }
 
@@ -16355,7 +16363,7 @@ var _NOTIF_TRIGGERS = ['HIT', 'WIN', 'LOSS', 'BLOWOUT EXIT', 'MOMENTUM', 'LEAD C
 
 function toggleNotifPanel() {
   _notifPanelOpen = !_notifPanelOpen;
-  document.getElementById('notif-panel').style.display = _notifPanelOpen ? 'block' : 'none';
+  var _np = _el('notif-panel'); if (_np) _np.style.display = _notifPanelOpen ? 'block' : 'none';
   if (_notifPanelOpen) renderNotifs();
 }
 
@@ -16372,9 +16380,9 @@ document.addEventListener('click', function(e) {
 function clearNotifs() {
   _notifUnread = 0;
   _notifItems.forEach(function(n) { n.read = true; });
-  var badge = document.getElementById('notif-badge');
-  badge.style.display = 'none';
-  document.getElementById('notif-bell-icon').style.stroke = '#888';
+  var badge = _el('notif-badge');
+  if (badge) badge.style.display = 'none';
+  var _bellIcon = _el('notif-bell-icon'); if (_bellIcon) _bellIcon.style.stroke = '#888';
   renderNotifs();
 }
 
