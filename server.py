@@ -2870,7 +2870,8 @@ def live_game_snipe():
                 elif _snipe_game and _snipe_game.get("state") == "post":
                     conviction += 1  # finished, might be settling
                 else:
-                    conviction += 1  # no score data, give benefit of doubt
+                    # No ESPN data — cannot verify game state, skip this trade
+                    continue
                 # Signal 2: High volume / liquidity
                 if _ask_size >= 50:
                     conviction += 1
@@ -9290,7 +9291,7 @@ def _check_blowout(ticker, title, bet_team_abbrev=None):
 
     except Exception as e:
         print(f"[BLOWOUT] Error checking {ticker}: {e}")
-        return False, "", None  # Error — allow the bet
+        return True, "blowout_check_error", None  # Error — BLOCK the bet (fail closed)
 
 
 # ── Live Game Monitor ────────────────────────────────────────────────
@@ -9486,22 +9487,37 @@ def _check_arbitrage():
                 "success"
             )
             # Buy both sides
+            # Budget check — arb trades must respect daily limits
+            daily_spent = BOT_STATE.get("daily_spent_usd", 0)
+            daily_max = BOT_CONFIG.get("max_daily_spend_usd", 150)
+            remaining_budget = max(0, daily_max - daily_spent)
             max_contracts = min(50, int(BOT_CONFIG.get("max_bet_usd", 5) * 100 / total))
+            arb_cost = (total * max_contracts) / 100.0
+            if arb_cost > remaining_budget:
+                max_contracts = int(remaining_budget * 100 / total)
             if max_contracts > 0:
                 try:
+                    # Place YES side first with immediate_or_cancel to avoid partial exposure
                     res_yes = place_kalshi_order(ticker, "yes", yes_ask, count=max_contracts)
-                    res_no = place_kalshi_order(ticker, "no", no_ask, count=max_contracts)
                     yes_filled = int(float(str(res_yes.get("order", {}).get("filled_count_fp") or 0)))
-                    no_filled = int(float(str(res_no.get("order", {}).get("filled_count_fp") or 0)))
-                    filled = min(yes_filled, no_filled)
-                    if filled > 0:
-                        cost = (yes_ask + no_ask) * filled / 100.0
-                        profit = gap * filled / 100.0
-                        _log_activity(
-                            f"💰 ARB HIT! {ticker} x{filled} — cost ${cost:.2f}, guaranteed profit ${profit:.2f}",
-                            "success"
-                        )
-                        arbs.append({"ticker": ticker, "filled": filled, "profit": profit})
+                    if yes_filled == 0:
+                        _log_activity(f"ARB: YES side got 0 fills for {ticker}, skipping NO side", "info")
+                    else:
+                        # Only place NO side for the amount YES actually filled
+                        res_no = place_kalshi_order(ticker, "no", no_ask, count=yes_filled)
+                        no_filled = int(float(str(res_no.get("order", {}).get("filled_count_fp") or 0)))
+                        filled = min(yes_filled, no_filled)
+                        if filled > 0:
+                            cost = (yes_ask + no_ask) * filled / 100.0
+                            profit = gap * filled / 100.0
+                            BOT_STATE["daily_spent_usd"] = BOT_STATE.get("daily_spent_usd", 0) + cost
+                            _log_activity(
+                                f"ARB HIT! {ticker} x{filled} — cost ${cost:.2f}, guaranteed profit ${profit:.2f}",
+                                "success"
+                            )
+                            arbs.append({"ticker": ticker, "filled": filled, "profit": profit})
+                        if yes_filled > no_filled:
+                            _log_activity(f"ARB WARNING: {ticker} — YES filled {yes_filled} but NO only filled {no_filled}. {yes_filled - no_filled} unhedged contracts!", "error")
                 except Exception as e:
                     print(f"[ARB] Order error: {e}")
 
@@ -10035,7 +10051,8 @@ def _smart_bet_size(price_cents, bankroll=None, edge=0.05):
         except Exception:
             bankroll = 0
     if bankroll <= 0:
-        bankroll = 400
+        # Cannot size bets without knowing real bankroll — use minimum bet
+        return 1.0  # $1 minimum, don't assume phantom bankroll
 
     if edge < 0.015:
         return 0  # No edge, no bet
@@ -10299,8 +10316,8 @@ def quick_bet():
             min_bal = BOT_CONFIG.get("min_balance_usd", 10.0)
             if balance - cost_usd < min_bal:
                 return jsonify({"error": f"Would drop below ${min_bal:.0f} safety floor"}), 400
-    except Exception:
-        pass  # proceed anyway if balance check fails
+    except Exception as e:
+        return jsonify({"error": f"Balance check failed: {e}. Cannot place trade without balance verification."}), 500
 
     result = place_kalshi_order(ticker, side, price_cents, count=count)
     success = "error" not in result
@@ -11238,9 +11255,9 @@ def quant_bet():
             if bal < BOT_CONFIG.get("min_balance_usd", 10):
                 return jsonify({"success": False, "error": f"Balance too low: ${bal:.2f}"})
         else:
-            bal = 500
-    except Exception:
-        bal = 500
+            return jsonify({"success": False, "error": "Balance API returned error. Cannot trade without balance verification."})
+    except Exception as e:
+        return jsonify({"success": False, "error": f"Balance check failed: {e}. Cannot trade."})
 
     bet_size = _smart_bet_size(price_cents, bankroll=bal)
     count = max(1, int(bet_size * 100 / price_cents))
