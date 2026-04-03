@@ -2946,6 +2946,9 @@ def live_game_snipe():
                         _snipe_edge_pct = None
                         if closing_boost > 1:
                             _snipe_edge_pct = f"closing boost {closing_boost:.1f}x"
+                        _snipe_order_id = order_data.get("order_id", "")
+                        if _snipe_order_id:
+                            _known_fill_ids.add(_snipe_order_id)
                         BOT_STATE["snipe_trades_today"].append({
                             "ticker": ticker, "title": title, "side": side,
                             "price": price, "count": filled, "cost": actual_cost,
@@ -2956,6 +2959,7 @@ def live_game_snipe():
                             "category": classify_market_category(title, ticker),
                             "edge_reasons": _snipe_edge_reasons,
                             "conviction": conviction,
+                            "order_id": _snipe_order_id,
                         })
                         # Track in trade journal for pattern analysis (pass orderbook if available)
                         _snipe_ob = None
@@ -3476,6 +3480,9 @@ def moonshark_snipe():
                         if espn_edge is not None:
                             _ms_edge_detail = f"ESPN edge: +{espn_edge:.1%}"
                             _ms_edge_reasons.insert(0, _ms_edge_detail)
+                        _ms_order_id = order_data.get("order_id", "")
+                        if _ms_order_id:
+                            _known_fill_ids.add(_ms_order_id)
                         BOT_STATE["moonshark_trades_today"].append({
                             "ticker": ticker, "title": title, "side": side,
                             "price": price, "count": filled, "cost": actual_cost,
@@ -3487,6 +3494,7 @@ def moonshark_snipe():
                             "edge_reasons": _ms_edge_reasons,
                             "conviction": ms_conviction,
                             "espn_edge": round(espn_edge, 4) if espn_edge is not None else None,
+                            "order_id": _ms_order_id,
                         })
                         # Track in trade journal for pattern analysis
                         _edge_data = None
@@ -3835,6 +3843,9 @@ def closegame_snipe():
                         if edge:
                             _cg_edge_reasons.append(f"ESPN edge: +{edge:.1%}")
                         _cg_edge_reasons.append(f"Win prob: {estimated_win_prob:.0%}")
+                        _cg_order_id = order_data.get("order_id", "")
+                        if _cg_order_id:
+                            _known_fill_ids.add(_cg_order_id)
                         BOT_STATE.setdefault("closegame_trades_today", []).append({
                             "ticker": ticker, "title": title, "side": side,
                             "price": price, "count": filled, "cost": actual_cost,
@@ -3846,6 +3857,7 @@ def closegame_snipe():
                             "period": cg["period"],
                             "edge_reasons": _cg_edge_reasons,
                             "espn_edge": round(edge, 4) if edge else None,
+                            "order_id": _cg_order_id,
                         })
                         _cg_game_info = {"home_score": cg.get("home_score"), "away_score": cg.get("away_score"), "clock": cg.get("period", ""), "state": "in", "league": cg.get("sport", "")}
                         _cg_edge = None
@@ -5991,17 +6003,18 @@ def _sync_kalshi_fills():
         fills = resp.json().get("fills", [])
 
         # Build set of order_ids we already track (from bot + manual trades)
-        tracked_ids = set()
+        tracked_ids = set(_known_fill_ids)  # start with globally tracked IDs
+        # Also build set of (ticker, side) pairs the bot placed today
+        _bot_ticker_sides = set()
+        for _tlist_name in ["snipe_trades_today", "moonshark_trades_today", "closegame_trades_today"]:
+            for t in BOT_STATE.get(_tlist_name, []):
+                if t.get("order_id"):
+                    tracked_ids.add(t["order_id"])
+                _bot_ticker_sides.add((t.get("ticker", ""), t.get("side", "")))
         for t in BOT_STATE.get("all_trades", []):
             if t.get("order_id"):
                 tracked_ids.add(t["order_id"])
         for t in BOT_STATE.get("trades_today", []):
-            if t.get("order_id"):
-                tracked_ids.add(t["order_id"])
-        for t in BOT_STATE.get("snipe_trades_today", []):
-            if t.get("order_id"):
-                tracked_ids.add(t["order_id"])
-        for t in BOT_STATE.get("moonshark_trades_today", []):
             if t.get("order_id"):
                 tracked_ids.add(t["order_id"])
         for t in BOT_STATE.get("manual_trades_today", []):
@@ -6026,12 +6039,18 @@ def _sync_kalshi_fills():
                 continue
             if action != "buy":
                 continue
-            if order_id in tracked_ids or order_id in _known_fill_ids:
+            if order_id in tracked_ids:
+                continue
+
+            ticker = fill.get("ticker", "")
+            side = fill.get("side", "")
+
+            # Skip if this ticker+side was already placed by the bot today
+            if (ticker, side) in _bot_ticker_sides:
+                _known_fill_ids.add(order_id)
                 continue
 
             _known_fill_ids.add(order_id)
-            ticker = fill.get("ticker", "")
-            side = fill.get("side", "")
 
             count = 0
             try:
