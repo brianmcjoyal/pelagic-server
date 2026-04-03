@@ -13290,9 +13290,8 @@ async function loadBetsFeed() {
       h += '<span class="dot" style="background:' + sc + '"></span>';
       h += '<span class="msg">' + sourceTag + '<span style="color:' + sc + ';font-weight:700;font-size:8px;margin-right:4px">' + sl + '</span>';
       h += '<span style="color:' + sideC + ';font-weight:700">' + (t.side || '').toUpperCase() + '</span> ';
+      h += '<span style="color:#fff;font-weight:700;margin-right:4px">$' + (t.cost_usd || 0).toFixed(2) + '</span> ';
       h += '<span style="color:#ccc">' + title + '</span> ';
-      h += '<span style="color:#ffb400">' + t.price_cents + '&#162; x' + (t.count || 1) + '</span> ';
-      h += '<span style="color:#888">$' + (t.cost_usd || 0).toFixed(2) + '</span> ';
       // Result / P&L indicator
       var pnl = t.pnl_pct || 0;
       var isSettling = t.close_time && new Date(t.close_time) <= new Date();
