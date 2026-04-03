@@ -2088,27 +2088,11 @@ def check_position_prices():
             close_time = mkt.get("expected_expiration_time") or mkt.get("close_time")
             current_yes_price = None
             current_no_price = None
-            # Use last_price (matches Kalshi's portfolio valuation), fall back to bid, then ask
-            # Kalshi values positions at last trade price, not the ask (which is inflated by spread)
-            _yes_last = mkt.get("last_yes_price_dollars") or mkt.get("last_yes_price") or mkt.get("yes_bid_dollars") or mkt.get("yes_bid")
-            _no_last = mkt.get("last_no_price_dollars") or mkt.get("last_no_price") or mkt.get("no_bid_dollars") or mkt.get("no_bid")
+            # Handle both cache format (yes_ask_cents) and raw API format (yes_ask as decimal)
             if mkt.get("yes_ask_cents"):
-                # Cache format — try last price first
-                current_yes_price = int(mkt.get("last_yes_price_cents") or mkt.get("yes_bid_cents") or mkt["yes_ask_cents"])
-                current_no_price = int(mkt.get("last_no_price_cents") or mkt.get("no_bid_cents") or mkt.get("no_ask_cents", 100 - current_yes_price))
-            elif _yes_last or _no_last:
-                if _yes_last:
-                    try:
-                        current_yes_price = int(round(float(_yes_last) * 100)) if isinstance(_yes_last, str) else int(_yes_last * 100 if _yes_last < 1 else _yes_last)
-                    except Exception:
-                        pass
-                if _no_last:
-                    try:
-                        current_no_price = int(round(float(_no_last) * 100)) if isinstance(_no_last, str) else int(_no_last * 100 if _no_last < 1 else _no_last)
-                    except Exception:
-                        pass
+                current_yes_price = int(mkt["yes_ask_cents"])
+                current_no_price = int(mkt.get("no_ask_cents", 100 - current_yes_price))
             else:
-                # Final fallback: ask prices
                 yes_ask = mkt.get("yes_ask_dollars") or mkt.get("yes_ask")
                 no_ask = mkt.get("no_ask_dollars") or mkt.get("no_ask")
                 if yes_ask:
@@ -7097,22 +7081,28 @@ def settled_positions():
                 if _jrec.get("ticker") == ticker:
                     # ESPN edge
                     if _jrec.get("espn_edge"):
-                        _espn_edge = _jrec["espn_edge"]
-                        _espn_implied = _jrec.get("espn_implied_prob")
-                        _kalshi_implied = _jrec.get("kalshi_implied_prob") or (entry_cents / 100.0 if entry_cents else 0)
-                        _edge_reasons.append(f"ESPN sportsbook edge: +{_espn_edge:.1%}")
-                        if _espn_implied:
-                            _edge_reasons.append(f"ESPN implied: {_espn_implied:.0%} vs Kalshi: {_kalshi_implied:.0%}")
+                        try:
+                            _espn_edge = float(_jrec["espn_edge"])
+                            _espn_implied = _jrec.get("espn_implied_prob")
+                            _kalshi_implied = _jrec.get("kalshi_implied_prob") or (entry_cents / 100.0 if entry_cents else 0)
+                            _edge_reasons.append(f"ESPN sportsbook edge: +{_espn_edge:.1%}")
+                            if _espn_implied:
+                                _edge_reasons.append(f"ESPN implied: {float(_espn_implied):.0%} vs Kalshi: {float(_kalshi_implied):.0%}")
+                        except (ValueError, TypeError):
+                            _edge_reasons.append(f"ESPN edge detected")
                     # Game state
                     if _jrec.get("game_state") == "in":
-                        _margin = _jrec.get("game_margin")
-                        _period = _jrec.get("game_period", "")
-                        _gs_str = "LIVE game"
-                        if _margin is not None:
-                            _gs_str += f" (margin: {_margin} pts)"
-                        if _period:
-                            _gs_str += f" {_period}"
-                        _edge_reasons.append(_gs_str)
+                        try:
+                            _margin = _jrec.get("game_margin")
+                            _period = _jrec.get("game_period", "") or ""
+                            _gs_str = "LIVE game"
+                            if _margin is not None:
+                                _gs_str += f" (margin: {_margin} pts)"
+                            if _period:
+                                _gs_str += f" {_period}"
+                            _edge_reasons.append(_gs_str)
+                        except Exception:
+                            _edge_reasons.append("LIVE game")
                         _game_state_at_entry = "live"
                     elif _jrec.get("game_state") == "post":
                         _edge_reasons.append("Game finished, settling")
@@ -7132,7 +7122,8 @@ def settled_positions():
                         _edge_reasons.append(f"Liquidity: {_jrec['ob_liquidity']}")
                     # Momentum
                     if _jrec.get("momentum_direction") and _jrec["momentum_direction"] != "flat":
-                        _edge_reasons.append(f"Momentum: {_jrec['momentum_direction']} ({_jrec.get('momentum_magnitude', 0):.0f})")
+                        _mom_mag = _jrec.get('momentum_magnitude') or 0
+                        _edge_reasons.append(f"Momentum: {_jrec['momentum_direction']} ({_mom_mag:.0f})")
                     _entry_time = _jrec.get("entry_time", "")
                     break
             # Also check today's trade arrays for edge_reasons (newer trades)
