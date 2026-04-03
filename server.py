@@ -12536,7 +12536,7 @@ a:hover { color: #7da5f5; }
   <button class="tab active" onclick="switchTab('positions')">Dashboard</button>
   <button class="tab" onclick="switchTab('performance')">Performance</button>
   <button class="tab" onclick="switchTab('trends')" style="color:#e040fb">Trends</button>
-  <button class="tab" onclick="switchTab('moonshark')" style="color:#00d4ff;margin-left:auto">&#x1F988; MoonShark</button>
+  <!-- MoonShark tab removed -->
 </div>
 
 <!-- Positions Tab -->
@@ -12646,56 +12646,16 @@ a:hover { color: #7da5f5; }
     <span style="color:#666">Loading...</span>
   </div>
 
-  <!-- Row 2: P&L Chart + Strategy Breakdown side by side -->
-  <div style="display:grid;grid-template-columns:1.5fr 1fr;gap:12px;margin-bottom:12px">
-    <!-- P&L Equity Curve -->
-    <div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:14px">
-      <div style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Equity Curve</div>
-      <div style="position:relative;height:140px">
-        <canvas id="perf-pl-chart" style="width:100%;height:100%"></canvas>
-      </div>
-    </div>
-    <!-- Strategy Breakdown -->
-    <div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:14px">
-      <div style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">By Strategy</div>
-      <div id="perf-strategies"></div>
-    </div>
-  </div>
-
-  <!-- Row 3: Category + Price Range + Time of Day -->
-  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px">
-    <div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:14px">
-      <div style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">By Sport</div>
-      <div id="perf-by-sport"></div>
-    </div>
-    <div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:14px">
-      <div style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">By Price Range</div>
-      <div id="perf-by-price"></div>
-    </div>
-    <div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:14px">
-      <div style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">By Time of Day</div>
-      <div id="perf-by-time"></div>
-    </div>
-  </div>
-
-  <!-- Row 4: Daily Insights -->
-  <div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:14px;margin-bottom:12px">
-    <div style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Daily Insights</div>
-    <div id="daily-insights-feed" style="display:flex;flex-direction:column;gap:6px">
-      <div class="loading">Generating insights...</div>
-    </div>
-  </div>
-
-  <!-- Row 5: Recent Trades -->
+  <!-- Row 2: Trade Feed -->
   <div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:14px">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-      <div style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Trade Journal <span class="badge" id="trade-badge" style="margin-left:6px">0</span> <span style="color:#444;font-size:8px;font-weight:400;margin-left:4px">click any trade for edge details</span></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Trade Feed <span class="badge" id="trade-badge" style="margin-left:6px">0</span></div>
       <div style="display:flex;align-items:center;gap:8px">
-        <label style="font-size:10px;color:#666;cursor:pointer"><input type="checkbox" id="hide-history-junk" checked onchange="loadPerformance()" style="margin-right:3px;accent-color:#00dc5a"> Hide old bot trades</label>
+        <!-- bot trades only -->
         <button class="refresh-btn" onclick="loadPerformance()">Refresh</button>
       </div>
     </div>
-    <div id="settled-table"></div>
+    <div id="trade-feed"></div>
   </div>
 </div>
 
@@ -13468,7 +13428,8 @@ async function loadBetsFeedDash() { loadBetsFeed(); }
 async function loadBetsFeed() {
   try {
     var data = await fetch(API + '/trades-today').then(r => r.json());
-    var trades = data.trades || [];
+    var allTrades = data.trades || [];
+    var trades = allTrades.filter(function(t) { return t.strategy !== 'manual' && t.strategy !== 'moonshark_manual' && t.strategy !== 'wta_wheel' && t.strategy !== 'quant' && t.source !== 'kalshi_fill' && !t.manual; });
     var el = document.getElementById('bets-lines');
     // Update both old and dashboard badge counts
     var countEl = document.getElementById('bets-today-count');
@@ -14679,8 +14640,11 @@ async function loadPerformance() {
     ]);
 
     var allSettled = settledData.settled || [];
-    var hideJunk = document.getElementById('hide-history-junk') && document.getElementById('hide-history-junk').checked;
-    var settled = hideJunk ? allSettled : allSettled;
+    // Filter out manual/user-placed trades - bot only
+    var settled = allSettled.filter(function(s) {
+      var strat = s.strategy || '';
+      return strat !== 'manual' && strat !== 'moonshark_manual' && strat !== 'wta_wheel' && strat !== 'quant' && s.source !== 'kalshi_fill';
+    });
     window._settledData = settled;
 
     // === COMPUTE ALL KPIs ===
@@ -14769,247 +14733,10 @@ async function loadPerformance() {
 
     kpiEl.innerHTML = khtml;
 
-    // === EQUITY CURVE ===
-    var canvas = document.getElementById('perf-pl-chart');
-    if (canvas) {
-      var ctx = canvas.getContext('2d');
-      var dpr = window.devicePixelRatio || 1;
-      var rect = canvas.parentElement.getBoundingClientRect();
-      canvas.width = rect.width * dpr;
-      canvas.height = rect.height * dpr;
-      ctx.scale(dpr, dpr);
-      var w = rect.width, h = rect.height;
-      ctx.clearRect(0, 0, w, h);
-
-      var points = [{x: 0, y: 0}];
-      var cum = 0;
-      settled.forEach(function(s, i) {
-        cum += s.pnl_usd || 0;
-        points.push({x: i + 1, y: cum});
-      });
-
-      if (points.length > 1) {
-        var minY = Math.min.apply(null, points.map(function(p){return p.y;}));
-        var maxY = Math.max.apply(null, points.map(function(p){return p.y;}));
-        var range = Math.max(maxY - minY, 1);
-        var pad = 16;
-
-        // Zero line
-        var zeroY = h - pad - ((0 - minY) / range) * (h - 2 * pad);
-        ctx.strokeStyle = '#333';
-        ctx.lineWidth = 1;
-        ctx.setLineDash([4, 4]);
-        ctx.beginPath();
-        ctx.moveTo(0, zeroY);
-        ctx.lineTo(w, zeroY);
-        ctx.stroke();
-        ctx.setLineDash([]);
-
-        // Equity line
-        ctx.beginPath();
-        points.forEach(function(p, i) {
-          var px = (p.x / (points.length - 1)) * (w - 2 * pad) + pad;
-          var py = h - pad - ((p.y - minY) / range) * (h - 2 * pad);
-          if (i === 0) ctx.moveTo(px, py);
-          else ctx.lineTo(px, py);
-        });
-        ctx.strokeStyle = cum >= 0 ? '#00dc5a' : '#ff5000';
-        ctx.lineWidth = 2;
-        ctx.stroke();
-
-        // Gradient fill
-        var lastPt = points[points.length - 1];
-        var lastPx = (lastPt.x / (points.length - 1)) * (w - 2 * pad) + pad;
-        ctx.lineTo(lastPx, h - pad);
-        ctx.lineTo(pad, h - pad);
-        ctx.closePath();
-        var grad = ctx.createLinearGradient(0, 0, 0, h);
-        if (cum >= 0) {
-          grad.addColorStop(0, 'rgba(0,220,90,0.15)');
-          grad.addColorStop(1, 'rgba(0,220,90,0)');
-        } else {
-          grad.addColorStop(0, 'rgba(255,80,0,0.15)');
-          grad.addColorStop(1, 'rgba(255,80,0,0)');
-        }
-        ctx.fillStyle = grad;
-        ctx.fill();
-
-        // End label
-        ctx.fillStyle = cum >= 0 ? '#00dc5a' : '#ff5000';
-        ctx.font = '11px Inter';
-        ctx.textAlign = 'right';
-        ctx.fillText((cum >= 0 ? '+$' : '-$') + Math.abs(cum).toFixed(2), w - 4, 14);
-      }
-    }
-
-    // === STRATEGY BREAKDOWN ===
-    var stratEl = document.getElementById('perf-strategies');
-    var strategies = {};
-    settled.forEach(function(s) {
-      var strat = s.strategy || s.source || 'unknown';
-      if (strat === 'kalshi_fill') strat = 'manual';
-      if (!strategies[strat]) strategies[strat] = {wins:0, losses:0, pnl:0};
-      if (s.won === true) strategies[strat].wins++;
-      else if (s.won === false) strategies[strat].losses++;
-      strategies[strat].pnl += s.pnl_usd || 0;
-    });
-    var stratKeys = Object.keys(strategies).sort(function(a,b) { return strategies[b].pnl - strategies[a].pnl; });
-    if (stratKeys.length > 0) {
-      var shtml = '';
-      stratKeys.forEach(function(k) {
-        var s = strategies[k];
-        var st = s.wins + s.losses;
-        var swr = st > 0 ? Math.round(s.wins / st * 100) : 0;
-        var swrc = swr >= 50 ? '#00dc5a' : swr >= 30 ? '#ffb400' : '#ff5000';
-        var spnlc = s.pnl >= 0 ? '#00dc5a' : '#ff5000';
-        var barW = st > 0 ? Math.round(s.wins / st * 100) : 0;
-        shtml += '<div style="margin-bottom:8px">';
-        shtml += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">';
-        shtml += '<span style="color:#ccc;font-size:11px;font-weight:600;text-transform:capitalize">' + k + '</span>';
-        shtml += '<span style="color:' + spnlc + ';font-size:11px;font-weight:700">' + (s.pnl >= 0 ? '+' : '') + '$' + Math.abs(s.pnl).toFixed(2) + '</span>';
-        shtml += '</div>';
-        shtml += '<div style="display:flex;align-items:center;gap:6px">';
-        shtml += '<div style="flex:1;height:6px;background:#222;border-radius:3px;overflow:hidden">';
-        shtml += '<div style="width:' + barW + '%;height:100%;background:' + swrc + ';border-radius:3px"></div>';
-        shtml += '</div>';
-        shtml += '<span style="color:#888;font-size:9px;white-space:nowrap">' + swr + '% (' + s.wins + 'W/' + s.losses + 'L)</span>';
-        shtml += '</div></div>';
-      });
-      stratEl.innerHTML = shtml;
-    } else {
-      stratEl.innerHTML = '<div style="color:#555;font-size:11px">No strategy data yet</div>';
-    }
-
-    // === BY SPORT ===
-    var sportEl = document.getElementById('perf-by-sport');
-    var cats = {};
-    settled.forEach(function(s) {
-      var cat = s.category || 'other';
-      if (!cats[cat]) cats[cat] = {wins:0, losses:0, pnl:0};
-      if (s.won === true) cats[cat].wins++;
-      else if (s.won === false) cats[cat].losses++;
-      cats[cat].pnl += s.pnl_usd || 0;
-    });
-    var catKeys = Object.keys(cats).filter(function(k) { var c = cats[k]; return (c.wins + c.losses) > 0; })
-      .sort(function(a,b) { return cats[b].pnl - cats[a].pnl; });
-    if (catKeys.length > 0) {
-      var chtml = '';
-      catKeys.forEach(function(k) {
-        var c = cats[k];
-        var ct = c.wins + c.losses;
-        var cwr = Math.round(c.wins / ct * 100);
-        var cwrc = cwr >= 50 ? '#00dc5a' : cwr >= 30 ? '#ffb400' : '#ff5000';
-        var cpnlc = c.pnl >= 0 ? '#00dc5a' : '#ff5000';
-        chtml += '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #1a1a1a">';
-        chtml += '<span style="color:#ccc;font-size:11px;text-transform:capitalize">' + k + '</span>';
-        chtml += '<div style="display:flex;gap:10px;align-items:center">';
-        chtml += '<span style="color:' + cwrc + ';font-size:11px;font-weight:700">' + cwr + '%</span>';
-        chtml += '<span style="color:#666;font-size:10px">' + c.wins + 'W/' + c.losses + 'L</span>';
-        chtml += '<span style="color:' + cpnlc + ';font-size:10px;font-weight:600;min-width:50px;text-align:right">' + (c.pnl >= 0 ? '+' : '') + '$' + Math.abs(c.pnl).toFixed(2) + '</span>';
-        chtml += '</div></div>';
-      });
-      sportEl.innerHTML = chtml;
-    } else {
-      sportEl.innerHTML = '<div style="color:#555;font-size:11px">No data yet</div>';
-    }
-
-    // === BY PRICE RANGE ===
-    var priceEl = document.getElementById('perf-by-price');
-    var byPrice = analyticsData.by_price || {};
-    // Fallback: compute from settled
-    if (Object.keys(byPrice).length === 0 && settled.length > 0) {
-      var pMap = {};
-      settled.forEach(function(s) {
-        var pc = s.entry_cents || 0;
-        var bk = pc >= 90 ? '90-100' : pc >= 80 ? '80-89' : pc >= 70 ? '70-79' : pc >= 50 ? '50-69' : '<50';
-        if (!pMap[bk]) pMap[bk] = {wins:0, losses:0, pnl:0, total:0};
-        pMap[bk].total++;
-        if (s.won === true) pMap[bk].wins++;
-        else if (s.won === false) pMap[bk].losses++;
-        pMap[bk].pnl += s.pnl_usd || 0;
-      });
-      Object.keys(pMap).forEach(function(k) {
-        var b = pMap[k];
-        b.win_rate = Math.round(b.wins / Math.max(1, b.wins + b.losses) * 100 * 10) / 10;
-      });
-      byPrice = pMap;
-    }
-    var priceKeys = Object.keys(byPrice).filter(function(k) { return (byPrice[k].total || 0) > 0; })
-      .sort(function(a,b) { return (byPrice[b].win_rate || 0) - (byPrice[a].win_rate || 0); });
-    if (priceKeys.length > 0) {
-      var phtml = '';
-      priceKeys.forEach(function(k) {
-        var b = byPrice[k];
-        var bwr = b.win_rate || 0;
-        var bwrc = bwr >= 50 ? '#00dc5a' : bwr >= 30 ? '#ffb400' : '#ff5000';
-        var bpnlc = (b.pnl || 0) >= 0 ? '#00dc5a' : '#ff5000';
-        phtml += '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #1a1a1a">';
-        phtml += '<span style="color:#ccc;font-size:11px">' + k + String.fromCharCode(162) + '</span>';
-        phtml += '<div style="display:flex;gap:10px;align-items:center">';
-        phtml += '<span style="color:' + bwrc + ';font-size:11px;font-weight:700">' + bwr.toFixed(0) + '%</span>';
-        phtml += '<span style="color:#666;font-size:10px">' + (b.wins||0) + 'W/' + (b.losses||0) + 'L</span>';
-        phtml += '<span style="color:' + bpnlc + ';font-size:10px;font-weight:600;min-width:50px;text-align:right">' + ((b.pnl||0) >= 0 ? '+' : '') + '$' + Math.abs(b.pnl||0).toFixed(2) + '</span>';
-        phtml += '</div></div>';
-      });
-      priceEl.innerHTML = phtml;
-    } else {
-      priceEl.innerHTML = '<div style="color:#555;font-size:11px">No data yet</div>';
-    }
-
-    // === BY TIME OF DAY ===
-    var timeEl = document.getElementById('perf-by-time');
-    var byTime = analyticsData.by_time || {};
-    var timeKeys = Object.keys(byTime).filter(function(k) { return (byTime[k].total || 0) > 0; })
-      .sort(function(a,b) { return (byTime[b].pnl || 0) - (byTime[a].pnl || 0); });
-    if (timeKeys.length > 0) {
-      var thtml = '';
-      timeKeys.forEach(function(k) {
-        var t = byTime[k];
-        var twr = t.win_rate || 0;
-        var twrc = twr >= 50 ? '#00dc5a' : twr >= 30 ? '#ffb400' : '#ff5000';
-        var tpnlc = (t.pnl || 0) >= 0 ? '#00dc5a' : '#ff5000';
-        // Shorten label
-        var shortLabel = k.replace(' (6am-12pm)','').replace(' (12pm-6pm)','').replace(' (6pm-12am)','').replace(' (12am-6am)','');
-        thtml += '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #1a1a1a">';
-        thtml += '<span style="color:#ccc;font-size:11px">' + shortLabel + '</span>';
-        thtml += '<div style="display:flex;gap:10px;align-items:center">';
-        thtml += '<span style="color:' + twrc + ';font-size:11px;font-weight:700">' + twr.toFixed(0) + '%</span>';
-        thtml += '<span style="color:#666;font-size:10px">' + (t.wins||0) + 'W/' + (t.losses||0) + 'L</span>';
-        thtml += '<span style="color:' + tpnlc + ';font-size:10px;font-weight:600;min-width:50px;text-align:right">' + ((t.pnl||0) >= 0 ? '+' : '') + '$' + Math.abs(t.pnl||0).toFixed(2) + '</span>';
-        thtml += '</div></div>';
-      });
-      timeEl.innerHTML = thtml;
-    } else {
-      timeEl.innerHTML = '<div style="color:#555;font-size:11px">No data yet</div>';
-    }
-
-    // === DAILY INSIGHTS ===
-    var insData = insightsData.insights || [];
-    var feedEl = document.getElementById('daily-insights-feed');
-    if (insData.length > 0) {
-      var ihtml = '';
-      insData.forEach(function(ins) {
-        var icon = ins.trend === 'positive' ? String.fromCodePoint(0x1F4C8) : ins.trend === 'negative' ? String.fromCodePoint(0x1F4C9) : String.fromCodePoint(0x27A1);
-        var borderColor = ins.trend === 'positive' ? '#00dc5a' : ins.trend === 'negative' ? '#ff5000' : '#333';
-        ihtml += '<div style="border-left:3px solid ' + borderColor + ';padding:8px 12px;border-radius:6px;background:#0d0d0d">';
-        ihtml += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">';
-        ihtml += '<span style="font-size:14px">' + icon + '</span>';
-        ihtml += '<span style="color:#ddd;font-size:12px;font-weight:700">' + ins.title + '</span>';
-        ihtml += '</div>';
-        ihtml += '<div style="color:#888;font-size:10px;line-height:1.4">' + ins.detail + '</div>';
-        ihtml += '</div>';
-      });
-      feedEl.innerHTML = ihtml;
-    } else {
-      feedEl.innerHTML = '<div style="color:#555;font-size:11px">No insights yet</div>';
-    }
-
-    // === TRADE JOURNAL (all bets with edge reasoning) ===
-    var tableEl = document.getElementById('settled-table');
-    var hiddenCount = allSettled.length - settled.length;
-    // Combine settled + open positions for full journal
+    // === TRADE FEED ===
+    var feedEl = document.getElementById('trade-feed');
+    // Combine settled + open positions
     var allBets = [];
-    // Add settled trades
     settled.forEach(function(s) {
       allBets.push({
         title: s.title || s.ticker || '',
@@ -15032,11 +14759,13 @@ async function loadPerformance() {
         settle_time: s.settle_time || '',
       });
     });
-    // Also add today's open trades (not yet settled)
+    // Also add today's open trades
     try {
       var todayData = await fetch(API + '/trades-today').then(function(r){ return r.json(); });
-      (todayData.trades || []).forEach(function(t) {
-        // Skip if already in settled
+      (todayData.trades || []).filter(function(t) {
+        var strat = t.strategy || '';
+        return strat !== 'manual' && strat !== 'moonshark_manual' && strat !== 'wta_wheel' && strat !== 'quant' && t.source !== 'kalshi_fill' && !t.manual;
+      }).forEach(function(t) {
         var isDup = settled.some(function(s) { return s.ticker === t.ticker; });
         if (!isDup) {
           allBets.push({
@@ -15064,17 +14793,17 @@ async function loadPerformance() {
     } catch(e) {}
 
     if (allBets.length === 0) {
-      tableEl.innerHTML = '<div style="color:#555;font-size:11px;padding:8px">No trades yet. Place some bets and every trade will be tracked here with full reasoning.</div>';
+      feedEl.innerHTML = '<div style="color:#555;font-size:11px;padding:8px">No trades yet. Place some bets and every trade will be tracked here with full reasoning.</div>';
     } else {
-      // Sort: open first, then by date descending
+      // Sort: open first, then by entry_time descending (newest first)
       allBets.sort(function(a, b) {
         if (a.status === 'OPEN' && b.status !== 'OPEN') return -1;
         if (b.status === 'OPEN' && a.status !== 'OPEN') return 1;
-        return (b.date || '').localeCompare(a.date || '');
+        return (b.entry_time || b.date || '').localeCompare(a.entry_time || a.date || '');
       });
 
-      var tbl = '<div style="display:flex;flex-direction:column;gap:4px">';
-      allBets.forEach(function(s, idx) {
+      var tbl = '<div style="display:flex;flex-direction:column;gap:6px">';
+      allBets.forEach(function(s) {
         var isWin = s.won === true;
         var isLoss = s.won === false;
         var isOpen = s.status === 'OPEN';
@@ -15082,15 +14811,30 @@ async function loadPerformance() {
         var pnlColor = isOpen ? '#ffb400' : isWin ? '#00dc5a' : isLoss ? '#ff5000' : '#888';
         var resultLabel = s.status;
         var pnlStr = isOpen ? 'PENDING' : (s.pnl >= 0 ? '+$' : '-$') + Math.abs(s.pnl).toFixed(2);
+        var bgColor = isOpen ? 'rgba(255,180,0,0.04)' : isWin ? 'rgba(0,220,90,0.04)' : isLoss ? 'rgba(255,80,0,0.04)' : 'rgba(20,20,20,0.5)';
 
-        // Format date
-        var dateStr = '';
-        if (s.date) {
+        // Format time
+        var timeStr = '';
+        if (s.entry_time) {
           try {
-            var parts = s.date.split('-');
+            var d = new Date(s.entry_time);
             var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-            dateStr = months[parseInt(parts[1])-1] + ' ' + parseInt(parts[2]);
-          } catch(e) { dateStr = s.date; }
+            var hr = d.getHours();
+            var ampm = hr >= 12 ? 'pm' : 'am';
+            hr = hr % 12 || 12;
+            var min = d.getMinutes();
+            timeStr = months[d.getMonth()] + ' ' + d.getDate() + ', ' + hr + ':' + (min < 10 ? '0' : '') + min + ampm;
+          } catch(e) {
+            if (s.date) {
+              var parts = s.date.split('-');
+              var months2 = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+              timeStr = months2[parseInt(parts[1])-1] + ' ' + parseInt(parts[2]);
+            }
+          }
+        } else if (s.date) {
+          var parts = s.date.split('-');
+          var months3 = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+          timeStr = months3[parseInt(parts[1])-1] + ' ' + parseInt(parts[2]);
         }
 
         // Strategy label
@@ -15099,86 +14843,74 @@ async function loadPerformance() {
         var stratLabel = stratLabels[s.strategy] || (s.strategy || '').toUpperCase();
         var stratColor = stratColors[s.strategy] || '#888';
 
-        var detailId = 'journal-' + idx;
+        tbl += '<div style="border-left:3px solid ' + borderColor + ';border-radius:6px;background:' + bgColor + ';padding:10px 14px">';
 
-        tbl += '<div style="border-left:3px solid ' + borderColor + ';border-radius:4px;background:rgba(20,20,20,0.5);cursor:pointer" onclick="var d=document.getElementById(&#39;' + detailId + '&#39;);d.style.display=d.style.display===&#39;none&#39;?&#39;block&#39;:&#39;none&#39;">';
-        // Main row
-        tbl += '<div style="padding:8px 12px;display:flex;justify-content:space-between;align-items:center">';
+        // Top row: title + result
+        tbl += '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">';
         tbl += '<div style="flex:1;min-width:0">';
-        tbl += '<div style="display:flex;align-items:center;gap:6px">';
+        tbl += '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">';
         if (stratLabel) tbl += '<span style="font-size:8px;padding:1px 5px;background:' + stratColor + '22;border:1px solid ' + stratColor + '44;border-radius:3px;color:' + stratColor + ';font-weight:700">' + stratLabel + '</span>';
-        tbl += '<span style="color:#ddd;font-size:11px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + s.title + '</span>';
+        tbl += '<span style="color:#eee;font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + s.title + '</span>';
         tbl += '</div>';
-        tbl += '<div style="color:#666;font-size:9px;margin-top:3px">';
-        if (dateStr) tbl += dateStr;
-        tbl += ' &middot; ' + (s.side || '').toUpperCase() + ' ' + s.entry_cents + '&cent; x' + s.count;
-        tbl += ' &middot; $' + s.cost.toFixed(2);
-        if (s.category) tbl += ' &middot; ' + s.category;
-        tbl += ' <span style="color:#444">&#9660; click for details</span>';
-        tbl += '</div></div>';
+        tbl += '</div>';
         tbl += '<div style="text-align:right;margin-left:12px;flex-shrink:0">';
-        tbl += '<div style="color:' + pnlColor + ';font-size:14px;font-weight:800">' + pnlStr + '</div>';
+        tbl += '<div style="color:' + pnlColor + ';font-size:16px;font-weight:800">' + pnlStr + '</div>';
         tbl += '<div style="color:' + pnlColor + ';font-size:9px;font-weight:600;letter-spacing:0.5px">' + resultLabel + '</div>';
         tbl += '</div></div>';
 
-        // Expandable edge detail (hidden by default)
-        tbl += '<div id="' + detailId + '" style="display:none;padding:0 12px 10px 12px;border-top:1px solid #1a1a1a">';
-        tbl += '<div style="padding-top:8px">';
-        // Edge reasoning section
+        // Info row: time, side, price, amount, category
+        tbl += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">';
+        if (timeStr) tbl += '<span style="color:#888;font-size:10px">' + timeStr + '</span>';
+        tbl += '<span style="color:#555;font-size:10px">&middot;</span>';
+        tbl += '<span style="color:#888;font-size:10px">' + (s.side || '').toUpperCase() + ' ' + s.entry_cents + '&cent; x' + s.count + '</span>';
+        tbl += '<span style="color:#555;font-size:10px">&middot;</span>';
+        tbl += '<span style="color:#888;font-size:10px">$' + s.cost.toFixed(2) + ' wagered</span>';
+        if (s.category) {
+          tbl += '<span style="color:#555;font-size:10px">&middot;</span>';
+          tbl += '<span style="color:#888;font-size:10px;text-transform:capitalize">' + s.category + '</span>';
+        }
+        tbl += '</div>';
+
+        // Edge reasoning - ALWAYS VISIBLE
+        tbl += '<div style="background:#0a0a0a;border:1px solid #1a1a1a;border-radius:6px;padding:8px 10px">';
         if (s.edge_reasons && s.edge_reasons.length > 0) {
-          tbl += '<div style="color:#ffb400;font-size:10px;font-weight:700;margin-bottom:4px">WHY THIS BET</div>';
+          tbl += '<div style="color:#ffb400;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Why this bet</div>';
           s.edge_reasons.forEach(function(r) {
-            tbl += '<div style="color:#aaa;font-size:10px;line-height:1.5;padding-left:8px">&bull; ' + r + '</div>';
+            tbl += '<div style="color:#bbb;font-size:10px;line-height:1.6;padding-left:6px">&bull; ' + r + '</div>';
           });
         } else {
           tbl += '<div style="color:#555;font-size:10px;font-style:italic">No edge data recorded (pre-tracking trade)</div>';
         }
-        // Additional details
-        tbl += '<div style="display:flex;gap:16px;margin-top:8px;flex-wrap:wrap">';
-        if (s.espn_edge) {
-          var edgeColor = s.espn_edge > 0.05 ? '#00dc5a' : s.espn_edge > 0 ? '#ffb400' : '#ff5000';
-          tbl += '<div style="background:#0d1117;border:1px solid #1f2937;border-radius:6px;padding:6px 10px;text-align:center"><div style="color:#555;font-size:8px;text-transform:uppercase">ESPN Edge</div><div style="color:' + edgeColor + ';font-size:13px;font-weight:800">+' + (s.espn_edge * 100).toFixed(1) + '%</div></div>';
-        }
-        if (s.conviction) {
-          var convColor = s.conviction >= 4 ? '#00dc5a' : s.conviction >= 2 ? '#ffb400' : '#ff5000';
-          tbl += '<div style="background:#0d1117;border:1px solid #1f2937;border-radius:6px;padding:6px 10px;text-align:center"><div style="color:#555;font-size:8px;text-transform:uppercase">Conviction</div><div style="color:' + convColor + ';font-size:13px;font-weight:800">' + s.conviction + '/5</div></div>';
-        }
-        if (s.entry_cents) {
-          var potentialProfit = ((100 - s.entry_cents) * s.count / 100).toFixed(2);
-          tbl += '<div style="background:#0d1117;border:1px solid #1f2937;border-radius:6px;padding:6px 10px;text-align:center"><div style="color:#555;font-size:8px;text-transform:uppercase">Max Profit</div><div style="color:#00dc5a;font-size:13px;font-weight:800">+$' + potentialProfit + '</div></div>';
-        }
-        if (s.game_state) {
-          var gsColor = s.game_state === 'live' ? '#00d4ff' : '#888';
-          var gsLabel = s.game_state === 'live' ? 'LIVE' : 'POST';
-          tbl += '<div style="background:#0d1117;border:1px solid #1f2937;border-radius:6px;padding:6px 10px;text-align:center"><div style="color:#555;font-size:8px;text-transform:uppercase">Game State</div><div style="color:' + gsColor + ';font-size:13px;font-weight:800">' + gsLabel + '</div></div>';
-        }
-        tbl += '</div>'; // end detail flex
-        // Outcome analysis for settled trades
-        if (!isOpen && s.pnl !== null) {
-          var outcomeColor = isWin ? '#0a2a0a' : '#2a0a0a';
-          var outcomeBorder = isWin ? '#00dc5a' : '#ff5000';
-          var outcomeIcon = isWin ? '&#10003;' : '&#10007;';
-          var outcomeText = isWin ? 'Edge was real — bet paid off' : 'Edge did not hold — market moved against us';
-          if (isLoss && s.espn_edge && s.espn_edge > 0.10) outcomeText = 'Had strong ESPN edge (+' + (s.espn_edge*100).toFixed(0) + '%) but market disagreed';
-          if (isLoss && s.entry_cents && s.entry_cents < 40) outcomeText = 'Underdog bet at ' + s.entry_cents + '&cent; — high risk/high reward did not pay off this time';
-          if (isWin && s.entry_cents && s.entry_cents >= 65) outcomeText = 'Favorite at ' + s.entry_cents + '&cent; held as expected';
-          tbl += '<div style="margin-top:8px;padding:6px 10px;background:' + outcomeColor + ';border:1px solid ' + outcomeBorder + '44;border-radius:4px;font-size:10px;color:' + outcomeBorder + '">';
-          tbl += '<span style="font-weight:700">' + outcomeIcon + ' ' + resultLabel + '</span> &middot; ' + outcomeText;
+
+        // Inline metrics row
+        var hasMetrics = s.espn_edge || s.conviction || s.game_state;
+        if (hasMetrics) {
+          tbl += '<div style="display:flex;gap:12px;margin-top:6px;padding-top:6px;border-top:1px solid #1a1a1a">';
+          if (s.espn_edge) {
+            var edgeColor = s.espn_edge > 0.05 ? '#00dc5a' : s.espn_edge > 0 ? '#ffb400' : '#ff5000';
+            tbl += '<span style="color:' + edgeColor + ';font-size:10px;font-weight:700">ESPN Edge: +' + (s.espn_edge * 100).toFixed(1) + '%</span>';
+          }
+          if (s.conviction) {
+            var convColor = s.conviction >= 4 ? '#00dc5a' : s.conviction >= 2 ? '#ffb400' : '#ff5000';
+            tbl += '<span style="color:' + convColor + ';font-size:10px;font-weight:700">Conviction: ' + s.conviction + '/5</span>';
+          }
+          if (s.game_state) {
+            var gsColor = s.game_state === 'live' ? '#00d4ff' : '#888';
+            tbl += '<span style="color:' + gsColor + ';font-size:10px;font-weight:700">' + (s.game_state === 'live' ? 'LIVE' : 'POST') + '</span>';
+          }
           tbl += '</div>';
         }
-        tbl += '</div></div>'; // end expandable
+        tbl += '</div>'; // end reasoning box
+
         tbl += '</div>'; // end card
       });
       tbl += '</div>';
-      if (allBets.length > 50) {
-        tbl += '<div style="color:#555;font-size:9px;padding:6px 4px;text-align:center">Showing all ' + allBets.length + ' trades</div>';
-      }
-      tableEl.innerHTML = tbl;
+      feedEl.innerHTML = tbl;
     }
 
     // Update trade badge
     var badge = document.getElementById('trade-badge');
-    if (badge) badge.textContent = settled.length;
+    if (badge) badge.textContent = allBets.length;
 
   } catch(e) {
     console.error('Performance tab error', e);
@@ -15261,7 +14993,7 @@ async function loadSeventyFivers() {
       html += '</div>';
       html += '</div>';
       html += '<div style="display:flex;gap:8px">';
-      html += '<button onclick="quickBet(&quot;' + p.ticker + '&quot;,&quot;' + p.side + '&quot;,' + p.price_cents + ')" style="flex:1;background:' + (p.closing_soon ? '#ff8c00' : '#00dc5a') + ';color:#000;border:none;padding:10px;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer">' + (p.closing_soon ? 'LOCK IN $' : 'Bet $') + p.bet_size.toFixed(0) + '</button>';
+      // Quick bet button removed - bot only
       html += '<a href="' + p.url + '" target="_blank" style="display:flex;align-items:center;padding:10px 12px;background:#222;border-radius:8px;color:#888;text-decoration:none;font-size:11px">&#x2197;</a>';
       html += '</div>';
       html += '</div>';
