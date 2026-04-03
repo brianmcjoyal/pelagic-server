@@ -7172,8 +7172,9 @@ def settled_positions():
                 "entry_time": _entry_time,
             })
 
-        # Sort by settle_time descending (most recently closed first), trade_date as fallback
-        settled.sort(key=lambda s: (s.get("settle_time") or s.get("trade_date") or ""), reverse=True)
+        # Sort by trade_date descending (most recently placed first)
+        # Note: settle_time uses market close_time which can be far-future (2099 etc), so not reliable for sort
+        settled.sort(key=lambda s: (s.get("trade_date") or "0000-00-00"), reverse=True)
 
         total_bets = wins + losses + breakeven
         roi = round(total_pnl / max(0.01, total_wagered) * 100, 1) if total_wagered > 0 else 0
@@ -14372,23 +14373,18 @@ async function loadPositions() {
       } else {
         // Sort newest first by trade_date (when we bought), then settle_time as tiebreaker
         settled.sort(function(a, b) {
-          // Sort by settle_time first (most recently closed first), then trade_date as fallback
-          var aTime = a.settle_time || a.trade_date || '2000-01-01';
-          var bTime = b.settle_time || b.trade_date || '2000-01-01';
-          return bTime > aTime ? 1 : (bTime < aTime ? -1 : 0);
+          // Sort by trade_date (most recently placed first)
+          var aDate = a.trade_date || '2000-01-01';
+          var bDate = b.trade_date || '2000-01-01';
+          return bDate > aDate ? 1 : (bDate < aDate ? -1 : 0);
         });
-        var ch = '<table style="font-size:10px"><tr><th>Settled</th><th>Market</th><th>Side</th><th>Result</th><th>P&L</th></tr>';
+        var ch = '<table style="font-size:10px"><tr><th>Date</th><th>Market</th><th>Side</th><th>Result</th><th>P&L</th></tr>';
         settled.forEach(function(s) {
           var resultColor = s.won ? '#00dc5a' : '#ff5000';
           var resultText = s.won ? 'WON' : 'LOST';
           var pnlUsd = s.pnl_usd || 0;
           var settleDate = '--';
-          if (s.settle_time) {
-            try {
-              var sd = new Date(s.settle_time);
-              if (!isNaN(sd.getTime())) settleDate = (sd.getMonth()+1).toString().padStart(2,'0') + '-' + sd.getDate().toString().padStart(2,'0');
-            } catch(e) {}
-          } else if (s.trade_date) {
+          if (s.trade_date) {
             settleDate = s.trade_date.substring(5);
           }
           ch += '<tr>';
