@@ -14411,7 +14411,7 @@ async function loadPositions() {
       _setText('pos-closed-count', '(' + settled.length + ')');
       _setHTML('pos-closed-pnl', '<span style="color:' + closedPnlColor + '">' + (closedPnl >= 0 ? '+' : '') + '$' + Math.abs(closedPnl).toFixed(2) + '</span>');
       if (settled.length === 0) {
-        _setHTML('pos-table-closed', '<div style="color:#555);font-size:9px;padding:8px;text-align:center">No settled positions yet</div>';
+        _setHTML('pos-table-closed', '<div style="color:#555;font-size:9px;padding:8px;text-align:center">No settled positions yet</div>');
       } else {
         // Sort newest first by trade_date (when we bought), then settle_time as tiebreaker
         settled.sort(function(a, b) {
@@ -14448,7 +14448,7 @@ async function loadPositions() {
         _setHTML('pos-table-closed', ch);
       }
     } catch(e) {
-      _setHTML('pos-table-closed', '<div style="color:#555);font-size:9px">Error loading settled</div>';
+      _setHTML('pos-table-closed', '<div style="color:#555;font-size:9px">Error loading settled</div>');
     }
   } catch(e) {
     _setHTML('pos-table', '<div class="empty">Error: ' + e.message + '</div>');
@@ -15269,7 +15269,7 @@ async function loadSeventyFivers() {
     cardsEl.innerHTML = html;
   } catch(e) {
     console.error('75%ers error', e);
-    _setHTML('sf-cards', '<div style="color:#ff5000);text-align:center;padding:40px;grid-column:1/-1">Error loading picks</div>';
+    _setHTML('sf-cards', '<div style="color:#ff5000;text-align:center;padding:40px;grid-column:1/-1">Error loading picks</div>');
   }
 }
 
@@ -15419,7 +15419,7 @@ async function loadQuantPicks() {
     }
   } catch(e) {
     console.error('Quant error', e);
-    _setHTML('quant-cards', '<div style="color:#ff5000);text-align:center;padding:40px;grid-column:1/-1">Error loading quant picks</div>';
+    _setHTML('quant-cards', '<div style="color:#ff5000;text-align:center;padding:40px;grid-column:1/-1">Error loading quant picks</div>');
   }
 }
 
@@ -15503,7 +15503,7 @@ function drawWheel(opps, highlightIdx) {
 }
 
 function skipWheelPick() {
-  _setHTML('wheel-result', '<div style="color:#888);font-size:11px;padding:8px">Skipped — spin again!</div>';
+  _setHTML('wheel-result', '<div style="color:#888;font-size:11px;padding:8px">Skipped — spin again!</div>');
 }
 
 function spinWheel() {
@@ -16006,7 +16006,7 @@ async function loadInsights() {
     feed.innerHTML = html;
   } catch(e) {
     console.error('Insights load error', e);
-    _setHTML('daily-insights-feed', '<div style="color:#ff5000);font-size:12px">Error loading insights: ' + e.message + '</div>';
+    _setHTML('daily-insights-feed', '<div style="color:#ff5000;font-size:12px">Error loading insights: ' + e.message + '</div>');
   }
 }
 
@@ -16172,7 +16172,7 @@ async function loadTrends() {
       pEl.innerHTML = '<div style="color:#555;font-size:10px;text-align:center;padding:8px">Learning engine has not run yet</div>';
     }
   } catch(e) {
-    _setHTML('trends-list', '<div style="color:#ff5000);font-size:11px">Error: ' + e.message + '</div>';
+    _setHTML('trends-list', '<div style="color:#ff5000;font-size:11px">Error: ' + e.message + '</div>');
   }
 }
 
@@ -16327,7 +16327,7 @@ async function loadAnalytics() {
 
   } catch(e) {
     console.error('Analytics load error', e);
-    _setHTML('analytics-insights', '<div style="color:#ff5000);font-size:12px">Error loading analytics: ' + e.message + '</div>';
+    _setHTML('analytics-insights', '<div style="color:#ff5000;font-size:12px">Error loading analytics: ' + e.message + '</div>');
   }
 }
 
