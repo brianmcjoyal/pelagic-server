@@ -7166,9 +7166,8 @@ def settled_positions():
                 "entry_time": _entry_time,
             })
 
-        # Sort by trade_date descending (newest first), then settle_time as tiebreaker
-        # trade_date reflects when we BOUGHT, which is what users see in the UI
-        settled.sort(key=lambda s: (s.get("trade_date") or "", s.get("settle_time") or ""), reverse=True)
+        # Sort by settle_time descending (most recently closed first), trade_date as fallback
+        settled.sort(key=lambda s: (s.get("settle_time") or s.get("trade_date") or ""), reverse=True)
 
         total_bets = wins + losses + breakeven
         roi = round(total_pnl / max(0.01, total_wagered) * 100, 1) if total_wagered > 0 else 0
@@ -14376,11 +14375,9 @@ async function loadPositions() {
       } else {
         // Sort newest first by trade_date (when we bought), then settle_time as tiebreaker
         settled.sort(function(a, b) {
-          var aDate = a.trade_date || '2000-01-01';
-          var bDate = b.trade_date || '2000-01-01';
-          if (aDate !== bDate) return bDate > aDate ? 1 : -1;
-          var aTime = a.settle_time || '';
-          var bTime = b.settle_time || '';
+          // Sort by settle_time first (most recently closed first), then trade_date as fallback
+          var aTime = a.settle_time || a.trade_date || '2000-01-01';
+          var bTime = b.settle_time || b.trade_date || '2000-01-01';
           return bTime > aTime ? 1 : (bTime < aTime ? -1 : 0);
         });
         var ch = '<table style="font-size:10px"><tr><th>Settled</th><th>Market</th><th>Side</th><th>Result</th><th>P&L</th></tr>';
@@ -14392,7 +14389,7 @@ async function loadPositions() {
           if (s.settle_time) {
             try {
               var sd = new Date(s.settle_time);
-              if (!isNaN(sd.getTime())) settleDate = sd.toLocaleDateString('en-US', {month:'short', day:'numeric'});
+              if (!isNaN(sd.getTime())) settleDate = (sd.getMonth()+1).toString().padStart(2,'0') + '-' + sd.getDate().toString().padStart(2,'0');
             } catch(e) {}
           } else if (s.trade_date) {
             settleDate = s.trade_date.substring(5);
