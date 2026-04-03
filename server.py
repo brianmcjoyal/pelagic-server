@@ -15101,7 +15101,7 @@ async function loadPerformance() {
 
         var detailId = 'journal-' + idx;
 
-        tbl += '<div style="border-left:3px solid ' + borderColor + ';border-radius:4px;background:rgba(20,20,20,0.5);cursor:pointer" onclick="var d=document.getElementById(\\'' + detailId + '\\');d.style.display=d.style.display===\\'none\\'?\\'block\\':\\'none\\'">';
+        tbl += '<div style="border-left:3px solid ' + borderColor + ';border-radius:4px;background:rgba(20,20,20,0.5);cursor:pointer" onclick="var d=document.getElementById(&#39;' + detailId + '&#39;);d.style.display=d.style.display===&#39;none&#39;?&#39;block&#39;:&#39;none&#39;">';
         // Main row
         tbl += '<div style="padding:8px 12px;display:flex;justify-content:space-between;align-items:center">';
         tbl += '<div style="flex:1;min-width:0">';
