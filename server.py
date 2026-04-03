@@ -7097,6 +7097,75 @@ def settled_positions():
             # Get settlement time from position data
             settle_time = pos.get("settlement_time") or pos.get("last_updated") or ""
 
+            # Look up edge reasoning from trade journal
+            _edge_reasons = []
+            _espn_edge = None
+            _conviction = 0
+            _game_state_at_entry = ""
+            _entry_time = ""
+            # Check trade journal first (richest data)
+            for _jrec in _TRADE_JOURNAL:
+                if _jrec.get("ticker") == ticker:
+                    # ESPN edge
+                    if _jrec.get("espn_edge"):
+                        _espn_edge = _jrec["espn_edge"]
+                        _espn_implied = _jrec.get("espn_implied_prob")
+                        _kalshi_implied = _jrec.get("kalshi_implied_prob") or (entry_cents / 100.0 if entry_cents else 0)
+                        _edge_reasons.append(f"ESPN sportsbook edge: +{_espn_edge:.1%}")
+                        if _espn_implied:
+                            _edge_reasons.append(f"ESPN implied: {_espn_implied:.0%} vs Kalshi: {_kalshi_implied:.0%}")
+                    # Game state
+                    if _jrec.get("game_state") == "in":
+                        _margin = _jrec.get("game_margin")
+                        _period = _jrec.get("game_period", "")
+                        _gs_str = "LIVE game"
+                        if _margin is not None:
+                            _gs_str += f" (margin: {_margin} pts)"
+                        if _period:
+                            _gs_str += f" {_period}"
+                        _edge_reasons.append(_gs_str)
+                        _game_state_at_entry = "live"
+                    elif _jrec.get("game_state") == "post":
+                        _edge_reasons.append("Game finished, settling")
+                        _game_state_at_entry = "post"
+                    # Strategy reasoning
+                    _strat = _jrec.get("strategy", "")
+                    if _strat == "live_sniper":
+                        _edge_reasons.append(f"Sniper: favorite at {entry_cents}¢ (65-85¢ range)")
+                    elif _strat == "moonshark":
+                        _edge_reasons.append(f"MoonShark: underdog at {entry_cents}¢ (25-40¢ range)")
+                    elif _strat == "closegame":
+                        _edge_reasons.append(f"CloseGame: late-game underdog at {entry_cents}¢")
+                    # Orderbook
+                    if _jrec.get("ob_spread") is not None:
+                        _edge_reasons.append(f"Spread: {_jrec['ob_spread']}¢")
+                    if _jrec.get("ob_liquidity"):
+                        _edge_reasons.append(f"Liquidity: {_jrec['ob_liquidity']}")
+                    # Momentum
+                    if _jrec.get("momentum_direction") and _jrec["momentum_direction"] != "flat":
+                        _edge_reasons.append(f"Momentum: {_jrec['momentum_direction']} ({_jrec.get('momentum_magnitude', 0):.0f})")
+                    _entry_time = _jrec.get("entry_time", "")
+                    break
+            # Also check today's trade arrays for edge_reasons (newer trades)
+            if not _edge_reasons:
+                for _tlist_name in ["snipe_trades_today", "moonshark_trades_today", "closegame_trades_today"]:
+                    for _tt in BOT_STATE.get(_tlist_name, []):
+                        if _tt.get("ticker") == ticker:
+                            _edge_reasons = _tt.get("edge_reasons", [])
+                            _conviction = _tt.get("conviction", 0)
+                            _espn_edge = _tt.get("espn_edge")
+                            break
+                    if _edge_reasons:
+                        break
+            # Default reasoning if nothing found
+            if not _edge_reasons:
+                if entry_cents >= 65:
+                    _edge_reasons.append(f"Favorite at {entry_cents}¢ — high implied probability")
+                elif entry_cents <= 40:
+                    _edge_reasons.append(f"Underdog at {entry_cents}¢ — high potential payout")
+                else:
+                    _edge_reasons.append(f"Entry at {entry_cents}¢")
+
             settled.append({
                 "ticker": ticker,
                 "title": title,
@@ -7110,6 +7179,11 @@ def settled_positions():
                 "entry_cents": entry_cents,
                 "trade_date": trade_date,
                 "settle_time": settle_time,
+                "edge_reasons": _edge_reasons,
+                "espn_edge": round(_espn_edge, 4) if _espn_edge else None,
+                "conviction": _conviction,
+                "game_state_at_entry": _game_state_at_entry,
+                "entry_time": _entry_time,
             })
 
         # Sort by trade_date descending (newest first), then settle_time as tiebreaker
@@ -12635,7 +12709,7 @@ a:hover { color: #7da5f5; }
   <!-- Row 5: Recent Trades -->
   <div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:14px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-      <div style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Recent Trades <span class="badge" id="trade-badge" style="margin-left:6px">0</span></div>
+      <div style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Trade Journal <span class="badge" id="trade-badge" style="margin-left:6px">0</span> <span style="color:#444;font-size:8px;font-weight:400;margin-left:4px">click any trade for edge details</span></div>
       <div style="display:flex;align-items:center;gap:8px">
         <label style="font-size:10px;color:#666;cursor:pointer"><input type="checkbox" id="hide-history-junk" checked onchange="loadPerformance()" style="margin-right:3px;accent-color:#00dc5a"> Hide old bot trades</label>
         <button class="refresh-btn" onclick="loadPerformance()">Refresh</button>
@@ -14938,49 +15012,174 @@ async function loadPerformance() {
       feedEl.innerHTML = '<div style="color:#555;font-size:11px">No insights yet</div>';
     }
 
-    // === RECENT TRADES ===
+    // === TRADE JOURNAL (all bets with edge reasoning) ===
     var tableEl = document.getElementById('settled-table');
     var hiddenCount = allSettled.length - settled.length;
-    if (settled.length === 0) {
-      tableEl.innerHTML = '<div style="color:#555;font-size:11px;padding:8px">No settled trades yet.</div>';
+    // Combine settled + open positions for full journal
+    var allBets = [];
+    // Add settled trades
+    settled.forEach(function(s) {
+      allBets.push({
+        title: s.title || s.ticker || '',
+        ticker: s.ticker || '',
+        side: s.side || '',
+        entry_cents: s.entry_cents || 0,
+        count: s.count || 0,
+        cost: s.total_traded || 0,
+        pnl: s.pnl_usd || 0,
+        won: s.won,
+        status: s.won === true ? 'WON' : s.won === false ? 'LOST' : 'EVEN',
+        date: s.trade_date || '',
+        category: s.category || '',
+        strategy: s.strategy || '',
+        edge_reasons: s.edge_reasons || [],
+        espn_edge: s.espn_edge,
+        conviction: s.conviction || 0,
+        game_state: s.game_state_at_entry || '',
+        entry_time: s.entry_time || '',
+        settle_time: s.settle_time || '',
+      });
+    });
+    // Also add today's open trades (not yet settled)
+    try {
+      var todayData = await fetch(API + '/trades-today').then(function(r){ return r.json(); });
+      (todayData.trades || []).forEach(function(t) {
+        // Skip if already in settled
+        var isDup = settled.some(function(s) { return s.ticker === t.ticker; });
+        if (!isDup) {
+          allBets.push({
+            title: t.title || t.ticker || '',
+            ticker: t.ticker || '',
+            side: t.side || '',
+            entry_cents: t.price_cents || 0,
+            count: t.count || 0,
+            cost: t.cost_usd || 0,
+            pnl: null,
+            won: null,
+            status: 'OPEN',
+            date: (t.time || '').substring(0, 10),
+            category: '',
+            strategy: t.strategy || '',
+            edge_reasons: t.edge_reasons || [],
+            espn_edge: t.espn_edge,
+            conviction: t.conviction || 0,
+            game_state: '',
+            entry_time: t.time || '',
+            settle_time: '',
+          });
+        }
+      });
+    } catch(e) {}
+
+    if (allBets.length === 0) {
+      tableEl.innerHTML = '<div style="color:#555;font-size:11px;padding:8px">No trades yet. Place some bets and every trade will be tracked here with full reasoning.</div>';
     } else {
+      // Sort: open first, then by date descending
+      allBets.sort(function(a, b) {
+        if (a.status === 'OPEN' && b.status !== 'OPEN') return -1;
+        if (b.status === 'OPEN' && a.status !== 'OPEN') return 1;
+        return (b.date || '').localeCompare(a.date || '');
+      });
+
       var tbl = '<div style="display:flex;flex-direction:column;gap:4px">';
-      settled.slice(0, 30).forEach(function(s) {
+      allBets.forEach(function(s, idx) {
         var isWin = s.won === true;
         var isLoss = s.won === false;
-        var pnlAbs = Math.abs(s.pnl_usd).toFixed(2);
-        var borderColor = isWin ? '#00dc5a' : isLoss ? '#ff5000' : '#555';
-        var pnlColor = isWin ? '#00dc5a' : isLoss ? '#ff5000' : '#888';
-        var pnlSign = isWin ? '+$' : '-$';
-        var resultLabel = isWin ? 'WON' : isLoss ? 'LOST' : 'EVEN';
+        var isOpen = s.status === 'OPEN';
+        var borderColor = isOpen ? '#ffb400' : isWin ? '#00dc5a' : isLoss ? '#ff5000' : '#555';
+        var pnlColor = isOpen ? '#ffb400' : isWin ? '#00dc5a' : isLoss ? '#ff5000' : '#888';
+        var resultLabel = s.status;
+        var pnlStr = isOpen ? 'PENDING' : (s.pnl >= 0 ? '+$' : '-$') + Math.abs(s.pnl).toFixed(2);
+
+        // Format date
         var dateStr = '';
-        var tdRaw = s.trade_date || '';
-        if (tdRaw) {
+        if (s.date) {
           try {
-            var parts = tdRaw.split('-');
+            var parts = s.date.split('-');
             var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
             dateStr = months[parseInt(parts[1])-1] + ' ' + parseInt(parts[2]);
-          } catch(e) { dateStr = tdRaw; }
+          } catch(e) { dateStr = s.date; }
         }
-        var costStr = s.total_traded ? '$' + s.total_traded.toFixed(2) : '';
-        var catLabel = s.category ? s.category.charAt(0).toUpperCase() + s.category.slice(1) : '';
-        tbl += '<div style="border-left:3px solid ' + borderColor + ';padding:8px 12px;border-radius:4px;display:flex;justify-content:space-between;align-items:center;background:rgba(20,20,20,0.5)">';
+
+        // Strategy label
+        var stratLabels = {live_sniper:'SNIPER', sniper:'SNIPER', moonshark:'MOONSHARK', closegame:'CLOSEGAME', manual:'MANUAL', unknown:''};
+        var stratColors = {live_sniper:'#ffb400', sniper:'#ffb400', moonshark:'#e040fb', closegame:'#00d4ff', manual:'#5abf5a', unknown:'#555'};
+        var stratLabel = stratLabels[s.strategy] || (s.strategy || '').toUpperCase();
+        var stratColor = stratColors[s.strategy] || '#888';
+
+        var detailId = 'journal-' + idx;
+
+        tbl += '<div style="border-left:3px solid ' + borderColor + ';border-radius:4px;background:rgba(20,20,20,0.5);cursor:pointer" onclick="var d=document.getElementById(\'' + detailId + '\');d.style.display=d.style.display===\'none\'?\'block\':\'none\'">';
+        // Main row
+        tbl += '<div style="padding:8px 12px;display:flex;justify-content:space-between;align-items:center">';
         tbl += '<div style="flex:1;min-width:0">';
-        tbl += '<div style="color:#ddd;font-size:11px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + s.title + '</div>';
-        tbl += '<div style="color:#666;font-size:9px;margin-top:2px">';
+        tbl += '<div style="display:flex;align-items:center;gap:6px">';
+        if (stratLabel) tbl += '<span style="font-size:8px;padding:1px 5px;background:' + stratColor + '22;border:1px solid ' + stratColor + '44;border-radius:3px;color:' + stratColor + ';font-weight:700">' + stratLabel + '</span>';
+        tbl += '<span style="color:#ddd;font-size:11px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + s.title + '</span>';
+        tbl += '</div>';
+        tbl += '<div style="color:#666;font-size:9px;margin-top:3px">';
         if (dateStr) tbl += dateStr;
-        if (costStr) tbl += ' &middot; ' + costStr;
-        if (catLabel) tbl += ' &middot; ' + catLabel;
-        if (s.side) tbl += ' &middot; ' + s.side.toUpperCase();
+        tbl += ' &middot; ' + (s.side || '').toUpperCase() + ' ' + s.entry_cents + '&cent; x' + s.count;
+        tbl += ' &middot; $' + s.cost.toFixed(2);
+        if (s.category) tbl += ' &middot; ' + s.category;
+        tbl += ' <span style="color:#444">&#9660; click for details</span>';
         tbl += '</div></div>';
         tbl += '<div style="text-align:right;margin-left:12px;flex-shrink:0">';
-        tbl += '<div style="color:' + pnlColor + ';font-size:14px;font-weight:800">' + pnlSign + pnlAbs + '</div>';
+        tbl += '<div style="color:' + pnlColor + ';font-size:14px;font-weight:800">' + pnlStr + '</div>';
         tbl += '<div style="color:' + pnlColor + ';font-size:9px;font-weight:600;letter-spacing:0.5px">' + resultLabel + '</div>';
         tbl += '</div></div>';
+
+        // Expandable edge detail (hidden by default)
+        tbl += '<div id="' + detailId + '" style="display:none;padding:0 12px 10px 12px;border-top:1px solid #1a1a1a">';
+        tbl += '<div style="padding-top:8px">';
+        // Edge reasoning section
+        if (s.edge_reasons && s.edge_reasons.length > 0) {
+          tbl += '<div style="color:#ffb400;font-size:10px;font-weight:700;margin-bottom:4px">WHY THIS BET</div>';
+          s.edge_reasons.forEach(function(r) {
+            tbl += '<div style="color:#aaa;font-size:10px;line-height:1.5;padding-left:8px">&bull; ' + r + '</div>';
+          });
+        } else {
+          tbl += '<div style="color:#555;font-size:10px;font-style:italic">No edge data recorded (pre-tracking trade)</div>';
+        }
+        // Additional details
+        tbl += '<div style="display:flex;gap:16px;margin-top:8px;flex-wrap:wrap">';
+        if (s.espn_edge) {
+          var edgeColor = s.espn_edge > 0.05 ? '#00dc5a' : s.espn_edge > 0 ? '#ffb400' : '#ff5000';
+          tbl += '<div style="background:#0d1117;border:1px solid #1f2937;border-radius:6px;padding:6px 10px;text-align:center"><div style="color:#555;font-size:8px;text-transform:uppercase">ESPN Edge</div><div style="color:' + edgeColor + ';font-size:13px;font-weight:800">+' + (s.espn_edge * 100).toFixed(1) + '%</div></div>';
+        }
+        if (s.conviction) {
+          var convColor = s.conviction >= 4 ? '#00dc5a' : s.conviction >= 2 ? '#ffb400' : '#ff5000';
+          tbl += '<div style="background:#0d1117;border:1px solid #1f2937;border-radius:6px;padding:6px 10px;text-align:center"><div style="color:#555;font-size:8px;text-transform:uppercase">Conviction</div><div style="color:' + convColor + ';font-size:13px;font-weight:800">' + s.conviction + '/5</div></div>';
+        }
+        if (s.entry_cents) {
+          var potentialProfit = ((100 - s.entry_cents) * s.count / 100).toFixed(2);
+          tbl += '<div style="background:#0d1117;border:1px solid #1f2937;border-radius:6px;padding:6px 10px;text-align:center"><div style="color:#555;font-size:8px;text-transform:uppercase">Max Profit</div><div style="color:#00dc5a;font-size:13px;font-weight:800">+$' + potentialProfit + '</div></div>';
+        }
+        if (s.game_state) {
+          var gsColor = s.game_state === 'live' ? '#00d4ff' : '#888';
+          var gsLabel = s.game_state === 'live' ? 'LIVE' : 'POST';
+          tbl += '<div style="background:#0d1117;border:1px solid #1f2937;border-radius:6px;padding:6px 10px;text-align:center"><div style="color:#555;font-size:8px;text-transform:uppercase">Game State</div><div style="color:' + gsColor + ';font-size:13px;font-weight:800">' + gsLabel + '</div></div>';
+        }
+        tbl += '</div>'; // end detail flex
+        // Outcome analysis for settled trades
+        if (!isOpen && s.pnl !== null) {
+          var outcomeColor = isWin ? '#0a2a0a' : '#2a0a0a';
+          var outcomeBorder = isWin ? '#00dc5a' : '#ff5000';
+          var outcomeIcon = isWin ? '&#10003;' : '&#10007;';
+          var outcomeText = isWin ? 'Edge was real — bet paid off' : 'Edge didn\'t hold — market moved against us';
+          if (isLoss && s.espn_edge && s.espn_edge > 0.10) outcomeText = 'Had strong ESPN edge (+' + (s.espn_edge*100).toFixed(0) + '%) but market disagreed';
+          if (isLoss && s.entry_cents && s.entry_cents < 40) outcomeText = 'Underdog bet at ' + s.entry_cents + '&cent; — high risk/high reward didn\'t pay off this time';
+          if (isWin && s.entry_cents && s.entry_cents >= 65) outcomeText = 'Favorite at ' + s.entry_cents + '&cent; held as expected';
+          tbl += '<div style="margin-top:8px;padding:6px 10px;background:' + outcomeColor + ';border:1px solid ' + outcomeBorder + '44;border-radius:4px;font-size:10px;color:' + outcomeBorder + '">';
+          tbl += '<span style="font-weight:700">' + outcomeIcon + ' ' + resultLabel + '</span> &middot; ' + outcomeText;
+          tbl += '</div>';
+        }
+        tbl += '</div></div>'; // end expandable
+        tbl += '</div>'; // end card
       });
       tbl += '</div>';
-      if (settled.length > 30) {
-        tbl += '<div style="color:#555;font-size:9px;padding:6px 4px;text-align:center">' + (settled.length - 30) + ' more trades not shown</div>';
+      if (allBets.length > 50) {
+        tbl += '<div style="color:#555;font-size:9px;padding:6px 4px;text-align:center">Showing all ' + allBets.length + ' trades</div>';
       }
       tableEl.innerHTML = tbl;
     }
