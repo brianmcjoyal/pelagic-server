@@ -12573,14 +12573,14 @@ a:hover { color: #7da5f5; }
   </div>
   <div id="portfolio-positions"><div class="loading">Loading positions...</div></div>
   <div class="section" style="margin-top:20px">
-    <div class="section-title">All Positions <span class="badge" id="pos-badge">0</span><button class="refresh-btn" onclick="loadPositions()">Refresh</button></div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px" id="pos-split-container">
+    <div class="section-title">Closed Positions <span class="badge" id="pos-badge">0</span> <span id="pos-closed-pnl" style="font-size:10px;color:#888;margin-left:4px"></span><button class="refresh-btn" onclick="loadPositions()">Refresh</button></div>
+    <div id="pos-split-container">
+      <!-- Hidden elements for backward compat -->
+      <span id="pos-open-count" style="display:none"></span>
+      <span id="pos-open-pnl" style="display:none"></span>
+      <div id="pos-table-open" style="display:none"></div>
+      <span id="pos-closed-count" style="display:none"></span>
       <div>
-        <div style="font-size:11px;font-weight:700;color:#00dc5a;margin-bottom:6px">Open <span id="pos-open-count" style="color:#888;font-weight:400">(0)</span> <span id="pos-open-pnl" style="font-size:10px;color:#888"></span></div>
-        <div id="pos-table-open"><div class="loading">Loading...</div></div>
-      </div>
-      <div>
-        <div style="font-size:11px;font-weight:700;color:#888;margin-bottom:6px">Closed <span id="pos-closed-count" style="color:#888;font-weight:400">(0)</span> <span id="pos-closed-pnl" style="font-size:10px;color:#888"></span></div>
         <div id="pos-table-closed"><div class="loading">Loading...</div></div>
       </div>
     </div>
@@ -13380,19 +13380,7 @@ async function loadPortfolio() {
       html += '<div style="margin-top:6px;font-size:9px;color:#555">' + hiddenCount + ' old bot positions hidden (uncheck toggle to show all)</div>';
     }
 
-    // Split by placed_by: YOU vs BOT
-    var myBets = positions.filter(function(p) { return p.placed_by === 'you'; });
-    var botBets = positions.filter(function(p) { return p.placed_by === 'bot'; });
-    var legacyBets = positions.filter(function(p) { return p.placed_by === 'legacy'; });
-    if (legacyBets.length > 0) {
-      hiddenCount += legacyBets.length;
-    }
-    var myPnl = myBets.reduce(function(s, p) { return s + (p.unrealized_pnl_cents || 0); }, 0);
-    var botPnl = botBets.reduce(function(s, p) { return s + (p.unrealized_pnl_cents || 0); }, 0);
-    html += '<div style="margin-top:16px;display:grid;grid-template-columns:1fr 1fr;gap:16px">';
-    html += buildPosTable(myBets, '👤 My Bets', '#5abf5a', myPnl);
-    html += buildPosTable(botBets, '🤖 Bot Bets', '#7a7aff', botPnl);
-    html += '</div>';
+    // My Bets / Bot Bets section removed — bot only platform
 
     posEl.innerHTML = html;
   } catch(e) {
@@ -13463,19 +13451,14 @@ async function loadBetsFeed() {
       var sl = stratLabels[t.strategy] || (t.strategy || 'bot').toUpperCase();
       var title = (t.title || t.ticker || '').substring(0, 40);
       var sourceTag = t.source === 'you' ? '<span style="font-size:7px;padding:1px 3px;background:#1a2e1a;border:1px solid #3a8a3a;border-radius:3px;color:#5abf5a;margin-right:4px">YOU</span>' : '<span style="font-size:7px;padding:1px 3px;background:#1a1a2e;border:1px solid #4a4ae0;border-radius:3px;color:#7a7aff;margin-right:4px">BOT</span>';
-      // Build tooltip with edge reasoning
-      var tooltipLines = [];
+      // Build edge summary line to show inline
+      var edgeSummaryParts = [];
       if (t.edge_reasons && t.edge_reasons.length > 0) {
-        tooltipLines.push('WHY THIS BET:');
-        t.edge_reasons.forEach(function(r) { tooltipLines.push('  ' + r); });
+        t.edge_reasons.forEach(function(r) { edgeSummaryParts.push(r); });
       }
-      if (t.conviction) tooltipLines.push('Conviction: ' + t.conviction + '/5');
-      if (t.espn_edge) tooltipLines.push('ESPN Edge: +' + (t.espn_edge * 100).toFixed(1) + '%');
-      if (t.potential_profit) tooltipLines.push('Potential Profit: +$' + t.potential_profit.toFixed(2));
-      tooltipLines.push('Entry: ' + (t.price_cents || 0) + '\u00A2 x' + (t.count || 0));
-      tooltipLines.push('Cost: $' + (t.cost_usd || 0).toFixed(2));
-      var tooltipText = tooltipLines.join('\\n');
-      h += '<div class="activity-line" style="cursor:pointer;position:relative" title="' + tooltipText.replace(/"/g, '&quot;') + '">';
+      if (t.conviction && edgeSummaryParts.length === 0) edgeSummaryParts.push('Conviction: ' + t.conviction + '/5');
+      if (t.espn_edge && edgeSummaryParts.length === 0) edgeSummaryParts.push('ESPN Edge: +' + (t.espn_edge * 100).toFixed(1) + '%');
+      h += '<div class="activity-line" style="cursor:pointer;position:relative">';
       h += '<span class="time">' + timeStr + '</span>';
       h += '<span class="dot" style="background:' + sc + '"></span>';
       h += '<span class="msg">' + sourceTag + '<span style="color:' + sc + ';font-weight:700;font-size:8px;margin-right:4px">' + sl + '</span>';
@@ -13509,6 +13492,13 @@ async function loadBetsFeed() {
         } catch(e) {}
       }
       if (settleStr) h += '<span style="color:#555;font-size:10px;margin-left:4px">⏱ ' + settleStr + '</span>';
+      // Edge reasoning inline
+      if (edgeSummaryParts.length > 0) {
+        h += '<div style="margin:2px 0 0 24px;font-size:9px;color:#888;line-height:1.4">';
+        h += '<span style="color:#ffb400;font-weight:600">Edge: </span>';
+        h += edgeSummaryParts.join(' · ');
+        h += '</div>';
+      }
       // Live score display
       var scoreInfo = scoreMap[t.ticker];
       if (scoreInfo && scoreInfo.display) {
@@ -14375,6 +14365,7 @@ async function loadPositions() {
       var closedPnl = settled.reduce(function(s, p) { return s + (p.pnl_usd || 0); }, 0);
       var closedPnlColor = closedPnl >= 0 ? '#00dc5a' : '#ff5000';
       _setText('pos-closed-count', '(' + settled.length + ')');
+      _setText('pos-badge', settled.length);
       _setHTML('pos-closed-pnl', '<span style="color:' + closedPnlColor + '">' + (closedPnl >= 0 ? '+' : '') + '$' + Math.abs(closedPnl).toFixed(2) + '</span>');
       if (settled.length === 0) {
         _setHTML('pos-table-closed', '<div style="color:#555;font-size:9px;padding:8px;text-align:center">No settled positions yet</div>');
