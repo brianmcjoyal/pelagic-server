@@ -2088,11 +2088,27 @@ def check_position_prices():
             close_time = mkt.get("expected_expiration_time") or mkt.get("close_time")
             current_yes_price = None
             current_no_price = None
-            # Handle both cache format (yes_ask_cents) and raw API format (yes_ask as decimal)
+            # Use last_price (matches Kalshi's portfolio valuation), fall back to bid, then ask
+            # Kalshi values positions at last trade price, not the ask (which is inflated by spread)
+            _yes_last = mkt.get("last_yes_price_dollars") or mkt.get("last_yes_price") or mkt.get("yes_bid_dollars") or mkt.get("yes_bid")
+            _no_last = mkt.get("last_no_price_dollars") or mkt.get("last_no_price") or mkt.get("no_bid_dollars") or mkt.get("no_bid")
             if mkt.get("yes_ask_cents"):
-                current_yes_price = int(mkt["yes_ask_cents"])
-                current_no_price = int(mkt.get("no_ask_cents", 100 - current_yes_price))
+                # Cache format — try last price first
+                current_yes_price = int(mkt.get("last_yes_price_cents") or mkt.get("yes_bid_cents") or mkt["yes_ask_cents"])
+                current_no_price = int(mkt.get("last_no_price_cents") or mkt.get("no_bid_cents") or mkt.get("no_ask_cents", 100 - current_yes_price))
+            elif _yes_last or _no_last:
+                if _yes_last:
+                    try:
+                        current_yes_price = int(round(float(_yes_last) * 100)) if isinstance(_yes_last, str) else int(_yes_last * 100 if _yes_last < 1 else _yes_last)
+                    except Exception:
+                        pass
+                if _no_last:
+                    try:
+                        current_no_price = int(round(float(_no_last) * 100)) if isinstance(_no_last, str) else int(_no_last * 100 if _no_last < 1 else _no_last)
+                    except Exception:
+                        pass
             else:
+                # Final fallback: ask prices
                 yes_ask = mkt.get("yes_ask_dollars") or mkt.get("yes_ask")
                 no_ask = mkt.get("no_ask_dollars") or mkt.get("no_ask")
                 if yes_ask:
