@@ -2939,6 +2939,13 @@ def live_game_snipe():
                         actual_cost = (price * filled) / 100.0
                         potential = (100 - price) * filled / 100.0
                         BOT_STATE["snipe_daily_spent"] += actual_cost
+                        # Build edge reasons for tooltip
+                        _snipe_edge_reasons = list(reasons)  # already built above
+                        if _snipe_game and _snipe_game.get("state") == "in":
+                            _snipe_edge_reasons.insert(0, "LIVE game")
+                        _snipe_edge_pct = None
+                        if closing_boost > 1:
+                            _snipe_edge_pct = f"closing boost {closing_boost:.1f}x"
                         BOT_STATE["snipe_trades_today"].append({
                             "ticker": ticker, "title": title, "side": side,
                             "price": price, "count": filled, "cost": actual_cost,
@@ -2947,6 +2954,8 @@ def live_game_snipe():
                             "bot_version": BOT_VERSION,
                             "strategy": "live_sniper",
                             "category": classify_market_category(title, ticker),
+                            "edge_reasons": _snipe_edge_reasons,
+                            "conviction": conviction,
                         })
                         # Track in trade journal for pattern analysis (pass orderbook if available)
                         _snipe_ob = None
@@ -3461,6 +3470,12 @@ def moonshark_snipe():
                         actual_cost = (price * filled) / 100.0
                         potential = (100 - price) * filled / 100.0
                         BOT_STATE["moonshark_daily_spent"] += actual_cost
+                        # Build edge reasons for tooltip
+                        _ms_edge_reasons = list(_conv_reasons) if _conv_reasons else []
+                        _ms_edge_detail = None
+                        if espn_edge is not None:
+                            _ms_edge_detail = f"ESPN edge: +{espn_edge:.1%}"
+                            _ms_edge_reasons.insert(0, _ms_edge_detail)
                         BOT_STATE["moonshark_trades_today"].append({
                             "ticker": ticker, "title": title, "side": side,
                             "price": price, "count": filled, "cost": actual_cost,
@@ -3469,6 +3484,9 @@ def moonshark_snipe():
                             "bot_version": BOT_VERSION,
                             "strategy": "moonshark",
                             "category": classify_market_category(title, ticker),
+                            "edge_reasons": _ms_edge_reasons,
+                            "conviction": ms_conviction,
+                            "espn_edge": round(espn_edge, 4) if espn_edge is not None else None,
                         })
                         # Track in trade journal for pattern analysis
                         _edge_data = None
@@ -3810,6 +3828,13 @@ def closegame_snipe():
                         actual_cost = (price * filled) / 100.0
                         potential = (100 - price) * filled / 100.0
                         BOT_STATE["closegame_daily_spent"] = BOT_STATE.get("closegame_daily_spent", 0) + actual_cost
+                        # Build edge reasons for tooltip
+                        _cg_edge_reasons = []
+                        _cg_edge_reasons.append(f"Close game: {score_str}")
+                        _cg_edge_reasons.append(f"Margin: {cg['margin']} pts")
+                        if edge:
+                            _cg_edge_reasons.append(f"ESPN edge: +{edge:.1%}")
+                        _cg_edge_reasons.append(f"Win prob: {estimated_win_prob:.0%}")
                         BOT_STATE.setdefault("closegame_trades_today", []).append({
                             "ticker": ticker, "title": title, "side": side,
                             "price": price, "count": filled, "cost": actual_cost,
@@ -3819,6 +3844,8 @@ def closegame_snipe():
                             "score": score_str,
                             "margin": cg["margin"],
                             "period": cg["period"],
+                            "edge_reasons": _cg_edge_reasons,
+                            "espn_edge": round(edge, 4) if edge else None,
                         })
                         _cg_game_info = {"home_score": cg.get("home_score"), "away_score": cg.get("away_score"), "clock": cg.get("period", ""), "state": "in", "league": cg.get("sport", "")}
                         _cg_edge = None
@@ -8542,6 +8569,10 @@ def trades_today_endpoint():
             "strategy": "sniper",
             "success": True,
             "source": "bot",
+            "edge_reasons": t.get("edge_reasons", []),
+            "conviction": t.get("conviction", 0),
+            "espn_edge": t.get("espn_edge"),
+            "potential_profit": t.get("potential_profit", 0),
         })
     for t in quant_trades:
         all_today.append({
@@ -8555,6 +8586,10 @@ def trades_today_endpoint():
             "strategy": "quant",
             "success": True,
             "source": "bot",
+            "edge_reasons": t.get("edge_reasons", []),
+            "conviction": t.get("conviction", 0),
+            "espn_edge": t.get("espn_edge"),
+            "potential_profit": t.get("potential_profit", 0),
         })
 
     for t in moonshark_trades:
@@ -8569,6 +8604,10 @@ def trades_today_endpoint():
             "strategy": "moonshark",
             "success": True,
             "source": "bot",
+            "edge_reasons": t.get("edge_reasons", []),
+            "conviction": t.get("conviction", 0),
+            "espn_edge": t.get("espn_edge"),
+            "potential_profit": t.get("potential_profit", 0),
         })
     for t in closegame_trades:
         all_today.append({
@@ -8582,6 +8621,10 @@ def trades_today_endpoint():
             "strategy": "closegame",
             "success": True,
             "source": "bot",
+            "edge_reasons": t.get("edge_reasons", []),
+            "conviction": t.get("conviction", 0),
+            "espn_edge": t.get("espn_edge"),
+            "potential_profit": t.get("potential_profit", 0),
         })
     for t in manual_trades:
         all_today.append({
@@ -8626,6 +8669,10 @@ def trades_today_endpoint():
                 "strategy": display_strategy,
                 "success": t.get("success", True),
                 "source": source,
+                "edge_reasons": t.get("edge_reasons", []),
+                "conviction": t.get("conviction", 0),
+                "espn_edge": t.get("espn_edge"),
+                "potential_profit": t.get("potential_profit", 0),
             })
             seen_tickers.add(ticker)
 
@@ -8637,9 +8684,15 @@ def trades_today_endpoint():
             c = _consolidated[key]
             c["count"] += t.get("count", 0)
             c["cost_usd"] = round(c["cost_usd"] + t.get("cost_usd", 0), 2)
+            c["potential_profit"] = round((c.get("potential_profit") or 0) + (t.get("potential_profit") or 0), 2)
             # Keep earliest time
             if t.get("time", "") and (not c.get("time") or t["time"] < c["time"]):
                 c["time"] = t["time"]
+            # Keep edge_reasons from the entry that has them
+            if t.get("edge_reasons") and not c.get("edge_reasons"):
+                c["edge_reasons"] = t["edge_reasons"]
+                c["conviction"] = t.get("conviction", 0)
+                c["espn_edge"] = t.get("espn_edge")
             # Weighted average price
             total_count = c["count"]
             if total_count > 0:
@@ -13304,13 +13357,25 @@ async function loadBetsFeed() {
     trades.forEach(function(t) {
       var timeStr = fmtTime(t.time);
       var sideC = t.side === 'yes' ? '#00dc5a' : '#ff5000';
-      var stratColors = {sniper:'#ffb400', quant:'#00d4ff', bot:'#888', moonshark:'#e040fb', manual:'#5abf5a', moonshark_manual:'#5abf5a'};
-      var stratLabels = {sniper:'SNIPER', quant:'QUANT', bot:'BOT', moonshark:'MOONSHARK', manual:'MANUAL', moonshark_manual:'MOONSHOT'};
+      var stratColors = {sniper:'#ffb400', quant:'#00d4ff', bot:'#888', moonshark:'#e040fb', closegame:'#00d4ff', manual:'#5abf5a', moonshark_manual:'#5abf5a', live_sniper:'#ffb400'};
+      var stratLabels = {sniper:'SNIPER', quant:'QUANT', bot:'BOT', moonshark:'MOONSHARK', closegame:'CLOSEGAME', manual:'MANUAL', moonshark_manual:'MOONSHOT', live_sniper:'SNIPER'};
       var sc = stratColors[t.strategy] || '#888';
       var sl = stratLabels[t.strategy] || (t.strategy || 'bot').toUpperCase();
       var title = (t.title || t.ticker || '').substring(0, 40);
       var sourceTag = t.source === 'you' ? '<span style="font-size:7px;padding:1px 3px;background:#1a2e1a;border:1px solid #3a8a3a;border-radius:3px;color:#5abf5a;margin-right:4px">YOU</span>' : '<span style="font-size:7px;padding:1px 3px;background:#1a1a2e;border:1px solid #4a4ae0;border-radius:3px;color:#7a7aff;margin-right:4px">BOT</span>';
-      h += '<div class="activity-line">';
+      // Build tooltip with edge reasoning
+      var tooltipLines = [];
+      if (t.edge_reasons && t.edge_reasons.length > 0) {
+        tooltipLines.push('WHY THIS BET:');
+        t.edge_reasons.forEach(function(r) { tooltipLines.push('  ' + r); });
+      }
+      if (t.conviction) tooltipLines.push('Conviction: ' + t.conviction + '/5');
+      if (t.espn_edge) tooltipLines.push('ESPN Edge: +' + (t.espn_edge * 100).toFixed(1) + '%');
+      if (t.potential_profit) tooltipLines.push('Potential Profit: +$' + t.potential_profit.toFixed(2));
+      tooltipLines.push('Entry: ' + (t.price_cents || 0) + '\u00A2 x' + (t.count || 0));
+      tooltipLines.push('Cost: $' + (t.cost_usd || 0).toFixed(2));
+      var tooltipText = tooltipLines.join('\\n');
+      h += '<div class="activity-line" style="cursor:pointer;position:relative" title="' + tooltipText.replace(/"/g, '&quot;') + '">';
       h += '<span class="time">' + timeStr + '</span>';
       h += '<span class="dot" style="background:' + sc + '"></span>';
       h += '<span class="msg">' + sourceTag + '<span style="color:' + sc + ';font-weight:700;font-size:8px;margin-right:4px">' + sl + '</span>';
@@ -13351,12 +13416,44 @@ async function loadBetsFeed() {
         var scoreIcon = scoreInfo.state === 'in' ? '⚡' : (scoreInfo.state === 'post' ? '✓' : '🏀');
         h += '<span style="color:' + scoreColor + ';font-size:10px;margin-left:4px">' + scoreIcon + ' ' + scoreInfo.display + '</span>';
       }
-      h += '</span></div>';
+      h += '</span>';
+      // Expandable edge detail row (hidden by default, toggles on click)
+      if (t.edge_reasons && t.edge_reasons.length > 0) {
+        var edgeId = 'edge-' + (t.ticker || '').replace(/[^a-zA-Z0-9]/g, '_') + '-' + (t.side || '');
+        h += '<div id="' + edgeId + '" style="display:none;margin:4px 0 2px 24px;padding:6px 10px;background:#0d1117;border:1px solid #1f2937;border-radius:6px;font-size:10px;line-height:1.6">';
+        h += '<div style="color:#ffb400;font-weight:700;margin-bottom:3px">WHY THIS BET</div>';
+        t.edge_reasons.forEach(function(r) {
+          h += '<div style="color:#aaa">• ' + r + '</div>';
+        });
+        if (t.conviction) h += '<div style="color:#00d4ff;margin-top:3px">Conviction: ' + t.conviction + '/5</div>';
+        if (t.potential_profit) h += '<div style="color:#00dc5a;margin-top:2px">Potential profit: +$' + t.potential_profit.toFixed(2) + '</div>';
+        h += '</div>';
+      }
+      h += '</div>';
     });
     el.innerHTML = h;
+    // Add click handlers to toggle edge detail
+    el.querySelectorAll('.activity-line').forEach(function(line) {
+      line.addEventListener('click', function() {
+        var detail = line.querySelector('[id^="edge-"]');
+        if (detail) {
+          detail.style.display = detail.style.display === 'none' ? 'block' : 'none';
+        }
+      });
+    });
     // Also update dashboard version
     var dashBetsEl = document.getElementById('bets-lines-dash');
-    if (dashBetsEl) dashBetsEl.innerHTML = h;
+    if (dashBetsEl) {
+      dashBetsEl.innerHTML = h;
+      dashBetsEl.querySelectorAll('.activity-line').forEach(function(line) {
+        line.addEventListener('click', function() {
+          var detail = line.querySelector('[id^="edge-"]');
+          if (detail) {
+            detail.style.display = detail.style.display === 'none' ? 'block' : 'none';
+          }
+        });
+      });
+    }
     // Pulse the dot
     var pulse = document.getElementById('bets-pulse');
     if (pulse && trades.length > 0) pulse.style.background = '#ffb400';
