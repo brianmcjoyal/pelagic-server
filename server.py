@@ -15158,9 +15158,9 @@ async function loadPerformance() {
           var outcomeColor = isWin ? '#0a2a0a' : '#2a0a0a';
           var outcomeBorder = isWin ? '#00dc5a' : '#ff5000';
           var outcomeIcon = isWin ? '&#10003;' : '&#10007;';
-          var outcomeText = isWin ? 'Edge was real — bet paid off' : 'Edge didn\'t hold — market moved against us';
+          var outcomeText = isWin ? 'Edge was real — bet paid off' : 'Edge did not hold — market moved against us';
           if (isLoss && s.espn_edge && s.espn_edge > 0.10) outcomeText = 'Had strong ESPN edge (+' + (s.espn_edge*100).toFixed(0) + '%) but market disagreed';
-          if (isLoss && s.entry_cents && s.entry_cents < 40) outcomeText = 'Underdog bet at ' + s.entry_cents + '&cent; — high risk/high reward didn\'t pay off this time';
+          if (isLoss && s.entry_cents && s.entry_cents < 40) outcomeText = 'Underdog bet at ' + s.entry_cents + '&cent; — high risk/high reward did not pay off this time';
           if (isWin && s.entry_cents && s.entry_cents >= 65) outcomeText = 'Favorite at ' + s.entry_cents + '&cent; held as expected';
           tbl += '<div style="margin-top:8px;padding:6px 10px;background:' + outcomeColor + ';border:1px solid ' + outcomeBorder + '44;border-radius:4px;font-size:10px;color:' + outcomeBorder + '">';
           tbl += '<span style="font-weight:700">' + outcomeIcon + ' ' + resultLabel + '</span> &middot; ' + outcomeText;
