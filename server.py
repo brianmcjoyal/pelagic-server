@@ -3290,8 +3290,19 @@ def moonshark_snipe():
                             if espn_edge < 0.03:
                                 _ms_reasons["no_edge"] = _ms_reasons.get("no_edge", 0) + 1
                                 continue
+                        else:
+                            # No ESPN odds available — cannot determine edge
+                            _ms_reasons["no_espn"] = _ms_reasons.get("no_espn", 0) + 1
+                            continue
                 except Exception:
-                    pass
+                    # ESPN lookup failed — DO NOT trade without edge data
+                    _ms_reasons["espn_error"] = _ms_reasons.get("espn_error", 0) + 1
+                    continue
+
+                # espn_edge must be confirmed at this point — reject if still None
+                if espn_edge is None or espn_edge < 0.03:
+                    _ms_reasons["no_edge"] = _ms_reasons.get("no_edge", 0) + 1
+                    continue
 
                 # MUST be a LIVE in-progress game — no pre-game bets
                 # Pre-game prices are efficient. The edge is during live action.
