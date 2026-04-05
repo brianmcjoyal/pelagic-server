@@ -91,6 +91,10 @@ BOT_STATE = {
     "errors": [],
     "pick_history": [],  # every pick we recommend, timestamped
     "activity_log": [],  # live feed of bot actions (last 50)
+    "fill_attempts": 0,
+    "fill_successes": 0,
+    "fill_attempts_by_strategy": {},
+    "fill_successes_by_strategy": {},
 }
 
 def _send_discord(msg, color=0x00dc5a):
@@ -1903,9 +1907,9 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
     # Bump price above ask to ensure fills
     fill_price = price_cents
     if aggressive and action == "buy":
-        fill_price = min(price_cents + 3, 99)  # pay 3c more, cap at 99c
+        fill_price = min(price_cents + 1, 99)  # pay 1c more, cap at 99c
     elif aggressive and action == "sell":
-        fill_price = max(price_cents - 3, 1)   # accept 3c less, floor at 1c
+        fill_price = max(price_cents - 1, 1)   # accept 1c less, floor at 1c
 
     # Convert cents to dollar string — use 2 decimal places (Kalshi standard)
     price_dollars = f"{fill_price / 100:.2f}"
@@ -1917,6 +1921,7 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
         "type": "limit",
         "count": count_int,
         "client_order_id": str(uuid.uuid4()),
+        "time_in_force": "ioc",
     }
     # Set price field for the chosen side
     if side == "yes":
@@ -2491,6 +2496,30 @@ _EVENT_LOCK = _threading.Lock()
 _BOT_STATE_LOCK = _threading.Lock()
 _EVENTS_BET_TODAY = set()  # shared across all strategies
 _similarity_local = _threading.local()
+
+# ---------------------------------------------------------------------------
+# Cached balance fetcher — avoids redundant API calls within a cycle
+# ---------------------------------------------------------------------------
+_balance_cache = {"balance": 0, "ts": 0}
+
+def _get_cached_balance(max_age=10):
+    """Get Kalshi balance with caching to avoid redundant API calls within a cycle."""
+    import time as _t
+    now = _t.time()
+    if now - _balance_cache["ts"] < max_age and _balance_cache["balance"] > 0:
+        return _balance_cache["balance"]
+    try:
+        bal_h = signed_headers("GET", "/portfolio/balance")
+        bal_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
+                             headers=bal_h, timeout=TIMEOUT)
+        if bal_r.ok:
+            bal = bal_r.json().get("balance", 0) / 100
+            _balance_cache["balance"] = bal
+            _balance_cache["ts"] = now
+            return bal
+    except Exception:
+        pass
+    return _balance_cache["balance"]  # return stale if fetch fails
 _EVENTS_BET_DATE = None
 
 def _check_and_claim_event(event_key):
@@ -2524,16 +2553,9 @@ def live_game_snipe():
     if BOT_STATE["snipe_daily_spent"] >= SNIPE_MAX_DAILY:
         return []
 
-    # Check balance
-    try:
-        bal_h = signed_headers("GET", "/portfolio/balance")
-        bal_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
-                             headers=bal_h, timeout=TIMEOUT)
-        if bal_r.ok:
-            bal = bal_r.json().get("balance", 0) / 100
-            if bal < BOT_CONFIG.get("min_balance_usd", 200):
-                return []
-    except Exception:
+    # Check balance (cached across strategies within a cycle)
+    bal = _get_cached_balance()
+    if bal < BOT_CONFIG.get("min_balance_usd", 200):
         return []
 
     # Get existing position tickers and events to avoid doubling down
@@ -2840,6 +2862,14 @@ def live_game_snipe():
                     except Exception:
                         pass
 
+                    # Track fill rates
+                    with _BOT_STATE_LOCK:
+                        BOT_STATE["fill_attempts"] = BOT_STATE.get("fill_attempts", 0) + 1
+                        BOT_STATE["fill_attempts_by_strategy"]["live_sniper"] = BOT_STATE.get("fill_attempts_by_strategy", {}).get("live_sniper", 0) + 1
+                        if filled > 0:
+                            BOT_STATE["fill_successes"] = BOT_STATE.get("fill_successes", 0) + 1
+                            BOT_STATE["fill_successes_by_strategy"]["live_sniper"] = BOT_STATE.get("fill_successes_by_strategy", {}).get("live_sniper", 0) + 1
+
                     if filled > 0:
                         actual_cost = (price * filled) / 100.0
                         potential = (100 - price) * filled / 100.0
@@ -2934,17 +2964,9 @@ def moonshark_snipe():
     if _ms_count < MOONSHARK_MIN_TRADES:
         _log_activity(f"🦈 MoonShark FLOOR MODE: {_ms_count}/{MOONSHARK_MIN_TRADES} trades — relaxing filters", "info")
 
-    # Check balance
-    bal = 0
-    try:
-        bal_h = signed_headers("GET", "/portfolio/balance")
-        bal_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
-                             headers=bal_h, timeout=TIMEOUT)
-        if bal_r.ok:
-            bal = bal_r.json().get("balance", 0) / 100
-            if bal < BOT_CONFIG.get("min_balance_usd", 200):
-                return []
-    except Exception:
+    # Check balance (cached across strategies within a cycle)
+    bal = _get_cached_balance()
+    if bal < BOT_CONFIG.get("min_balance_usd", 200):
         return []
 
     # Get existing position tickers and events to avoid doubling down
@@ -3211,6 +3233,17 @@ def moonshark_snipe():
                     _ms_reasons["no_edge"] = _ms_reasons.get("no_edge", 0) + 1
                     continue
 
+                # Check for potentially stale ESPN odds
+                # If a game has a large margin (blowout) but ESPN still shows a big edge,
+                # the moneyline is probably a stale pre-game line that hasn't updated
+                if espn_edge is not None and _game_info and _game_info.get("state") == "in":
+                    _stale_margin = abs(int(_game_info.get("home_score", 0) or 0) - int(_game_info.get("away_score", 0) or 0))
+                    if _stale_margin > 10 and espn_edge > 0.08:
+                        espn_edge = espn_edge * 0.5  # Discount stale edge by 50%
+                        if espn_edge < 0.03:
+                            _ms_reasons["stale_odds"] = _ms_reasons.get("stale_odds", 0) + 1
+                            continue
+
                 # MUST be a LIVE in-progress game — no pre-game bets
                 # Pre-game prices are efficient. The edge is during live action.
                 if not _game_info or _game_info.get("state") != "in":
@@ -3240,8 +3273,13 @@ def moonshark_snipe():
                     _clock = _game_info.get("clock", "")
                     _league = (_game_info.get("league") or "").lower()
 
-                    # Use win probability model to estimate real odds
-                    _model_prob = _lookup_win_prob(_league, _margin, _clock)
+                    # Try ESPN live win probability first (much more accurate than static table)
+                    _espn_live_prob = None
+                    if _game_info and _game_info.get("event_id"):
+                        _bet_team_abbrev2 = _tk_parts_odds[-1].upper() if len(_tk_parts_odds) >= 2 else ""
+                        _bet_is_home = _game_info.get("home_abbrev", "").upper() == _bet_team_abbrev2 if _bet_team_abbrev2 else True
+                        _espn_live_prob = _get_espn_win_prob(_game_info["event_id"], _league, home_team=_bet_is_home)
+                    _model_prob = _espn_live_prob if _espn_live_prob is not None else _lookup_win_prob(_league, _margin, _clock)
                     _model_edge = _model_prob - implied_prob
                     if _model_edge > 0.05:
                         ms_conviction += 2  # model says underpriced by 5%+
@@ -3283,6 +3321,16 @@ def moonshark_snipe():
                     # No real edge data — skip this trade instead of guessing
                     _ms_reasons["no_espn_edge"] = _ms_reasons.get("no_espn_edge", 0) + 1
                     continue
+
+                # Minimum EV filter — edge must exceed Kalshi fee drag
+                _kalshi_fee = PLATFORM_FEES.get("kalshi", 0.07)
+                _win_prob_est = espn_implied if espn_implied else (price / 100.0)
+                _ev_per_contract = (_win_prob_est * (100 - price) - (1 - _win_prob_est) * price) / 100.0
+                _ev_after_fees = _ev_per_contract - (_kalshi_fee * price / 100.0)
+                if _ev_after_fees < 0.005:  # Less than half a cent EV per contract after fees
+                    _ms_reasons["low_ev"] = _ms_reasons.get("low_ev", 0) + 1
+                    continue
+
                 remaining_budget = MOONSHARK_MAX_DAILY - BOT_STATE["moonshark_daily_spent"]
                 trades_left = MOONSHARK_MAX_TRADES - len(BOT_STATE.get("moonshark_trades_today", []))
                 # Kelly sizes against REAL bankroll (actual cash), not daily budget
@@ -3387,6 +3435,14 @@ def moonshark_snipe():
                         filled = int(float(str(order_data.get("filled_count_fp") or order_data.get("filled_count") or 0)))
                     except Exception:
                         pass
+
+                    # Track fill rates
+                    with _BOT_STATE_LOCK:
+                        BOT_STATE["fill_attempts"] = BOT_STATE.get("fill_attempts", 0) + 1
+                        BOT_STATE["fill_attempts_by_strategy"]["moonshark"] = BOT_STATE.get("fill_attempts_by_strategy", {}).get("moonshark", 0) + 1
+                        if filled > 0:
+                            BOT_STATE["fill_successes"] = BOT_STATE.get("fill_successes", 0) + 1
+                            BOT_STATE["fill_successes_by_strategy"]["moonshark"] = BOT_STATE.get("fill_successes_by_strategy", {}).get("moonshark", 0) + 1
 
                     if filled > 0:
                         actual_cost = (price * filled) / 100.0
@@ -3493,17 +3549,9 @@ def closegame_snipe():
     if len(BOT_STATE.get("closegame_trades_today", [])) >= CLOSEGAME_MAX_TRADES:
         return []
 
-    # Check balance
-    bal = 0
-    try:
-        bal_h = signed_headers("GET", "/portfolio/balance")
-        bal_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
-                             headers=bal_h, timeout=TIMEOUT)
-        if bal_r.ok:
-            bal = bal_r.json().get("balance", 0) / 100
-            if bal < BOT_CONFIG.get("min_balance_usd", 200):
-                return []
-    except Exception:
+    # Check balance (cached across strategies within a cycle)
+    bal = _get_cached_balance()
+    if bal < BOT_CONFIG.get("min_balance_usd", 200):
         return []
 
     # Get existing positions
@@ -3752,6 +3800,14 @@ def closegame_snipe():
                     except Exception:
                         pass
 
+                    # Track fill rates
+                    with _BOT_STATE_LOCK:
+                        BOT_STATE["fill_attempts"] = BOT_STATE.get("fill_attempts", 0) + 1
+                        BOT_STATE["fill_attempts_by_strategy"]["closegame"] = BOT_STATE.get("fill_attempts_by_strategy", {}).get("closegame", 0) + 1
+                        if filled > 0:
+                            BOT_STATE["fill_successes"] = BOT_STATE.get("fill_successes", 0) + 1
+                            BOT_STATE["fill_successes_by_strategy"]["closegame"] = BOT_STATE.get("fill_successes_by_strategy", {}).get("closegame", 0) + 1
+
                     if filled > 0:
                         actual_cost = (price * filled) / 100.0
                         potential = (100 - price) * filled / 100.0
@@ -3849,6 +3905,24 @@ def _warm_picks_cache():
 # f* = (bp - q) / b  where b=odds, p=win_prob, q=1-p
 # We use half-Kelly for safety (less volatile)
 
+def _adaptive_kelly_divisor():
+    """Adaptive Kelly: more conservative on losing streaks, slightly aggressive on wins."""
+    _recent_results = [t.get("result") for t in _TRADE_JOURNAL[-20:] if t.get("result") in ("win", "loss")]
+    _recent_wins = sum(1 for r in _recent_results if r == "win")
+    _recent_total = len(_recent_results)
+    if _recent_total >= 5:
+        _recent_wr = _recent_wins / _recent_total
+        if _recent_wr < 0.20:
+            return 4  # quarter-Kelly on cold streaks
+        elif _recent_wr < 0.35:
+            return 3  # third-Kelly
+        elif _recent_wr > 0.60:
+            return 1.5  # two-thirds Kelly on hot streaks
+        else:
+            return 2  # standard half-Kelly
+    return 2  # not enough data, use half-Kelly
+
+
 def kelly_bet_size(bankroll, win_prob, odds_decimal):
     """Calculate optimal Kelly Criterion bet size.
 
@@ -3858,7 +3932,7 @@ def kelly_bet_size(bankroll, win_prob, odds_decimal):
         odds_decimal: decimal odds (e.g., buy at 60c = payout 100c, odds = 100/60 - 1 = 0.667)
 
     Returns:
-        Optimal bet in dollars (half-Kelly for safety)
+        Optimal bet in dollars (adaptive Kelly for safety)
     """
     if win_prob <= 0 or win_prob >= 1 or odds_decimal <= 0:
         return 0
@@ -3867,10 +3941,11 @@ def kelly_bet_size(bankroll, win_prob, odds_decimal):
     kelly_fraction = (b * win_prob - q) / b
     if kelly_fraction <= 0:
         return 0  # negative edge — don't bet
-    # Half-Kelly for safety — reduces variance while keeping ~75% of growth rate
-    half_kelly = kelly_fraction / 2
+    # Adaptive Kelly — adjusts based on recent win/loss streak
+    kelly_divisor = _adaptive_kelly_divisor()
+    adjusted_kelly = kelly_fraction / kelly_divisor
     # Cap at 5% of bankroll per trade (risk management)
-    capped = min(half_kelly, 0.05)
+    capped = min(adjusted_kelly, 0.05)
     bet = bankroll * capped
     # No artificial floor — trust Kelly. Ceiling from config.
     if bet < 1.0:
@@ -8553,6 +8628,13 @@ def status():
         "scheduler_running": scheduler.running,
         "sniper_trades_today": len(BOT_STATE.get("snipe_trades_today", [])),
         "sniper_daily_spent": BOT_STATE.get("snipe_daily_spent", 0),
+        "fill_rate": round(BOT_STATE.get("fill_successes", 0) / max(1, BOT_STATE.get("fill_attempts", 0)) * 100, 1),
+        "fill_attempts": BOT_STATE.get("fill_attempts", 0),
+        "fill_successes": BOT_STATE.get("fill_successes", 0),
+        "fill_rate_by_strategy": {
+            k: round(BOT_STATE.get("fill_successes_by_strategy", {}).get(k, 0) / max(1, v) * 100, 1)
+            for k, v in BOT_STATE.get("fill_attempts_by_strategy", {}).items()
+        },
         "quant_engine": {
             "strategies_active": quant.get("strategies_active", []),
             "momentum_signals": quant.get("momentum_signals", 0),
@@ -9026,6 +9108,9 @@ def _fetch_all_espn_scores():
                 except Exception:
                     pass
 
+                # Extract event ID for ESPN summary API (live win probability)
+                _event_id = event.get("id", "") or competition.get("id", "")
+
                 game_info = {
                     "away_abbrev": away["abbrev"],
                     "home_abbrev": home["abbrev"],
@@ -9041,6 +9126,8 @@ def _fetch_all_espn_scores():
                     "state": state,
                     "league": league.upper(),
                     "odds": odds_data,
+                    "event_id": _event_id,
+                    "period": period,
                 }
 
                 # Index by multiple keys for fuzzy matching
@@ -9372,6 +9459,124 @@ _WIN_PROB_MODEL = {
         (1, [], 0.22),                # EPL tighter: 22%
     ],
 }
+
+# ESPN summary API sport/league path mapping (for live win probability)
+_ESPN_SUMMARY_PATHS = {
+    "nba": ("basketball", "nba"),
+    "mlb": ("baseball", "mlb"),
+    "nhl": ("hockey", "nhl"),
+    "ncaab": ("basketball", "mens-college-basketball"),
+    "ncaawb": ("basketball", "womens-college-basketball"),
+    "atp": ("tennis", "atp"),
+    "wta": ("tennis", "wta"),
+    "kbo": ("baseball", "kbo"),
+    "mls": ("soccer", "usa.1"),
+    "epl": ("soccer", "eng.1"),
+}
+
+_win_prob_cache = {}  # cache_key -> {"prob": float, "ts": float}
+_WIN_PROB_TTL = 30  # 30 second cache
+
+
+def _get_espn_win_prob(event_id, league, home_team=True):
+    """Fetch ESPN's live win probability model for a game.
+
+    Returns float probability (0-1) or None if unavailable.
+    Caller should fall back to _lookup_win_prob on None.
+    """
+    import time as _t
+    now = _t.time()
+    cache_key = f"{event_id}_{home_team}"
+    if cache_key in _win_prob_cache and now - _win_prob_cache[cache_key]["ts"] < _WIN_PROB_TTL:
+        return _win_prob_cache[cache_key]["prob"]
+
+    sport_league = _ESPN_SUMMARY_PATHS.get(league.lower())
+    if not sport_league or not event_id:
+        return None
+
+    try:
+        url = f"https://site.api.espn.com/apis/site/v2/sports/{sport_league[0]}/{sport_league[1]}/summary?event={event_id}"
+        resp = requests.get(url, timeout=5)
+        if resp.ok:
+            data = resp.json()
+            # Try predictor first (more common)
+            predictor = data.get("predictor", {})
+            if predictor:
+                home_proj = predictor.get("homeTeam", {}).get("gameProjection")
+                if home_proj is not None:
+                    home_prob = float(home_proj) / 100
+                    prob = home_prob if home_team else (1 - home_prob)
+                    _win_prob_cache[cache_key] = {"prob": prob, "ts": now}
+                    return prob
+            # Try winprobability array
+            wp = data.get("winprobability", [])
+            if wp:
+                latest = wp[-1]
+                home_wp = latest.get("homeWinPercentage")
+                if home_wp is not None:
+                    home_prob = float(home_wp) / 100
+                    prob = home_prob if home_team else (1 - home_prob)
+                    _win_prob_cache[cache_key] = {"prob": prob, "ts": now}
+                    return prob
+    except Exception:
+        pass
+    return None  # Caller should fall back to _lookup_win_prob
+
+
+def _parse_clock_to_seconds(clock_str, sport="nba"):
+    """Convert ESPN clock string to seconds remaining in the game."""
+    if not clock_str:
+        return None
+    try:
+        import re
+        # Find time portion (M:SS or MM:SS)
+        time_match = re.search(r'(\d+):(\d+)', clock_str)
+        if not time_match:
+            return None
+        minutes = int(time_match.group(1))
+        seconds = int(time_match.group(2))
+        time_in_period = minutes * 60 + seconds
+
+        # Determine period
+        period = 1
+        period_match = re.search(r'(\d+)(?:st|nd|rd|th)', clock_str, re.IGNORECASE)
+        if period_match:
+            period = int(period_match.group(1))
+        elif 'Q' in clock_str.upper():
+            q_match = re.search(r'Q(\d+)', clock_str, re.IGNORECASE)
+            if q_match:
+                period = int(q_match.group(1))
+        elif 'P' in clock_str.upper():
+            p_match = re.search(r'P(\d+)', clock_str, re.IGNORECASE)
+            if p_match:
+                period = int(p_match.group(1))
+        elif 'OT' in clock_str.upper():
+            period = 5  # overtime
+        elif '2H' in clock_str.upper() or '2nd half' in clock_str.lower():
+            period = 2
+
+        # Calculate total seconds remaining
+        if sport in ("nba",):
+            period_length = 720  # 12 min quarters
+            total_periods = 4
+        elif sport in ("ncaab", "ncaawb"):
+            period_length = 1200  # 20 min halves
+            total_periods = 2
+        elif sport in ("nhl",):
+            period_length = 1200  # 20 min periods
+            total_periods = 3
+        elif sport in ("mlb", "kbo"):
+            return None  # Baseball doesn't work with clock time
+        else:
+            period_length = 720
+            total_periods = 4
+
+        remaining_periods = max(0, total_periods - period)
+        total_seconds = time_in_period + (remaining_periods * period_length)
+        return total_seconds
+    except Exception:
+        return None
+
 
 def _lookup_win_prob(sport, deficit, period):
     """Look up estimated win probability for trailing team."""
@@ -10025,7 +10230,7 @@ def _smart_bet_size(price_cents, bankroll=None, edge=0.05):
     odds = (100 - price_cents) / max(1, price_cents)
     win_prob = min(price_cents / 100.0 + edge, 0.95)
     kelly_frac = (odds * win_prob - (1 - win_prob)) / max(0.01, odds)
-    kelly_frac = max(0, kelly_frac) / 2  # half-Kelly for safety
+    kelly_frac = max(0, kelly_frac) / _adaptive_kelly_divisor()  # adaptive Kelly for safety
     # Cap at 5% of bankroll per trade (risk management)
     kelly_frac = min(kelly_frac, 0.05)
 
