@@ -5367,7 +5367,7 @@ def _learning_multiplier(ticker, title, price_cents=None, game_info=None, espn_e
 # TRADE JOURNAL — Comprehensive data tracking for pattern recognition
 # ---------------------------------------------------------------------------
 # Day 1 = March 16, 2026. Only count wins/losses from this date forward.
-TRADE_JOURNAL_START = "2026-03-16"
+TRADE_JOURNAL_START = "2026-03-31"  # Skip pre-bugfix trades (03-16 to 03-20 were blind bets)
 
 # _TRADE_JOURNAL declared early (near BOT_STATE) so _load_state() can populate it
 
