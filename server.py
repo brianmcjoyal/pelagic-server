@@ -12617,10 +12617,9 @@ a:hover { color: #7da5f5; }
       <path d="M28 40l-4 10l6-8l5 12l4-11l6 8l-2-11" fill="url(#sharkFin)" stroke="#3d2510" stroke-width="0.3" opacity="0.85"/>
     </svg>
     <h1><span>Trade</span><span style="background:linear-gradient(135deg,#c9963a,#dab060,#8b5e28,#c9963a);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text">Shark</span></h1>
-  </div>
-  <!-- Header Stats: Daily + All-Time -->
-  <div style="display:flex;align-items:center;gap:20px">
-    <div style="display:flex;align-items:center;gap:16px">
+    <div style="width:1px;height:28px;background:#333;margin-left:8px"></div>
+    <!-- Header Stats: Daily + All-Time (inline with logo) -->
+    <div style="display:flex;align-items:center;gap:16px;margin-left:4px">
       <!-- Today's P&L -->
       <div style="text-align:center">
         <div style="font-size:9px;color:#888;text-transform:uppercase;letter-spacing:0.5px">Today</div>
@@ -12639,7 +12638,8 @@ a:hover { color: #7da5f5; }
         <div id="hdr-total-pct" style="font-size:10px;color:#888">--%</div>
       </div>
     </div>
-    <div style="width:1px;height:28px;background:#333"></div>
+  </div>
+  <div style="display:flex;align-items:center;gap:12px">
     <!-- Notification Bell -->
     <div id="notif-bell-wrapper" style="position:relative;cursor:pointer" onclick="toggleNotifPanel()">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" id="notif-bell-icon">
