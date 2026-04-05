@@ -243,6 +243,10 @@ def _load_state():
             BOT_STATE["moonshark_daily_spent"] = data.get("moonshark_daily_spent", 0.0)
             BOT_STATE["moonshark_trades_today"] = data.get("moonshark_trades_today", [])
             BOT_STATE["moonshark_date"] = today_str
+            # Restore CloseGame counters for same-day
+            BOT_STATE["closegame_daily_spent"] = data.get("closegame_daily_spent", 0.0)
+            BOT_STATE["closegame_trades_today"] = data.get("closegame_trades_today", [])
+            BOT_STATE["closegame_date"] = today_str
             # Restore manual trades for same-day
             BOT_STATE["manual_trades_today"] = data.get("manual_trades_today", [])
         else:
@@ -256,6 +260,9 @@ def _load_state():
             BOT_STATE["moonshark_daily_spent"] = 0.0
             BOT_STATE["moonshark_trades_today"] = []
             BOT_STATE["moonshark_date"] = today_str
+            BOT_STATE["closegame_daily_spent"] = 0.0
+            BOT_STATE["closegame_trades_today"] = []
+            BOT_STATE["closegame_date"] = today_str
             BOT_STATE["manual_trades_today"] = []
 
         # --- Cumulative data: always restore regardless of day ---
@@ -396,7 +403,7 @@ def _hydrate_from_kalshi():
             try:
                 mkt_path = f"/markets/{tk}"
                 mkt_h = signed_headers("GET", mkt_path)
-                mkt_r = _req.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + mkt_path, headers=mkt_h, timeout=5)
+                mkt_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + mkt_path, headers=mkt_h, timeout=5)
                 if mkt_r.ok:
                     title_map[tk] = mkt_r.json().get("market", {}).get("title", tk)
             except Exception:
@@ -503,7 +510,7 @@ def _rebuild_journal_from_kalshi():
             try:
                 mkt_path = f"/markets/{tk}"
                 mkt_h = signed_headers("GET", mkt_path)
-                mkt_r = _req.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + mkt_path, headers=mkt_h, timeout=5)
+                mkt_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + mkt_path, headers=mkt_h, timeout=5)
                 if mkt_r.ok:
                     mkt = mkt_r.json().get("market", {})
                     title_map[tk] = {
@@ -995,7 +1002,7 @@ def fetch_polymarket():
             seen.add(mid)
             prices = m.get("outcomePrices", "[]")
             if isinstance(prices, str):
-                prices = eval(prices)
+                prices = _json.loads(prices)
             if len(prices) < 2:
                 continue
             yes = float(prices[0])
@@ -1980,7 +1987,7 @@ def sell_kalshi_position(ticker, side, price_cents, count=1, resting=False):
     if resting and ticker in _resting_sells:
         return {"error": "Resting sell already exists", "skipped": True}
 
-    price_dollars = f"{price_cents / 100:.4f}"
+    price_dollars = f"{price_cents / 100:.2f}"
     tif = "gtc" if resting else "immediate_or_cancel"
     payload = {
         "ticker": ticker,
@@ -2024,9 +2031,17 @@ def _parse_kalshi_dollars(val):
         if isinstance(val, str):
             return int(round(float(val) * 100))
         elif isinstance(val, (int, float)):
-            return int(val) if val > 1 else int(round(val * 100))
+            # Values > 1 could be cents already (e.g. 65) or dollars (e.g. 1.50)
+            # Kalshi v2 uses dollar strings, so numeric values > 1 that have decimal parts are dollars
+            if val > 1:
+                if val == int(val):
+                    return int(val)  # Already cents (e.g. 65, 100)
+                else:
+                    return int(round(val * 100))  # Dollar amount with cents (e.g. 1.50 -> 150)
+            else:
+                return int(round(val * 100))
     except Exception:
-        pass
+        print(f"[PARSE] _parse_kalshi_dollars failed for val={val!r}")
     return 0
 
 
@@ -2382,6 +2397,10 @@ def run_bot_scan():
         _price_averages.clear()
         _volatility_scores.clear()
         _price_history.clear()
+        _known_fill_ids.clear()
+        _resting_sells.clear()
+        _orderbook_cache.clear()
+        _position_high_water.clear()
         _log_activity("Daily reset — new trading day started")
         # Send daily summary to Discord
         try:
@@ -2418,156 +2437,6 @@ def run_bot_scan():
 
         # Consensus trading disabled — live strategies handle all trading
         return
-
-        # SAFETY: check balance floor before trading
-        min_balance = BOT_CONFIG.get("min_balance_usd", 200.0)
-        current_balance = 0
-        try:
-            bal_path = "/portfolio/balance"
-            bal_h = signed_headers("GET", bal_path)
-            bal_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + bal_path, headers=bal_h, timeout=TIMEOUT)
-            if bal_r.ok:
-                current_balance = bal_r.json().get("balance", 0) / 100
-                if current_balance < min_balance:
-                    _log_activity(f"SAFETY STOP: Balance ${current_balance:.2f} below ${min_balance:.2f} floor — no trades", "error")
-                    BOT_CONFIG["enabled"] = False
-                    _log_activity("Auto-trade DISABLED by safety floor", "error")
-                    return
-        except Exception as e:
-            _log_activity(f"Balance check failed: {e} — skipping trades for safety", "error")
-            return
-
-        # DAILY LIMIT: combined bot + sniper spending
-        total_daily = BOT_STATE["daily_spent_usd"] + BOT_STATE.get("snipe_daily_spent", 0)
-        if total_daily >= BOT_CONFIG["max_daily_usd"]:
-            _log_activity(f"Daily limit reached (${total_daily:.2f}/{BOT_CONFIG['max_daily_usd']:.2f})")
-            return
-
-        # POSITION LIMIT: don't overextend
-        existing_positions = []
-        traded_events = set()
-        try:
-            existing_positions = check_position_prices()
-            for pos in existing_positions:
-                parts = pos.get("ticker", "").split("-")
-                if parts:
-                    traded_events.add(parts[0])
-        except Exception:
-            pass
-
-        max_positions = BOT_CONFIG.get("max_open_positions", 20)
-        if len(existing_positions) >= max_positions:
-            _log_activity(f"Position limit: {len(existing_positions)}/{max_positions} — no new trades")
-            return
-
-        # CASH RESERVE: keep 50% of portfolio in cash
-        reserve_pct = BOT_CONFIG.get("min_cash_reserve_pct", 0.50)
-        total_invested = sum(p.get("market_exposure_cents", 0) for p in existing_positions) / 100
-        portfolio_total = current_balance + total_invested
-        if portfolio_total > 0 and current_balance / portfolio_total < reserve_pct:
-            _log_activity(f"Cash reserve: ${current_balance:.2f} is {current_balance/portfolio_total*100:.0f}% of portfolio (need {reserve_pct*100:.0f}%) — no new trades")
-            return
-
-        trades_this_cycle = 0
-        for opp in mispricings:
-            total_daily = BOT_STATE["daily_spent_usd"] + BOT_STATE.get("snipe_daily_spent", 0)
-            if total_daily >= BOT_CONFIG["max_daily_usd"]:
-                _log_activity("Daily spending limit hit — stopping trades")
-                break
-
-            # Extract event from ticker (e.g. KXPGAMAJORWIN-26-WZAL -> KXPGAMAJORWIN)
-            ticker_parts = opp["kalshi_ticker"].split("-")
-            event_key = ticker_parts[0] if ticker_parts else opp["kalshi_ticker"]
-
-            if event_key in traded_events:
-                continue  # Already traded this event — skip other outcomes
-            traded_events.add(event_key)
-
-            # Block banned categories (weather etc — illiquid penny traps)
-            blocked = BOT_CONFIG.get("blocked_categories", [])
-            if blocked:
-                market_cat = classify_market_category(
-                    opp.get("kalshi_question", ""), opp["kalshi_ticker"]
-                )
-                if market_cat in blocked:
-                    continue
-            # Block specific keywords (long-dated predictions that lose money)
-            blocked_kw = BOT_CONFIG.get("blocked_keywords", [])
-            q_lower = (opp.get("kalshi_question", "") or "").lower()
-            if any(kw in q_lower for kw in blocked_kw):
-                continue
-
-            # CORRELATION CHECK: don't over-concentrate in one category
-            cat_allowed, cat_name, cat_count = check_category_limit(
-                opp.get("kalshi_question", ""), opp["kalshi_ticker"], existing_positions
-            )
-            if not cat_allowed:
-                _log_activity(f"Category limit: {cat_name} has {cat_count} positions — skipping {opp['kalshi_ticker']}")
-                continue
-
-            # EDGE CHECK: must have real cross-platform validation
-            plat_count = opp.get("platform_count", 0) or len(opp.get("matching_platforms", []))
-            deviation = opp.get("deviation", 0)
-            if plat_count < BOT_CONFIG.get("min_platforms", 2):
-                continue  # Not enough platforms to confirm edge
-            if deviation < BOT_CONFIG.get("min_deviation", 0.15):
-                continue  # Edge too small
-
-            # VOLUME CHECK: skip illiquid markets we can't sell
-            volume = opp.get("volume", 0) or 0
-            if volume < BOT_CONFIG.get("min_volume", 100):
-                continue  # Too illiquid
-
-            pc = opp["price_cents"]
-            # Skip penny markets (illiquid, can't sell)
-            if pc < 20:
-                continue
-            # KELLY CRITERION sizing — scales bets with bankroll + edge
-            consensus = opp.get("consensus_yes_price", 0.5)
-            count = kelly_count(current_balance, pc, consensus)
-            cost_usd = (pc * count) / 100.0
-            if cost_usd > BOT_CONFIG["max_bet_usd"]:
-                count = max(1, int(BOT_CONFIG["max_bet_usd"] * 100 / pc))
-                cost_usd = (pc * count) / 100.0
-            if BOT_STATE["daily_spent_usd"] + cost_usd > BOT_CONFIG["max_daily_usd"]:
-                continue
-
-            side = opp["signal"].replace("buy_", "")
-            _log_activity(f"Placing order: {side.upper()} {opp['kalshi_ticker']} @ {pc}c x{count} (${cost_usd:.2f})")
-            result = place_kalshi_order(opp["kalshi_ticker"], side, pc, count=count)
-
-            trade_record = {
-                "timestamp": now.isoformat(),
-                "ticker": opp["kalshi_ticker"],
-                "question": opp["kalshi_question"],
-                "side": side,
-                "price_cents": pc,
-                "count": count,
-                "cost_usd": cost_usd,
-                "deviation": opp["deviation"],
-                "consensus_price": opp["consensus_yes_price"],
-                "kalshi_price": opp["kalshi_yes_price"],
-                "matching_platforms": opp["matching_platforms"],
-                "result": result,
-                "success": "error" not in result,
-                "bot_version": BOT_VERSION,
-                "strategy": "consensus_mispricing",
-            }
-
-            BOT_STATE["trades_today"].append(trade_record)
-            BOT_STATE["all_trades"].append(trade_record)
-            if trade_record["success"]:
-                BOT_STATE["daily_spent_usd"] += cost_usd
-                _log_activity(f"FILLED: {side.upper()} {opp['kalshi_ticker']} @ {pc}c x{count}", "success")
-                trades_this_cycle += 1
-            else:
-                err_msg = result.get("error", result.get("response_body", "Unknown"))
-                _log_activity(f"FAILED: {opp['kalshi_ticker']} — {str(err_msg)[:80]}", "error")
-            print(f"[BOT] Trade: {side} {opp['kalshi_ticker']} @ {opp['price_cents']}c | success={trade_record['success']}")
-            _save_state()
-
-        if trades_this_cycle > 0:
-            _log_activity(f"Cycle done: {trades_this_cycle} new trades, ${BOT_STATE['daily_spent_usd']:.2f} spent today")
 
     except Exception as e:
         BOT_STATE["errors"].append({"time": now.isoformat(), "error": str(e)})
@@ -2619,6 +2488,7 @@ BOT_STATE["moonshark_date"] = None
 # Key = event (e.g. "KXMLBGAME-26APR012020CLELAD"), resets daily
 import threading as _threading
 _EVENT_LOCK = _threading.Lock()
+_BOT_STATE_LOCK = _threading.Lock()
 _EVENTS_BET_TODAY = set()  # shared across all strategies
 _similarity_local = _threading.local()
 _EVENTS_BET_DATE = None
@@ -2973,7 +2843,8 @@ def live_game_snipe():
                     if filled > 0:
                         actual_cost = (price * filled) / 100.0
                         potential = (100 - price) * filled / 100.0
-                        BOT_STATE["snipe_daily_spent"] += actual_cost
+                        with _BOT_STATE_LOCK:
+                            BOT_STATE["snipe_daily_spent"] += actual_cost
                         # Build edge reasons for tooltip
                         _snipe_edge_reasons = list(reasons)  # already built above
                         if _snipe_game and _snipe_game.get("state") == "in":
@@ -3520,7 +3391,8 @@ def moonshark_snipe():
                     if filled > 0:
                         actual_cost = (price * filled) / 100.0
                         potential = (100 - price) * filled / 100.0
-                        BOT_STATE["moonshark_daily_spent"] += actual_cost
+                        with _BOT_STATE_LOCK:
+                            BOT_STATE["moonshark_daily_spent"] += actual_cost
                         # Build edge reasons for tooltip
                         _ms_edge_reasons = list(_conv_reasons) if _conv_reasons else []
                         _ms_edge_detail = None
@@ -3851,7 +3723,7 @@ def closegame_snipe():
                 remaining = CLOSEGAME_MAX_DAILY - BOT_STATE.get("closegame_daily_spent", 0)
                 profit_if_win = (100 - price) / 100.0
                 odds_decimal = profit_if_win / (price / 100.0)
-                kelly_usd = kelly_bet_size(remaining, estimated_win_prob, odds_decimal)
+                kelly_usd = kelly_bet_size(bal, estimated_win_prob, odds_decimal)
                 bet_usd = max(3.0, min(kelly_usd, remaining / max(1, CLOSEGAME_MAX_TRADES - len(BOT_STATE.get("closegame_trades_today", []))), remaining))
                 bet_usd = min(bet_usd, BOT_CONFIG["max_bet_usd"], remaining)
                 count = max(1, int(bet_usd * 100 / price))
@@ -3883,7 +3755,8 @@ def closegame_snipe():
                     if filled > 0:
                         actual_cost = (price * filled) / 100.0
                         potential = (100 - price) * filled / 100.0
-                        BOT_STATE["closegame_daily_spent"] = BOT_STATE.get("closegame_daily_spent", 0) + actual_cost
+                        with _BOT_STATE_LOCK:
+                            BOT_STATE["closegame_daily_spent"] = BOT_STATE.get("closegame_daily_spent", 0) + actual_cost
                         # Build edge reasons for tooltip
                         _cg_edge_reasons = []
                         _cg_edge_reasons.append(f"Close game: {score_str}")
@@ -4730,7 +4603,8 @@ def run_quant_strategies(all_markets):
 
         BOT_STATE["all_trades"].append(trade_record)
         if success:
-            BOT_STATE["daily_spent_usd"] += cost_usd
+            with _BOT_STATE_LOCK:
+                BOT_STATE["daily_spent_usd"] += cost_usd
             BOT_STATE["trades_today"].append(trade_record)
             trades_this_round += 1
             kelly_sizes.append(cost_usd)
@@ -6052,7 +5926,7 @@ def _sync_kalshi_fills():
             return
         # Fetch recent fills — use min_ts to only get today's fills (much faster)
         _today_start_utc = datetime.datetime.now(tz=_PACIFIC).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        resp = _req.get(
+        resp = requests.get(
             KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
             headers=headers,
             params={"limit": 100, "min_ts": _today_start_utc},
@@ -6136,7 +6010,7 @@ def _sync_kalshi_fills():
             try:
                 mkt_path = f"/markets/{ticker}"
                 mkt_h = signed_headers("GET", mkt_path)
-                mkt_r = _req.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + mkt_path, headers=mkt_h, timeout=5)
+                mkt_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + mkt_path, headers=mkt_h, timeout=5)
                 if mkt_r.ok:
                     title = mkt_r.json().get("market", {}).get("title", ticker)
             except Exception:
@@ -12165,7 +12039,8 @@ def execute_trade():
     BOT_STATE["all_trades"].append(trade_record)
     BOT_STATE["trades_today"].append(trade_record)
     if trade_record["success"]:
-        BOT_STATE["daily_spent_usd"] += trade_record["cost_usd"]
+        with _BOT_STATE_LOCK:
+            BOT_STATE["daily_spent_usd"] += trade_record["cost_usd"]
     _save_state()
     return jsonify(trade_record)
 
