@@ -13323,7 +13323,7 @@ async function loadPortfolio() {
     if (progBalance) progBalance.textContent = '$' + totalVal.toFixed(2);
 
     // All-time P&L — Day 1 = March 16, 2026
-    var DAY1_BALANCE = 733.92;  // Portfolio value on March 16 (fresh start)
+    var DAY1_BALANCE = 500.00;  // Starting balance (April 3, 2026)
     var totalPnl = pfVal - DAY1_BALANCE;
     var changeEl = document.getElementById('pf-change');
     if (changeEl) {
@@ -13407,7 +13407,7 @@ async function loadPortfolio() {
       hdrDailyPct.style.color = dailyPl >= 0 ? '#00dc5a' : dailyPl < 0 ? '#ff5000' : '#888';
     }
     // All-Time P&L — use actual portfolio value vs starting balance (most accurate)
-    var DAY1_BAL = 733.92;
+    var DAY1_BAL = 500.00;
     var allTimePl = pfVal - DAY1_BAL;  // real P&L = current portfolio - starting balance
     var hdrTotalPnl = document.getElementById('hdr-total-pnl');
     var hdrTotalPct = document.getElementById('hdr-total-pct');
