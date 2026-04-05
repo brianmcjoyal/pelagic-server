@@ -12618,7 +12618,28 @@ a:hover { color: #7da5f5; }
     </svg>
     <h1><span>Trade</span><span style="background:linear-gradient(135deg,#c9963a,#dab060,#8b5e28,#c9963a);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text">Shark</span></h1>
   </div>
-  <div style="display:flex;align-items:center;gap:12px">
+  <!-- Header Stats: Daily + All-Time -->
+  <div style="display:flex;align-items:center;gap:20px">
+    <div style="display:flex;align-items:center;gap:16px">
+      <!-- Today's P&L -->
+      <div style="text-align:center">
+        <div style="font-size:9px;color:#888;text-transform:uppercase;letter-spacing:0.5px">Today</div>
+        <div style="display:flex;align-items:baseline;gap:4px;justify-content:center">
+          <span id="hdr-daily-pnl" style="font-size:15px;font-weight:800;color:#888">--</span>
+        </div>
+        <div id="hdr-daily-pct" style="font-size:10px;color:#888">--%</div>
+      </div>
+      <div style="width:1px;height:28px;background:#333"></div>
+      <!-- All-Time P&L -->
+      <div style="text-align:center">
+        <div style="font-size:9px;color:#888;text-transform:uppercase;letter-spacing:0.5px">All-Time</div>
+        <div style="display:flex;align-items:baseline;gap:4px;justify-content:center">
+          <span id="hdr-total-pnl" style="font-size:15px;font-weight:800;color:#888">--</span>
+        </div>
+        <div id="hdr-total-pct" style="font-size:10px;color:#888">--%</div>
+      </div>
+    </div>
+    <div style="width:1px;height:28px;background:#333"></div>
     <!-- Notification Bell -->
     <div id="notif-bell-wrapper" style="position:relative;cursor:pointer" onclick="toggleNotifPanel()">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" id="notif-bell-icon">
@@ -13371,6 +13392,34 @@ async function loadPortfolio() {
         totalPl = settledData.total_pnl_usd || 0;
       }
     } catch(e) { /* keep fallback values from portfolio-summary */ }
+
+    // ── Update Header Stats (next to logo) ──
+    // Today's P&L
+    var hdrDailyPnl = document.getElementById('hdr-daily-pnl');
+    var hdrDailyPct = document.getElementById('hdr-daily-pct');
+    if (hdrDailyPnl) {
+      hdrDailyPnl.textContent = (dailyPl >= 0 ? '+$' : '-$') + Math.abs(dailyPl).toFixed(2);
+      hdrDailyPnl.style.color = dailyPl >= 0 ? '#00dc5a' : dailyPl < 0 ? '#ff5000' : '#888';
+    }
+    if (hdrDailyPct) {
+      var dailyPct = pfVal > 0 ? (dailyPl / pfVal * 100) : 0;
+      hdrDailyPct.textContent = (dailyPct >= 0 ? '+' : '') + dailyPct.toFixed(2) + '%';
+      hdrDailyPct.style.color = dailyPl >= 0 ? '#00dc5a' : dailyPl < 0 ? '#ff5000' : '#888';
+    }
+    // All-Time P&L
+    var hdrTotalPnl = document.getElementById('hdr-total-pnl');
+    var hdrTotalPct = document.getElementById('hdr-total-pct');
+    if (hdrTotalPnl) {
+      hdrTotalPnl.textContent = (totalPl >= 0 ? '+$' : '-$') + Math.abs(totalPl).toFixed(2);
+      hdrTotalPnl.style.color = totalPl >= 0 ? '#00dc5a' : totalPl < 0 ? '#ff5000' : '#888';
+    }
+    if (hdrTotalPct) {
+      var DAY1_BAL = 733.92;
+      var totalPct = DAY1_BAL > 0 ? (totalPl / DAY1_BAL * 100) : 0;
+      hdrTotalPct.textContent = (totalPct >= 0 ? '+' : '') + totalPct.toFixed(2) + '%';
+      hdrTotalPct.style.color = totalPl >= 0 ? '#00dc5a' : totalPl < 0 ? '#ff5000' : '#888';
+    }
+
     // Now render P&L Since Day 1 (after settled data is available)
     if (totalPlEl) {
       totalPlEl.textContent = (totalPl >= 0 ? '+$' : '-$') + Math.abs(totalPl).toFixed(2);
