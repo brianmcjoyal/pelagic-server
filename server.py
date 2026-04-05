@@ -14855,11 +14855,12 @@ async function loadSettled() {
 async function loadPerformance() {
   try {
     // Fetch all data in parallel
-    var [settledData, analyticsData, tradesData, insightsData] = await Promise.all([
+    var [settledData, analyticsData, tradesData, insightsData, portfolioData] = await Promise.all([
       fetch(API + '/settled').then(r => r.json()),
       fetch(API + '/analytics').then(r => r.json()),
       fetch(API + '/trades').then(r => r.json()),
-      fetch(API + '/insights').then(r => r.json()).catch(function() { return {insights:[]}; })
+      fetch(API + '/insights').then(r => r.json()).catch(function() { return {insights:[]}; }),
+      fetch(API + '/portfolio-summary').then(r => r.json()).catch(function() { return {}; })
     ]);
 
     var allSettled = settledData.settled || [];
@@ -14939,19 +14940,28 @@ async function loadPerformance() {
     var streakColor = currStreakType === 'win' ? '#00dc5a' : currStreakType === 'loss' ? '#ff5000' : '#888';
     var streakLabel = currStreakType === 'win' ? currStreak + 'W' : currStreakType === 'loss' ? currStreak + 'L' : '--';
 
+    // Use portfolio-based P&L as the source of truth for Total P&L
+    var _perfPfVal = (portfolioData || {}).portfolio_value_usd || 0;
+    var _perfStartBal = 500.00;
+    var portfolioPnl = _perfPfVal > 0 ? (_perfPfVal - _perfStartBal) : totalPnl;
+    var portfolioPnlColor = portfolioPnl >= 0 ? '#00dc5a' : '#ff5000';
+    var portfolioRoi = _perfStartBal > 0 ? (portfolioPnl / _perfStartBal * 100) : roi;
+    var portfolioRoiColor = portfolioRoi >= 0 ? '#00dc5a' : '#ff5000';
+    var _dailyPl = (portfolioData || {}).daily_pnl_usd || (portfolioData || {}).total_unrealized_usd || 0;
+
     var khtml = '';
     // Row 1: Core trading metrics
-    khtml += kpi('Total P&L', (totalPnl >= 0 ? '+$' : '-$') + Math.abs(totalPnl).toFixed(2), pnlColor, wins + 'W / ' + losses + 'L');
-    khtml += kpi('Win Rate', winRate.toFixed(1) + '%', wrColor, total + ' trades');
-    khtml += kpi('ROI', roi.toFixed(1) + '%', roiColor, '$' + totalWagered.toFixed(0) + ' wagered');
-    khtml += kpi('Profit Factor', profitFactor.toFixed(2), pfColor, avgWin > 0 ? '$' + avgWin.toFixed(2) + ' avg W' : '');
-    khtml += kpi('Expectancy', (expectancy >= 0 ? '+$' : '-$') + Math.abs(expectancy).toFixed(2), expColor, 'per trade');
+    khtml += kpi('Total P&L', (portfolioPnl >= 0 ? '+$' : '-$') + Math.abs(portfolioPnl).toFixed(2), portfolioPnlColor, total > 0 ? wins + 'W / ' + losses + 'L' : 'portfolio vs $' + _perfStartBal.toFixed(0) + ' start');
+    khtml += kpi('Win Rate', total > 0 ? winRate.toFixed(1) + '%' : '--', total > 0 ? wrColor : '#888', total > 0 ? total + ' settled' : 'no settled trades yet');
+    khtml += kpi('ROI', portfolioRoi.toFixed(1) + '%', portfolioRoiColor, '$' + _perfStartBal.toFixed(0) + ' starting balance');
+    khtml += kpi('Daily P&L', (_dailyPl >= 0 ? '+$' : '-$') + Math.abs(_dailyPl).toFixed(2), _dailyPl >= 0 ? '#00dc5a' : '#ff5000', 'unrealized today');
+    khtml += kpi('Expectancy', total > 0 ? ((expectancy >= 0 ? '+$' : '-$') + Math.abs(expectancy).toFixed(2)) : '--', total > 0 ? expColor : '#888', total > 0 ? 'per trade' : '');
 
     // Row 2
-    khtml += kpi('Max Drawdown', '-$' + maxDrawdown.toFixed(2), maxDrawdown > 20 ? '#ff5000' : '#ffb400', 'from peak');
-    khtml += kpi('Avg Win', '+$' + avgWin.toFixed(2), '#00dc5a', bigWin > 0 ? 'best +$' + bigWin.toFixed(2) : '');
-    khtml += kpi('Avg Loss', '-$' + avgLoss.toFixed(2), '#ff5000', bigLoss < 0 ? 'worst -$' + Math.abs(bigLoss).toFixed(2) : '');
-    khtml += kpi('Payoff Ratio', payoffRatio.toFixed(2) + 'x', payoffRatio >= 1 ? '#00dc5a' : '#ff5000', 'win/loss size');
+    khtml += kpi('Portfolio', '$' + _perfPfVal.toFixed(2), '#fff', '$' + ((portfolioData || {}).balance_usd || 0).toFixed(2) + ' cash');
+    khtml += kpi('Avg Win', total > 0 ? ('+$' + avgWin.toFixed(2)) : '--', '#00dc5a', bigWin > 0 ? 'best +$' + bigWin.toFixed(2) : '');
+    khtml += kpi('Avg Loss', total > 0 ? ('-$' + avgLoss.toFixed(2)) : '--', '#ff5000', bigLoss < 0 ? 'worst -$' + Math.abs(bigLoss).toFixed(2) : '');
+    khtml += kpi('Profit Factor', total > 0 ? profitFactor.toFixed(2) : '--', total > 0 ? pfColor : '#888', avgWin > 0 ? '$' + avgWin.toFixed(2) + ' avg W' : '');
     khtml += kpi('Streak', streakLabel, streakColor, 'Sharpe: ' + sharpe);
 
     kpiEl.innerHTML = khtml;
