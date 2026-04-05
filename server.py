@@ -13658,8 +13658,42 @@ async function loadBetsFeed() {
       }
       if (t.conviction && edgeSummaryParts.length === 0) edgeSummaryParts.push('Conviction: ' + t.conviction + '/5');
       if (t.espn_edge && edgeSummaryParts.length === 0) edgeSummaryParts.push('ESPN Edge: +' + (t.espn_edge * 100).toFixed(1) + '%');
+      // ── Compute conviction score (1-10) with breakdown ──
+      var convScore = 0;
+      var convBreakdown = [];
+      // Base: strategy type
+      if (t.strategy === 'moonshark') { convScore += 2; convBreakdown.push('+2 MoonShark underdog strategy'); }
+      else if (t.strategy === 'live_sniper' || t.strategy === 'sniper') { convScore += 3; convBreakdown.push('+3 Sniper favorite strategy'); }
+      else if (t.strategy === 'closegame') { convScore += 3; convBreakdown.push('+3 CloseGame late-game edge'); }
+      else { convScore += 1; convBreakdown.push('+1 Base trade'); }
+      // ESPN edge
+      if (t.espn_edge && t.espn_edge > 0) {
+        if (t.espn_edge >= 0.10) { convScore += 3; convBreakdown.push('+3 Strong ESPN edge (' + (t.espn_edge*100).toFixed(1) + '%)'); }
+        else if (t.espn_edge >= 0.05) { convScore += 2; convBreakdown.push('+2 Solid ESPN edge (' + (t.espn_edge*100).toFixed(1) + '%)'); }
+        else { convScore += 1; convBreakdown.push('+1 ESPN edge (' + (t.espn_edge*100).toFixed(1) + '%)'); }
+      }
+      // Edge reasons count (more reasons = more validation)
+      var edgeCount = (t.edge_reasons || []).length;
+      if (edgeCount >= 3) { convScore += 2; convBreakdown.push('+2 Multiple edge signals (' + edgeCount + ')'); }
+      else if (edgeCount >= 1) { convScore += 1; convBreakdown.push('+1 Edge signal detected'); }
+      // Server-side conviction (if available from bot)
+      if (t.conviction && t.conviction > 0) {
+        var serverBonus = Math.min(2, Math.floor(t.conviction / 3));
+        if (serverBonus > 0) { convScore += serverBonus; convBreakdown.push('+' + serverBonus + ' Bot conviction (' + t.conviction + '/10)'); }
+      }
+      // Price sweet spot bonus
+      var pc = t.price_cents || t.price || 0;
+      if (pc >= 25 && pc <= 40) { convScore += 1; convBreakdown.push('+1 Underdog sweet spot (' + pc + '¢)'); }
+      else if (pc >= 65 && pc <= 85) { convScore += 1; convBreakdown.push('+1 Favorite sweet spot (' + pc + '¢)'); }
+      // Cap at 10
+      convScore = Math.min(10, Math.max(1, convScore));
+      var convColor = convScore >= 8 ? '#00dc5a' : convScore >= 5 ? '#ffb400' : '#ff5000';
+      var convTooltip = convBreakdown.join('&#10;');  // newline in title attr
+
       h += '<div class="activity-line" style="cursor:pointer;position:relative">';
       h += '<span class="time">' + timeStr + '</span>';
+      // Conviction badge with hover tooltip
+      h += '<span title="' + convTooltip + '" style="display:inline-flex;align-items:center;justify-content:center;width:22px;height:16px;border-radius:4px;font-size:9px;font-weight:800;color:#000;background:' + convColor + ';margin:0 4px;cursor:help;flex-shrink:0">' + convScore + '</span>';
       h += '<span class="dot" style="background:' + sc + '"></span>';
       h += '<span class="msg">' + sourceTag + '<span style="color:' + sc + ';font-weight:700;font-size:8px;margin-right:4px">' + sl + '</span>';
       h += '<span style="color:' + sideC + ';font-weight:700">' + (t.side || '').toUpperCase() + '</span> ';
