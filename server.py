@@ -7027,9 +7027,12 @@ def settled_positions():
             ticker = pos.get("ticker", "")
             # Filter: only Day 1+ trades
             trade_date = _trade_dates.get(ticker, "")
-            if trade_date and trade_date < _day1_cutoff:
+            if not trade_date:
+                # No date found — try to infer from fill created_time already fetched
+                # If still unknown, exclude (fail closed — don't show unverified old trades)
+                continue
+            if trade_date < _day1_cutoff:
                 continue  # Pre-Day-1 — skip
-            # If no trade_date found, still include (could be a recent trade after deploy)
 
             title = _get_title(ticker)
             # total_traded from Kalshi includes settlement payouts, not just cost
