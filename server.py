@@ -168,6 +168,8 @@ _STATE_FILE = "/tmp/tradeshark_state.json"
 # The later sections that reference these will use the same objects (not re-assign).
 _TRADE_JOURNAL = []  # List of enriched trade records with full metadata
 _CATEGORY_STATS = {}  # {cat: {"wins": 0, "losses": 0, "pnl": 0.0}}
+_GAME_EXPOSURE = {}   # {game_event_key: total_usd_wagered} — per-game exposure cap
+_GAME_EXPOSURE_MAX = 10.0  # max $10 per game across all strategies
 _LEARNING_STATE = {
     "last_run": None,
     "version": 0,
@@ -210,6 +212,8 @@ def _save_state():
             "closegame_date": BOT_STATE.get("closegame_date"),
             # Learning engine state
             "learning_state": _LEARNING_STATE,
+            # Per-game exposure tracking
+            "game_exposure": _GAME_EXPOSURE,
             # Timestamp for date-check on load
             "save_date": datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d"),
         }
@@ -253,8 +257,14 @@ def _load_state():
             BOT_STATE["closegame_date"] = today_str
             # Restore manual trades for same-day
             BOT_STATE["manual_trades_today"] = data.get("manual_trades_today", [])
+            # Restore per-game exposure for same-day
+            saved_exposure = data.get("game_exposure", {})
+            if saved_exposure:
+                _GAME_EXPOSURE.clear()
+                _GAME_EXPOSURE.update(saved_exposure)
         else:
             # New day — reset all daily counters
+            _GAME_EXPOSURE.clear()
             BOT_STATE["trades_today"] = []
             BOT_STATE["daily_spent_usd"] = 0.0
             BOT_STATE["trade_date"] = today_str
@@ -1898,18 +1908,31 @@ def find_consensus_mispricings(all_markets):
 # Kalshi order placement (NEW)
 # ---------------------------------------------------------------------------
 
-def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggressive=True):
+def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggressive=True, orderbook_hint=None):
     path = "/portfolio/orders"
     headers = signed_headers("POST", path)
     if not headers:
         return {"error": "No API key"}
 
+    # Adaptive fill pricing: +1c for liquid markets, +2c for thin markets
+    bump = 1  # default: +1c
+    if aggressive and orderbook_hint and isinstance(orderbook_hint, dict):
+        spread = orderbook_hint.get("spread", 0)
+        liquidity = orderbook_hint.get("liquidity_score", 50)
+        bid_depth = orderbook_hint.get("bid_depth", 0)
+        ask_depth = orderbook_hint.get("ask_depth", 0)
+        total_depth = bid_depth + ask_depth
+        # Thin market: wide spread (>5c) or low total depth (<20 contracts)
+        if spread > 5 or total_depth < 20 or liquidity < 25:
+            bump = 2  # thin market — bump by 2c for better fill probability
+            print(f"[ORDER] Adaptive pricing: +2c bump (spread={spread}, depth={total_depth}, liq={liquidity})")
+
     # Bump price above ask to ensure fills
     fill_price = price_cents
     if aggressive and action == "buy":
-        fill_price = min(price_cents + 1, 99)  # pay 1c more, cap at 99c
+        fill_price = min(price_cents + bump, 99)  # pay bump more, cap at 99c
     elif aggressive and action == "sell":
-        fill_price = max(price_cents - 1, 1)   # accept 1c less, floor at 1c
+        fill_price = max(price_cents - bump, 1)   # accept bump less, floor at 1c
 
     # Convert cents to dollar string — use 2 decimal places (Kalshi standard)
     price_dollars = f"{fill_price / 100:.2f}"
@@ -2536,6 +2559,22 @@ def _check_and_claim_event(event_key):
         _EVENTS_BET_TODAY.add(event_key)
         return True
 
+
+def _check_game_exposure(event_key, cost_usd):
+    """Check if adding cost_usd to this game would exceed the per-game exposure cap.
+    Returns True if the trade is allowed, False if it would exceed the $10 cap."""
+    with _BOT_STATE_LOCK:
+        current = _GAME_EXPOSURE.get(event_key, 0.0)
+        if current + cost_usd > _GAME_EXPOSURE_MAX:
+            return False
+        return True
+
+
+def _record_game_exposure(event_key, cost_usd):
+    """Record dollars wagered on a game event. Thread-safe."""
+    with _BOT_STATE_LOCK:
+        _GAME_EXPOSURE[event_key] = _GAME_EXPOSURE.get(event_key, 0.0) + cost_usd
+
 def live_game_snipe():
     """Scan LIVE SPORTS markets for high-probability outcomes (70-90c).
     Strategy: only live sports + vetted short-term markets with volume.
@@ -2845,12 +2884,24 @@ def live_game_snipe():
                     "info"
                 )
 
+                # Per-game exposure cap — $10 max across all strategies
+                if not _check_game_exposure(event_key, cost_usd):
+                    _log_activity(f"SNIPE SKIP: {ticker} — game exposure cap ${_GAME_EXPOSURE.get(event_key, 0):.2f}/${_GAME_EXPOSURE_MAX}", "info")
+                    continue
+
                 # Thread-safe claim — prevents other strategies from betting same game
                 if not _check_and_claim_event(event_key):
                     _log_activity(f"SNIPE SKIP: {ticker} — already bet this event", "info")
                     continue
 
-                result = place_kalshi_order(ticker, side, price, count=count)
+                # Fetch orderbook for adaptive fill pricing
+                _snipe_ob_pre = None
+                try:
+                    _snipe_ob_pre = analyze_orderbook(ticker)
+                except Exception:
+                    pass
+
+                result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_snipe_ob_pre)
                 success = "error" not in result
 
                 if success:
@@ -2873,6 +2924,7 @@ def live_game_snipe():
                     if filled > 0:
                         actual_cost = (price * filled) / 100.0
                         potential = (100 - price) * filled / 100.0
+                        _record_game_exposure(event_key, actual_cost)
                         with _BOT_STATE_LOCK:
                             BOT_STATE["snipe_daily_spent"] += actual_cost
                         # Build edge reasons for tooltip
@@ -3305,6 +3357,35 @@ def moonshark_snipe():
                 if 25 <= price <= 30:
                     ms_conviction += 1
 
+                # Signal 7: ESPN spread divergence — spread data vs Kalshi implied probability
+                # If ESPN spread suggests the game is closer than Kalshi prices imply, that's edge
+                if _game_info and _game_info.get("odds"):
+                    _spread_odds = _game_info["odds"]
+                    _espn_spread = _spread_odds.get("home_spread") or _spread_odds.get("spread")
+                    if _espn_spread is not None:
+                        try:
+                            _espn_spread_val = float(_espn_spread)
+                            # Convert spread to rough implied probability
+                            # A spread of -3 means ~57% implied, -7 means ~70%, etc.
+                            # Formula: 50% + (spread * ~1.5-2% per point)
+                            _bet_team_abbrev3 = _tk_parts_odds[-1].upper() if len(_tk_parts_odds) >= 2 else ""
+                            _is_home_bet = _game_info.get("home_abbrev", "").upper() == _bet_team_abbrev3
+                            # If home spread is -5, home is favored by 5; flip sign for away
+                            _our_spread = _espn_spread_val if _is_home_bet else -_espn_spread_val
+                            # Rough conversion: each spread point ~2% win probability shift
+                            _spread_implied = 0.50 + (_our_spread * -0.02)
+                            _spread_implied = max(0.10, min(0.90, _spread_implied))
+                            _spread_divergence = _spread_implied - implied_prob
+                            # If spread says our team has >5% more chance than Kalshi prices
+                            if _spread_divergence > 0.05:
+                                ms_conviction += 2
+                                _conv_reasons.append(f"spread+{_spread_divergence:.0%}")
+                            elif _spread_divergence > 0.02:
+                                ms_conviction += 1
+                                _conv_reasons.append(f"spread+{_spread_divergence:.0%}")
+                        except (ValueError, TypeError):
+                            pass
+
                 # Require minimum conviction — never drop below 3, even in floor mode
                 _ms_min_conviction = 3 if _ms_below_floor else 4
                 if ms_conviction < _ms_min_conviction:
@@ -3420,12 +3501,17 @@ def moonshark_snipe():
                     "info"
                 )
 
+                # Per-game exposure cap — $10 max across all strategies
+                if not _check_game_exposure(event_key, cost_usd):
+                    _log_activity(f"MOONSHARK SKIP: {ticker} — game exposure cap ${_GAME_EXPOSURE.get(event_key, 0):.2f}/${_GAME_EXPOSURE_MAX}", "info")
+                    continue
+
                 # Thread-safe claim — prevents other strategies from betting same game
                 if not _check_and_claim_event(event_key):
                     _log_activity(f"MOONSHARK SKIP: {ticker} — already bet this event", "info")
                     continue
 
-                result = place_kalshi_order(ticker, side, price, count=count)
+                result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob)
                 success = "error" not in result
 
                 if success:
@@ -3447,6 +3533,7 @@ def moonshark_snipe():
                     if filled > 0:
                         actual_cost = (price * filled) / 100.0
                         potential = (100 - price) * filled / 100.0
+                        _record_game_exposure(event_key, actual_cost)
                         with _BOT_STATE_LOCK:
                             BOT_STATE["moonshark_daily_spent"] += actual_cost
                         # Build edge reasons for tooltip
@@ -3756,16 +3843,33 @@ def closegame_snipe():
                 except Exception:
                     pass
 
+                # Also pull spread data as additional signal
+                _cg_spread_edge = 0
+                try:
+                    if _cg_game and _cg_game.get("odds"):
+                        _cg_spread_val = _cg_game["odds"].get("home_spread") or _cg_game["odds"].get("spread")
+                        if _cg_spread_val is not None:
+                            _cg_spread_f = float(_cg_spread_val)
+                            _is_home_cg = _cg_game.get("home_abbrev") == underdog
+                            _our_spread_cg = _cg_spread_f if _is_home_cg else -_cg_spread_f
+                            _spread_implied_cg = 0.50 + (_our_spread_cg * -0.02)
+                            _spread_implied_cg = max(0.10, min(0.90, _spread_implied_cg))
+                            _cg_spread_edge = _spread_implied_cg - kalshi_implied
+                except (ValueError, TypeError):
+                    pass
+
                 # Require real ESPN edge — no more guessing with hardcoded model
-                if espn_edge_cg is None or espn_edge_cg < 0.03:
+                # Allow spread edge to supplement: if moneyline edge is 2% but spread adds 3%, total is enough
+                _combined_edge_cg = max(espn_edge_cg or 0, (espn_edge_cg or 0) + _cg_spread_edge * 0.3)
+                if _combined_edge_cg < 0.03:
                     _log_activity(
                         f"CLOSEGAME SKIP: {title[:35]} — no ESPN edge (need 3%+, got {espn_edge_cg:.1%} )" if espn_edge_cg else f"CLOSEGAME SKIP: {title[:35]} — no ESPN odds data",
                         "info"
                     )
                     continue
 
-                estimated_win_prob = espn_win_prob_cg
-                edge = espn_edge_cg
+                estimated_win_prob = espn_win_prob_cg if espn_win_prob_cg else kalshi_implied
+                edge = espn_edge_cg if espn_edge_cg else _cg_spread_edge
 
                 # Size the bet
                 remaining = CLOSEGAME_MAX_DAILY - BOT_STATE.get("closegame_daily_spent", 0)
@@ -3784,12 +3888,24 @@ def closegame_snipe():
                     "info"
                 )
 
+                # Per-game exposure cap — $10 max across all strategies
+                if not _check_game_exposure(event_key, cost_usd):
+                    _log_activity(f"CLOSEGAME SKIP: {ticker} — game exposure cap ${_GAME_EXPOSURE.get(event_key, 0):.2f}/${_GAME_EXPOSURE_MAX}", "info")
+                    continue
+
                 # Thread-safe claim — prevents other strategies from betting same game
                 if not _check_and_claim_event(event_key):
                     _log_activity(f"CLOSEGAME SKIP: {ticker} — already bet this event", "info")
                     continue
 
-                result = place_kalshi_order(ticker, side, price, count=count)
+                # Fetch orderbook for adaptive fill pricing
+                _cg_ob = None
+                try:
+                    _cg_ob = analyze_orderbook(ticker)
+                except Exception:
+                    pass
+
+                result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_cg_ob)
                 success = "error" not in result
 
                 if success:
@@ -3811,6 +3927,7 @@ def closegame_snipe():
                     if filled > 0:
                         actual_cost = (price * filled) / 100.0
                         potential = (100 - price) * filled / 100.0
+                        _record_game_exposure(event_key, actual_cost)
                         with _BOT_STATE_LOCK:
                             BOT_STATE["closegame_daily_spent"] = BOT_STATE.get("closegame_daily_spent", 0) + actual_cost
                         # Build edge reasons for tooltip
@@ -5507,6 +5624,10 @@ def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, stra
         # --- Conviction ---
         "conviction": conviction,
         "conviction_reasons": conviction_reasons or [],
+        # --- CLV (Closing Line Value) tracking ---
+        "clv_entry_price": price_cents,       # price we paid at entry
+        "clv_closing_price": None,            # filled on settlement: last traded price before close
+        "clv_cents": None,                    # closing_price - entry_price (positive = good entry)
     }
 
 
@@ -5517,8 +5638,8 @@ def _journal_trade(ticker, title, side, price_cents, count, cost_usd, strategy, 
     return rec
 
 
-def _journal_settle(ticker, won, pnl_usd):
-    """Update journal entry with settlement result."""
+def _journal_settle(ticker, won, pnl_usd, closing_price_cents=None):
+    """Update journal entry with settlement result and CLV data."""
     now = datetime.datetime.utcnow()
     for rec in reversed(_TRADE_JOURNAL):
         if rec["ticker"] == ticker and rec["result"] is None:
@@ -5530,7 +5651,50 @@ def _journal_settle(ticker, won, pnl_usd):
                 rec["hold_duration_mins"] = int((now - entry_dt).total_seconds() / 60)
             except Exception:
                 pass
+            # --- CLV: Closing Line Value ---
+            # If closing_price not provided, try to fetch last traded price
+            if closing_price_cents is None:
+                try:
+                    _clv_path = f"/markets/{ticker}"
+                    _clv_h = signed_headers("GET", _clv_path)
+                    _clv_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + _clv_path,
+                                          headers=_clv_h, timeout=5)
+                    if _clv_r.ok:
+                        _clv_mkt = _clv_r.json().get("market", {})
+                        # Use last_price or result price as closing line
+                        _last = _clv_mkt.get("last_price") or _clv_mkt.get("previous_price")
+                        if _last:
+                            closing_price_cents = int(round(float(str(_last))))
+                except Exception:
+                    pass
+            if closing_price_cents is not None:
+                rec["clv_closing_price"] = closing_price_cents
+                entry_price = rec.get("clv_entry_price") or rec.get("price_cents", 0)
+                if entry_price:
+                    # For YES bets: if closing price > entry price, we got good value (positive CLV)
+                    # For NO bets: if closing price < entry price, we got good value (positive CLV)
+                    if rec.get("side") == "no":
+                        rec["clv_cents"] = entry_price - closing_price_cents
+                    else:
+                        rec["clv_cents"] = closing_price_cents - entry_price
             break
+
+
+def _get_clv_stats():
+    """Compute aggregate CLV (Closing Line Value) statistics from the trade journal."""
+    clv_trades = [t for t in _TRADE_JOURNAL if t.get("clv_cents") is not None]
+    if not clv_trades:
+        return {"total_trades_with_clv": 0, "avg_clv_cents": 0, "positive_clv_pct": 0, "total_clv_cents": 0}
+    total_clv = sum(t["clv_cents"] for t in clv_trades)
+    positive = sum(1 for t in clv_trades if t["clv_cents"] > 0)
+    return {
+        "total_trades_with_clv": len(clv_trades),
+        "avg_clv_cents": round(total_clv / len(clv_trades), 2),
+        "positive_clv_pct": round(positive / len(clv_trades) * 100, 1),
+        "total_clv_cents": total_clv,
+        "best_clv": max(t["clv_cents"] for t in clv_trades),
+        "worst_clv": min(t["clv_cents"] for t in clv_trades),
+    }
 
 
 def get_pattern_analysis():
@@ -8645,6 +8809,8 @@ def status():
             "ema_tracked": len(_price_averages),
             "momentum_tracked": len(_price_history),
         },
+        "clv_stats": _get_clv_stats(),
+        "game_exposure": dict(_GAME_EXPOSURE),
     })
 
 
@@ -9105,6 +9271,31 @@ def _fetch_all_espn_scores():
                                 "away_implied": round(_ml_to_prob(_away_ml), 3),
                                 "provider": _odds.get("provider", {}).get("name", "ESPN"),
                             }
+                        # Extract spread/line data for additional signal
+                        _spread_val = _odds.get("spread")
+                        _overunder = _odds.get("overUnder")
+                        _home_spread = _odds.get("homeTeamOdds", {}).get("spreadOdds") or _odds.get("homeTeamOdds", {}).get("spread")
+                        _away_spread = _odds.get("awayTeamOdds", {}).get("spreadOdds") or _odds.get("awayTeamOdds", {}).get("spread")
+                        if _spread_val is not None:
+                            try:
+                                odds_data["spread"] = float(_spread_val)
+                            except (ValueError, TypeError):
+                                pass
+                        if _home_spread is not None:
+                            try:
+                                odds_data["home_spread"] = float(_home_spread)
+                            except (ValueError, TypeError):
+                                pass
+                        if _away_spread is not None:
+                            try:
+                                odds_data["away_spread"] = float(_away_spread)
+                            except (ValueError, TypeError):
+                                pass
+                        if _overunder is not None:
+                            try:
+                                odds_data["over_under"] = float(_overunder)
+                            except (ValueError, TypeError):
+                                pass
                 except Exception:
                     pass
 
@@ -9780,33 +9971,58 @@ def _blowout_exit():
         if not is_hopeless:
             continue
 
-        # This position is hopeless — sell to salvage whatever we can
+        # This position is hopeless — place a resting sell order at 3-5c to salvage value
+        # Better to get 3-5c back than sell at 1c or ride to guaranteed $0
         score_str = _format_score_string(game)
-        sell_side = "no" if side == "yes" else "yes"
-        # Sell at market (1c) to guarantee exit
-        sell_price = 1  # sell at 1c to guarantee fill — these are hopeless blowout positions
+
+        # Determine resting sell price based on current price and deficit severity
+        if current_price <= 2:
+            sell_price = 3  # floor: try to get 3c
+        elif deficit >= 25 or current_price <= 3:
+            sell_price = 3  # severe blowout: sell at 3c
+        elif deficit >= 15:
+            sell_price = 4  # moderate blowout: sell at 4c
+        else:
+            sell_price = 5  # mild blowout: try 5c
 
         _log_activity(
-            f"💀 BLOWOUT EXIT: Selling {ticker} — down {deficit} in {period} | {score_str} | salvaging {count} contracts @ ~{current_price}c",
+            f"💀 BLOWOUT EXIT: Resting sell {ticker} @ {sell_price}c — down {deficit} in {period} | {score_str} | salvaging {count} contracts",
             "warning"
         )
 
         try:
-            result = place_kalshi_order(ticker, side, sell_price, count=count, action="sell")
-            if "error" not in result:
-                order_data = result.get("order", {})
-                filled = 0
-                try:
-                    filled = int(float(str(order_data.get("filled_count_fp") or order_data.get("filled_count") or 0)))
-                except Exception:
-                    pass
-                if filled > 0:
-                    salvaged = (sell_price * filled) / 100.0
-                    _log_activity(
-                        f"💀 BLOWOUT EXIT DONE: Sold {filled}x {ticker} — salvaged ${salvaged:.2f}",
-                        "info"
-                    )
-                    _save_state()
+            # First try a resting (GTC) sell order to get a better price
+            resting_result = sell_kalshi_position(ticker, side, sell_price, count=count, resting=True)
+            if resting_result and "error" not in resting_result:
+                _log_activity(
+                    f"💀 BLOWOUT EXIT: Resting sell placed for {count}x {ticker} @ {sell_price}c (GTC)",
+                    "info"
+                )
+                _save_state()
+            elif resting_result and resting_result.get("skipped"):
+                # Already have a resting sell — skip
+                pass
+            else:
+                # Resting sell failed — fall back to immediate sell at 1c to guarantee exit
+                _log_activity(
+                    f"💀 BLOWOUT EXIT: Resting sell failed, selling {ticker} @ 1c (immediate)",
+                    "warning"
+                )
+                result = place_kalshi_order(ticker, side, 1, count=count, action="sell")
+                if "error" not in result:
+                    order_data = result.get("order", {})
+                    filled = 0
+                    try:
+                        filled = int(float(str(order_data.get("filled_count_fp") or order_data.get("filled_count") or 0)))
+                    except Exception:
+                        pass
+                    if filled > 0:
+                        salvaged = (1 * filled) / 100.0
+                        _log_activity(
+                            f"💀 BLOWOUT EXIT DONE: Sold {filled}x {ticker} @ 1c — salvaged ${salvaged:.2f}",
+                            "info"
+                        )
+                        _save_state()
         except Exception as e:
             print(f"[BLOWOUT_EXIT] Sell error: {e}")
 
