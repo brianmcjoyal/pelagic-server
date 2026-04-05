@@ -13406,24 +13406,25 @@ async function loadPortfolio() {
       hdrDailyPct.textContent = (dailyPct >= 0 ? '+' : '') + dailyPct.toFixed(2) + '%';
       hdrDailyPct.style.color = dailyPl >= 0 ? '#00dc5a' : dailyPl < 0 ? '#ff5000' : '#888';
     }
-    // All-Time P&L
+    // All-Time P&L — use actual portfolio value vs starting balance (most accurate)
+    var DAY1_BAL = 733.92;
+    var allTimePl = pfVal - DAY1_BAL;  // real P&L = current portfolio - starting balance
     var hdrTotalPnl = document.getElementById('hdr-total-pnl');
     var hdrTotalPct = document.getElementById('hdr-total-pct');
     if (hdrTotalPnl) {
-      hdrTotalPnl.textContent = (totalPl >= 0 ? '+$' : '-$') + Math.abs(totalPl).toFixed(2);
-      hdrTotalPnl.style.color = totalPl >= 0 ? '#00dc5a' : totalPl < 0 ? '#ff5000' : '#888';
+      hdrTotalPnl.textContent = (allTimePl >= 0 ? '+$' : '-$') + Math.abs(allTimePl).toFixed(2);
+      hdrTotalPnl.style.color = allTimePl >= 0 ? '#00dc5a' : allTimePl < 0 ? '#ff5000' : '#888';
     }
     if (hdrTotalPct) {
-      var DAY1_BAL = 733.92;
-      var totalPct = DAY1_BAL > 0 ? (totalPl / DAY1_BAL * 100) : 0;
+      var totalPct = DAY1_BAL > 0 ? (allTimePl / DAY1_BAL * 100) : 0;
       hdrTotalPct.textContent = (totalPct >= 0 ? '+' : '') + totalPct.toFixed(2) + '%';
-      hdrTotalPct.style.color = totalPl >= 0 ? '#00dc5a' : totalPl < 0 ? '#ff5000' : '#888';
+      hdrTotalPct.style.color = allTimePl >= 0 ? '#00dc5a' : allTimePl < 0 ? '#ff5000' : '#888';
     }
 
-    // Now render P&L Since Day 1 (after settled data is available)
+    // Now render P&L Since Day 1 — use real portfolio change (not just settled trades)
     if (totalPlEl) {
-      totalPlEl.textContent = (totalPl >= 0 ? '+$' : '-$') + Math.abs(totalPl).toFixed(2);
-      totalPlEl.style.color = totalPl >= 0 ? '#00dc5a' : '#ff5000';
+      totalPlEl.textContent = (allTimePl >= 0 ? '+$' : '-$') + Math.abs(allTimePl).toFixed(2);
+      totalPlEl.style.color = allTimePl >= 0 ? '#00dc5a' : '#ff5000';
     }
     var wrEl = document.getElementById('pf-winrate');
     wrEl.textContent = wr.toFixed(0) + '%';
