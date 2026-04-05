@@ -3002,7 +3002,8 @@ def live_game_snipe():
                             _snipe_ob = analyze_orderbook(ticker)
                         except Exception:
                             pass
-                        _journal_trade(ticker, title, side, price, filled, actual_cost, "live_sniper", is_live=True, close_time=mkt.get("close_time", ""), orderbook_data=_snipe_ob)
+                        _journal_trade(ticker, title, side, price, filled, actual_cost, "live_sniper", is_live=True, close_time=mkt.get("close_time", ""), orderbook_data=_snipe_ob,
+                                       conviction=conviction, conviction_reasons=list(reasons) if reasons else [])
                         _log_activity(
                             f"🎯 SNIPED! {side.upper()} {ticker} @ {price}c x{filled} "
                             f"= ${actual_cost:.2f} (potential +${potential:.2f}) | {title[:40]}",
@@ -3555,7 +3556,8 @@ def moonshark_snipe():
                         except Exception:
                             pass
                         _journal_trade(ticker, title, side, price, filled, actual_cost, "moonshark", is_live=True, close_time=mkt.get("close_time", ""),
-                                       game_info=_game_info, espn_edge_data=_edge_data, orderbook_data=_ob_data)
+                                       game_info=_game_info, espn_edge_data=_edge_data, orderbook_data=_ob_data,
+                                       conviction=ms_conviction, conviction_reasons=list(_conv_reasons))
                         _log_activity(
                             f"🦈 BET PLACED! {side.upper()} {title[:25]} @ {price}c x{filled} = ${actual_cost:.2f} [{','.join(_conv_reasons[:3])}]",
                             "success"
@@ -3912,8 +3914,17 @@ def closegame_snipe():
                                 _cg_edge = {"espn_implied": estimated_win_prob, "espn_edge": edge}
                         except Exception:
                             pass
+                        _cg_conv = 3  # base: live close game
+                        _cg_conv_reasons = ["LIVE close game"]
+                        if edge and edge > 0.05:
+                            _cg_conv += 2; _cg_conv_reasons.append(f"ESPN+{edge:.0%}")
+                        elif edge and edge > 0.03:
+                            _cg_conv += 1; _cg_conv_reasons.append(f"ESPN+{edge:.0%}")
+                        if cg.get("margin") is not None and cg["margin"] <= 5:
+                            _cg_conv += 2; _cg_conv_reasons.append(f"tight({cg['margin']}pt)")
                         _journal_trade(ticker, title, side, price, filled, actual_cost, "closegame", is_live=True, close_time=mkt.get("close_time", ""),
-                                       game_info=_cg_game_info, espn_edge_data=_cg_edge)
+                                       game_info=_cg_game_info, espn_edge_data=_cg_edge,
+                                       conviction=_cg_conv, conviction_reasons=_cg_conv_reasons)
                         _log_activity(
                             f"🎯 CLOSEGAME HIT! {side.upper()} {underdog} @ {price}c x{filled} "
                             f"= ${actual_cost:.2f} (potential +${potential:.2f}) | {score_str}",
@@ -5371,7 +5382,7 @@ TRADE_JOURNAL_START = "2026-03-31"  # Skip pre-bugfix trades (03-16 to 03-20 wer
 
 # _TRADE_JOURNAL declared early (near BOT_STATE) so _load_state() can populate it
 
-def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, strategy, is_live=False, close_time=None, game_info=None, espn_edge_data=None, orderbook_data=None):
+def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, strategy, is_live=False, close_time=None, game_info=None, espn_edge_data=None, orderbook_data=None, conviction=0, conviction_reasons=None):
     """Create an enriched trade record with all metadata for pattern analysis."""
     now = datetime.datetime.utcnow()
     cat = classify_market_category(title or "", ticker or "")
@@ -5544,12 +5555,15 @@ def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, stra
         **_ob,
         # --- Momentum ---
         **_mom,
+        # --- Conviction ---
+        "conviction": conviction,
+        "conviction_reasons": conviction_reasons or [],
     }
 
 
-def _journal_trade(ticker, title, side, price_cents, count, cost_usd, strategy, is_live=False, close_time=None, game_info=None, espn_edge_data=None, orderbook_data=None):
+def _journal_trade(ticker, title, side, price_cents, count, cost_usd, strategy, is_live=False, close_time=None, game_info=None, espn_edge_data=None, orderbook_data=None, conviction=0, conviction_reasons=None):
     """Add a trade to the journal with full enrichment."""
-    rec = _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, strategy, is_live, close_time=close_time, game_info=game_info, espn_edge_data=espn_edge_data, orderbook_data=orderbook_data)
+    rec = _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, strategy, is_live, close_time=close_time, game_info=game_info, espn_edge_data=espn_edge_data, orderbook_data=orderbook_data, conviction=conviction, conviction_reasons=conviction_reasons)
     _TRADE_JOURNAL.append(rec)
     return rec
 
@@ -8879,6 +8893,19 @@ def trades_today_endpoint():
         else:
             _consolidated[key] = dict(t)
     all_today = list(_consolidated.values())
+
+    # Enrich conviction/edge from trade journal (survives deploys via _save_state)
+    for t in all_today:
+        if (not t.get("conviction") or not t.get("edge_reasons")) and t.get("ticker"):
+            for _jr in reversed(_TRADE_JOURNAL):
+                if _jr.get("ticker") == t["ticker"]:
+                    if not t.get("conviction") and _jr.get("conviction"):
+                        t["conviction"] = _jr["conviction"]
+                    if not t.get("edge_reasons") and _jr.get("conviction_reasons"):
+                        t["edge_reasons"] = _jr["conviction_reasons"]
+                    if not t.get("espn_edge") and _jr.get("espn_edge"):
+                        t["espn_edge"] = _jr["espn_edge"]
+                    break
 
     # Enrich with close_time and current price
     # 1) Try market cache first (fast, covers open markets)
@@ -13658,33 +13685,42 @@ async function loadBetsFeed() {
       }
       if (t.conviction && edgeSummaryParts.length === 0) edgeSummaryParts.push('Conviction: ' + t.conviction + '/5');
       if (t.espn_edge && edgeSummaryParts.length === 0) edgeSummaryParts.push('ESPN Edge: +' + (t.espn_edge * 100).toFixed(1) + '%');
-      // ── Compute conviction score (1-10) with breakdown ──
+      // ── Conviction score (1-10) with breakdown ──
       var convScore = 0;
       var convBreakdown = [];
-      // Base: strategy type
-      if (t.strategy === 'moonshark') { convScore += 2; convBreakdown.push('+2 MoonShark underdog strategy'); }
-      else if (t.strategy === 'live_sniper' || t.strategy === 'sniper') { convScore += 3; convBreakdown.push('+3 Sniper favorite strategy'); }
-      else if (t.strategy === 'closegame') { convScore += 3; convBreakdown.push('+3 CloseGame late-game edge'); }
-      else { convScore += 1; convBreakdown.push('+1 Base trade'); }
-      // ESPN edge
-      if (t.espn_edge && t.espn_edge > 0) {
-        if (t.espn_edge >= 0.10) { convScore += 3; convBreakdown.push('+3 Strong ESPN edge (' + (t.espn_edge*100).toFixed(1) + '%)'); }
-        else if (t.espn_edge >= 0.05) { convScore += 2; convBreakdown.push('+2 Solid ESPN edge (' + (t.espn_edge*100).toFixed(1) + '%)'); }
-        else { convScore += 1; convBreakdown.push('+1 ESPN edge (' + (t.espn_edge*100).toFixed(1) + '%)'); }
+      // If server sent a real conviction score, use it as the base
+      if (t.conviction && t.conviction >= 2) {
+        convScore = Math.min(10, t.conviction);
+        convBreakdown.push('Bot scored ' + t.conviction + ' at trade time');
+        // Add edge reasons as breakdown detail
+        if (t.edge_reasons && t.edge_reasons.length > 0) {
+          t.edge_reasons.forEach(function(r) { convBreakdown.push('• ' + r); });
+        }
+        if (t.espn_edge && t.espn_edge > 0) {
+          convBreakdown.push('ESPN edge: +' + (t.espn_edge*100).toFixed(1) + '%');
+        }
+      } else {
+        // Fallback: compute from available data
+        // Base: strategy type
+        if (t.strategy === 'moonshark') { convScore += 2; convBreakdown.push('+2 MoonShark underdog'); }
+        else if (t.strategy === 'live_sniper' || t.strategy === 'sniper') { convScore += 3; convBreakdown.push('+3 Sniper favorite'); }
+        else if (t.strategy === 'closegame') { convScore += 3; convBreakdown.push('+3 CloseGame late-game'); }
+        else { convScore += 1; convBreakdown.push('+1 Base trade'); }
+        // ESPN edge
+        if (t.espn_edge && t.espn_edge > 0) {
+          if (t.espn_edge >= 0.10) { convScore += 3; convBreakdown.push('+3 Strong ESPN edge (' + (t.espn_edge*100).toFixed(1) + '%)'); }
+          else if (t.espn_edge >= 0.05) { convScore += 2; convBreakdown.push('+2 Solid ESPN edge (' + (t.espn_edge*100).toFixed(1) + '%)'); }
+          else { convScore += 1; convBreakdown.push('+1 ESPN edge (' + (t.espn_edge*100).toFixed(1) + '%)'); }
+        }
+        // Edge reasons
+        var edgeCount = (t.edge_reasons || []).length;
+        if (edgeCount >= 3) { convScore += 2; convBreakdown.push('+2 Multiple signals (' + edgeCount + ')'); }
+        else if (edgeCount >= 1) { convScore += 1; convBreakdown.push('+1 Edge signal'); }
+        // Price sweet spot
+        var pc = t.price_cents || t.price || 0;
+        if (pc >= 25 && pc <= 40) { convScore += 1; convBreakdown.push('+1 Underdog sweet spot (' + pc + '¢)'); }
+        else if (pc >= 65 && pc <= 85) { convScore += 1; convBreakdown.push('+1 Favorite sweet spot (' + pc + '¢)'); }
       }
-      // Edge reasons count (more reasons = more validation)
-      var edgeCount = (t.edge_reasons || []).length;
-      if (edgeCount >= 3) { convScore += 2; convBreakdown.push('+2 Multiple edge signals (' + edgeCount + ')'); }
-      else if (edgeCount >= 1) { convScore += 1; convBreakdown.push('+1 Edge signal detected'); }
-      // Server-side conviction (if available from bot)
-      if (t.conviction && t.conviction > 0) {
-        var serverBonus = Math.min(2, Math.floor(t.conviction / 3));
-        if (serverBonus > 0) { convScore += serverBonus; convBreakdown.push('+' + serverBonus + ' Bot conviction (' + t.conviction + '/10)'); }
-      }
-      // Price sweet spot bonus
-      var pc = t.price_cents || t.price || 0;
-      if (pc >= 25 && pc <= 40) { convScore += 1; convBreakdown.push('+1 Underdog sweet spot (' + pc + '¢)'); }
-      else if (pc >= 65 && pc <= 85) { convScore += 1; convBreakdown.push('+1 Favorite sweet spot (' + pc + '¢)'); }
       // Cap at 10
       convScore = Math.min(10, Math.max(1, convScore));
       var convColor = convScore >= 8 ? '#00dc5a' : convScore >= 5 ? '#ffb400' : '#ff5000';
