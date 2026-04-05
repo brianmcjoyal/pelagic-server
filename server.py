@@ -6936,21 +6936,22 @@ def settled_positions():
         settled = []
 
         # Build a map of BUY timestamps from all_trades + trade journal for date filtering
-        # Only use buy fills — sell/settlement fills have today's date for old positions
+        # Use LATEST buy date so re-traded tickers pass the cutoff filter
         _trade_dates = {}
         for _at in BOT_STATE.get("all_trades", []):
             _tk = _at.get("ticker", "")
             _action = _at.get("action", "buy")
             _ts = (_at.get("timestamp", "") or "")[:10]
             if _tk and _ts and _action != "sell":
-                if _tk not in _trade_dates or _ts < _trade_dates[_tk]:
-                    _trade_dates[_tk] = _ts  # Use EARLIEST buy date
-        # Also check trade journal for tickers missing from all_trades
+                if _tk not in _trade_dates or _ts > _trade_dates[_tk]:
+                    _trade_dates[_tk] = _ts  # Use LATEST buy date
+        # Also check trade journal — use latest date if newer
         for _jt in _TRADE_JOURNAL:
             _tk = _jt.get("ticker", "")
             _ts = (_jt.get("trade_date") or (_jt.get("timestamp", "") or "")[:10] or "")
-            if _tk and _ts and _tk not in _trade_dates:
-                _trade_dates[_tk] = _ts
+            if _tk and _ts:
+                if _tk not in _trade_dates or _ts > _trade_dates[_tk]:
+                    _trade_dates[_tk] = _ts
         # Fetch fills from Kalshi to fill in any missing trade dates
         # This ensures recent bot trades show up even after Railway deploy resets BOT_STATE
         if True:  # Always try to hydrate from fills API
@@ -6966,7 +6967,8 @@ def settled_positions():
                         _ft = (_f.get("created_time", "") or "")[:10]
                         _fa = _f.get("action", "buy")
                         if _fk and _ft and _fa != "sell":
-                            if _fk not in _trade_dates or _ft < _trade_dates[_fk]:
+                            # Use LATEST buy date so re-traded tickers pass the cutoff
+                            if _fk not in _trade_dates or _ft > _trade_dates[_fk]:
                                 _trade_dates[_fk] = _ft
                 print(f"[SETTLED] Hydrated {len(_trade_dates)} trade dates from fills API (post-deploy)")
             except Exception as _fe:
@@ -7025,14 +7027,11 @@ def settled_positions():
                 continue
 
             ticker = pos.get("ticker", "")
-            # Filter: only Day 1+ trades
+            # Filter: only Day 1+ trades (cutoff = TRADE_JOURNAL_START)
             trade_date = _trade_dates.get(ticker, "")
-            if not trade_date:
-                # No date found — try to infer from fill created_time already fetched
-                # If still unknown, exclude (fail closed — don't show unverified old trades)
-                continue
-            if trade_date < _day1_cutoff:
+            if trade_date and trade_date < _day1_cutoff:
                 continue  # Pre-Day-1 — skip
+            # If no trade_date at all, include it — likely a recent trade after deploy
 
             title = _get_title(ticker)
             # total_traded from Kalshi includes settlement payouts, not just cost
