@@ -170,6 +170,8 @@ _TRADE_JOURNAL = []  # List of enriched trade records with full metadata
 _CATEGORY_STATS = {}  # {cat: {"wins": 0, "losses": 0, "pnl": 0.0}}
 _GAME_EXPOSURE = {}   # {game_event_key: total_usd_wagered} — per-game exposure cap
 _GAME_EXPOSURE_MAX = 10.0  # max $10 per game across all strategies
+_PERF_HISTORY = []  # [{ts: ISO string, value: portfolio_value_usd, cash: balance_usd}]
+_PERF_HISTORY_MAX = 5000  # keep ~5000 points (~20 hours at 15s intervals, or many days of hourly)
 _LEARNING_STATE = {
     "last_run": None,
     "version": 0,
@@ -214,6 +216,8 @@ def _save_state():
             "learning_state": _LEARNING_STATE,
             # Per-game exposure tracking
             "game_exposure": _GAME_EXPOSURE,
+            # Performance history for line chart (keep last _PERF_HISTORY_MAX)
+            "perf_history": _PERF_HISTORY[-_PERF_HISTORY_MAX:],
             # Timestamp for date-check on load
             "save_date": datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d"),
         }
@@ -297,6 +301,13 @@ def _load_state():
             _LEARNING_STATE.clear()
             _LEARNING_STATE.update(saved_learning)
             print(f"[STATE] Restored learning state v{_LEARNING_STATE.get('version', 0)} from disk")
+
+        # Restore performance history (line chart data — persists across days)
+        saved_perf = data.get("perf_history", [])
+        if saved_perf:
+            _PERF_HISTORY.clear()
+            _PERF_HISTORY.extend(saved_perf[-_PERF_HISTORY_MAX:])
+            print(f"[STATE] Restored {len(_PERF_HISTORY)} performance history points from disk")
 
         print(f"[STATE] Restored {len(BOT_STATE['all_trades'])} trades from disk, "
               f"daily_spent reset to $0 for new session, same_day={is_same_day}")
@@ -6394,6 +6405,15 @@ def _background_loop():
         except Exception:
             pass
         _PORTFOLIO_CACHE["ts"] = _time.time()
+        # Record performance history snapshot for line chart
+        if _pf_value > 0:
+            _PERF_HISTORY.append({
+                "ts": datetime.datetime.now(tz=_PACIFIC).isoformat(),
+                "value": round(_pf_value, 2),
+                "cash": round(_bal_early, 2),
+            })
+            if len(_PERF_HISTORY) > _PERF_HISTORY_MAX:
+                _PERF_HISTORY[:] = _PERF_HISTORY[-_PERF_HISTORY_MAX:]
         print(f"[BG] Early cache warm: ${_bal_early:.2f} cash, {len(_pos_early)} positions, P&L ${_early_realized:+.2f}")
         # Pre-warm settled cache so Performance tab loads instantly
         try:
@@ -6620,6 +6640,18 @@ def _background_loop():
                     "settled_history": _settled_list2[-20:],
                 }
                 _PORTFOLIO_CACHE["ts"] = _time.time()
+                # Record performance history snapshot for line chart
+                # Throttle to ~1 point per minute to avoid bloat (bg loop runs every 15s)
+                _last_perf_ts = _PERF_HISTORY[-1]["ts"][:16] if _PERF_HISTORY else ""
+                _now_perf_ts = datetime.datetime.now(tz=_PACIFIC).isoformat()[:16]
+                if _now_perf_ts != _last_perf_ts and _pf_value2 > 0:
+                    _PERF_HISTORY.append({
+                        "ts": datetime.datetime.now(tz=_PACIFIC).isoformat(),
+                        "value": round(_pf_value2, 2),
+                        "cash": round(_bal2, 2),
+                    })
+                    if len(_PERF_HISTORY) > _PERF_HISTORY_MAX:
+                        _PERF_HISTORY[:] = _PERF_HISTORY[-_PERF_HISTORY_MAX:]
             except Exception:
                 pass
             # Auto-exit DISABLED — all positions settle naturally at $0 or $1
@@ -8690,6 +8722,20 @@ def news_ideas_refresh():
 
 _PORTFOLIO_CACHE = {"data": None, "ts": 0}
 _PORTFOLIO_CACHE_TTL = 15  # seconds — serve cached data between refreshes
+
+@app.route("/performance-history")
+def performance_history():
+    """Return portfolio value history for the performance line chart."""
+    # Optional query params for filtering
+    since = request.args.get("since", "")  # ISO date string e.g. "2026-04-05"
+    limit = int(request.args.get("limit", "0") or "0")
+    pts = _PERF_HISTORY
+    if since:
+        pts = [p for p in pts if p["ts"][:10] >= since]
+    if limit and limit > 0:
+        pts = pts[-limit:]
+    return jsonify({"history": pts, "count": len(pts)})
+
 
 @app.route("/portfolio-summary")
 def portfolio_summary():
@@ -13140,6 +13186,29 @@ a:hover { color: #7da5f5; }
 
 <!-- History Tab -->
 <div class="tab-content" id="tab-performance">
+  <!-- Performance Line Chart -->
+  <div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:14px;margin-bottom:12px;position:relative">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <div style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Portfolio Performance</div>
+      <div style="display:flex;gap:6px" id="perf-chart-range">
+        <button onclick="setPerfRange('1h')" class="refresh-btn perf-range-btn" data-range="1h" style="font-size:9px;padding:2px 8px">1H</button>
+        <button onclick="setPerfRange('6h')" class="refresh-btn perf-range-btn" data-range="6h" style="font-size:9px;padding:2px 8px">6H</button>
+        <button onclick="setPerfRange('1d')" class="refresh-btn perf-range-btn active" data-range="1d" style="font-size:9px;padding:2px 8px;background:#00dc5a;color:#000">1D</button>
+        <button onclick="setPerfRange('7d')" class="refresh-btn perf-range-btn" data-range="7d" style="font-size:9px;padding:2px 8px">7D</button>
+        <button onclick="setPerfRange('all')" class="refresh-btn perf-range-btn" data-range="all" style="font-size:9px;padding:2px 8px">ALL</button>
+      </div>
+    </div>
+    <div style="position:relative;height:220px">
+      <canvas id="perf-line-chart" style="width:100%;height:100%"></canvas>
+      <div id="perf-chart-tooltip" style="display:none;position:absolute;background:#222;border:1px solid #444;border-radius:6px;padding:6px 10px;font-size:10px;color:#fff;pointer-events:none;z-index:10;white-space:nowrap"></div>
+    </div>
+    <div style="display:flex;justify-content:space-between;margin-top:6px">
+      <span id="perf-chart-start" style="color:#555;font-size:9px">--</span>
+      <span id="perf-chart-change" style="font-size:11px;font-weight:700">--</span>
+      <span id="perf-chart-end" style="color:#555;font-size:9px">--</span>
+    </div>
+  </div>
+
   <!-- Row 1: Core KPIs -->
   <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-bottom:12px" id="perf-kpis">
     <span style="color:#666">Loading...</span>
@@ -14669,6 +14738,259 @@ async function loadTrades() {
 }
 
 // P/L Chart
+// ── Performance Line Chart ──
+var _perfChartData = [];
+var _perfChartRange = '1d';
+var _perfChartHover = -1;
+
+function setPerfRange(range) {
+  _perfChartRange = range;
+  document.querySelectorAll('.perf-range-btn').forEach(function(b) {
+    if (b.getAttribute('data-range') === range) {
+      b.style.background = '#00dc5a'; b.style.color = '#000';
+    } else {
+      b.style.background = ''; b.style.color = '';
+    }
+  });
+  drawPerfLineChart();
+}
+
+async function loadPerfHistory() {
+  try {
+    var resp = await fetch(API + '/performance-history');
+    var data = await resp.json();
+    _perfChartData = data.history || [];
+    drawPerfLineChart();
+  } catch(e) {
+    console.error('Failed to load performance history:', e);
+  }
+}
+
+function filterPerfData() {
+  if (!_perfChartData.length) return [];
+  var now = new Date();
+  var cutoff = null;
+  if (_perfChartRange === '1h') cutoff = new Date(now - 3600000);
+  else if (_perfChartRange === '6h') cutoff = new Date(now - 6 * 3600000);
+  else if (_perfChartRange === '1d') cutoff = new Date(now - 86400000);
+  else if (_perfChartRange === '7d') cutoff = new Date(now - 7 * 86400000);
+  // 'all' = no cutoff
+  if (!cutoff) return _perfChartData;
+  var cutStr = cutoff.toISOString();
+  return _perfChartData.filter(function(p) { return p.ts >= cutStr; });
+}
+
+function drawPerfLineChart() {
+  var canvas = document.getElementById('perf-line-chart');
+  if (!canvas) return;
+  var ctx = canvas.getContext('2d');
+  var dpr = window.devicePixelRatio || 1;
+  var rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  var w = rect.width, h = rect.height;
+  ctx.clearRect(0, 0, w, h);
+
+  var pts = filterPerfData();
+  var startLabel = document.getElementById('perf-chart-start');
+  var endLabel = document.getElementById('perf-chart-end');
+  var changeLabel = document.getElementById('perf-chart-change');
+
+  if (pts.length < 2) {
+    ctx.fillStyle = '#333';
+    ctx.font = '12px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Collecting data... chart will appear shortly', w / 2, h / 2);
+    if (startLabel) startLabel.textContent = '--';
+    if (endLabel) endLabel.textContent = '--';
+    if (changeLabel) { changeLabel.textContent = 'Waiting for data'; changeLabel.style.color = '#666'; }
+    return;
+  }
+
+  var DAY1 = 500.00;
+  var vals = pts.map(function(p) { return p.value; });
+  var minV = Math.min.apply(null, vals);
+  var maxV = Math.max.apply(null, vals);
+  var range = maxV - minV;
+  if (range < 0.5) { minV -= 1; maxV += 1; range = maxV - minV; }
+  var pad = { top: 20, right: 15, bottom: 8, left: 50 };
+
+  function xPos(i) { return pad.left + (i / (pts.length - 1)) * (w - pad.left - pad.right); }
+  function yPos(v) { return pad.top + (1 - (v - minV) / range) * (h - pad.top - pad.bottom); }
+
+  // Y-axis grid lines & labels
+  var gridLines = 5;
+  ctx.strokeStyle = '#1a1a1a';
+  ctx.lineWidth = 0.5;
+  ctx.fillStyle = '#555';
+  ctx.font = '9px -apple-system, sans-serif';
+  ctx.textAlign = 'right';
+  for (var g = 0; g <= gridLines; g++) {
+    var gVal = minV + (g / gridLines) * range;
+    var gY = yPos(gVal);
+    ctx.beginPath(); ctx.moveTo(pad.left, gY); ctx.lineTo(w - pad.right, gY); ctx.stroke();
+    ctx.fillText('$' + gVal.toFixed(2), pad.left - 4, gY + 3);
+  }
+
+  // Starting balance reference line
+  if (DAY1 >= minV && DAY1 <= maxV) {
+    ctx.strokeStyle = '#333';
+    ctx.setLineDash([4, 4]);
+    ctx.lineWidth = 1;
+    var day1Y = yPos(DAY1);
+    ctx.beginPath(); ctx.moveTo(pad.left, day1Y); ctx.lineTo(w - pad.right, day1Y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#555';
+    ctx.textAlign = 'left';
+    ctx.fillText('$500 start', pad.left + 4, day1Y - 4);
+  }
+
+  // Determine color based on overall change
+  var firstVal = pts[0].value;
+  var lastVal = pts[pts.length - 1].value;
+  var isUp = lastVal >= firstVal;
+  var lineColor = isUp ? '#00dc5a' : '#ff5000';
+  var fillColorTop = isUp ? 'rgba(0,220,90,0.15)' : 'rgba(255,80,0,0.15)';
+  var fillColorBot = isUp ? 'rgba(0,220,90,0.0)' : 'rgba(255,80,0,0.0)';
+
+  // Area fill
+  ctx.beginPath();
+  ctx.moveTo(xPos(0), yPos(firstVal));
+  for (var i = 0; i < pts.length; i++) ctx.lineTo(xPos(i), yPos(pts[i].value));
+  ctx.lineTo(xPos(pts.length - 1), h - pad.bottom);
+  ctx.lineTo(xPos(0), h - pad.bottom);
+  ctx.closePath();
+  var grad = ctx.createLinearGradient(0, pad.top, 0, h - pad.bottom);
+  grad.addColorStop(0, fillColorTop);
+  grad.addColorStop(1, fillColorBot);
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Line
+  ctx.beginPath();
+  for (var i = 0; i < pts.length; i++) {
+    if (i === 0) ctx.moveTo(xPos(i), yPos(pts[i].value));
+    else ctx.lineTo(xPos(i), yPos(pts[i].value));
+  }
+  ctx.strokeStyle = lineColor;
+  ctx.lineWidth = 2;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+
+  // End dot (pulsing)
+  var lastX = xPos(pts.length - 1);
+  var lastY = yPos(lastVal);
+  ctx.beginPath();
+  ctx.arc(lastX, lastY, 4, 0, Math.PI * 2);
+  ctx.fillStyle = lineColor;
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(lastX, lastY, 7, 0, Math.PI * 2);
+  ctx.strokeStyle = lineColor;
+  ctx.lineWidth = 1;
+  ctx.globalAlpha = 0.3;
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  // Update labels
+  function fmtTime(iso) {
+    var d = new Date(iso);
+    var mo = d.getMonth() + 1, dy = d.getDate();
+    var hr = d.getHours(), mn = d.getMinutes();
+    var ampm = hr >= 12 ? 'PM' : 'AM';
+    hr = hr % 12 || 12;
+    return mo + '/' + dy + ' ' + hr + ':' + (mn < 10 ? '0' : '') + mn + ' ' + ampm;
+  }
+  if (startLabel) startLabel.textContent = fmtTime(pts[0].ts);
+  if (endLabel) endLabel.textContent = fmtTime(pts[pts.length - 1].ts);
+  var chg = lastVal - firstVal;
+  var chgPct = firstVal > 0 ? (chg / firstVal * 100) : 0;
+  if (changeLabel) {
+    changeLabel.textContent = (chg >= 0 ? '+$' : '-$') + Math.abs(chg).toFixed(2) + ' (' + (chgPct >= 0 ? '+' : '') + chgPct.toFixed(2) + '%)';
+    changeLabel.style.color = isUp ? '#00dc5a' : '#ff5000';
+  }
+
+  // Store for hover
+  canvas._perfPts = pts;
+  canvas._perfXPos = xPos;
+  canvas._perfYPos = yPos;
+  canvas._perfPad = pad;
+  canvas._perfW = w;
+  canvas._perfH = h;
+
+  // Ensure tooltip bindings are attached
+  _initPerfTooltip();
+}
+
+// Hover tooltip for performance chart (init on first draw or DOM ready)
+var _perfTooltipBound = false;
+function _initPerfTooltip() {
+  if (_perfTooltipBound) return;
+  var canvas = document.getElementById('perf-line-chart');
+  if (!canvas) return;
+  _perfTooltipBound = true;
+  var tooltip = document.getElementById('perf-chart-tooltip');
+
+  canvas.addEventListener('mousemove', function(e) {
+    if (!canvas._perfPts || canvas._perfPts.length < 2 || !tooltip) return;
+    var rect = canvas.getBoundingClientRect();
+    var mx = e.clientX - rect.left;
+    var pts = canvas._perfPts;
+    var pad = canvas._perfPad;
+    var xPos = canvas._perfXPos;
+    var yPos = canvas._perfYPos;
+
+    // Find nearest point
+    var closest = 0, closestDist = Infinity;
+    for (var i = 0; i < pts.length; i++) {
+      var dist = Math.abs(xPos(i) - mx);
+      if (dist < closestDist) { closestDist = dist; closest = i; }
+    }
+    if (closestDist > 30) { tooltip.style.display = 'none'; return; }
+
+    var p = pts[closest];
+    var d = new Date(p.ts);
+    var hr = d.getHours(), mn = d.getMinutes(), ampm = hr >= 12 ? 'PM' : 'AM';
+    hr = hr % 12 || 12;
+    var timeStr = (d.getMonth()+1) + '/' + d.getDate() + ' ' + hr + ':' + (mn < 10 ? '0' : '') + mn + ' ' + ampm;
+    var chgFromStart = p.value - pts[0].value;
+    tooltip.innerHTML = '<div style="font-weight:700;color:#fff">$' + p.value.toFixed(2) + '</div>' +
+      '<div style="color:#888;font-size:9px">' + timeStr + '</div>' +
+      '<div style="color:' + (chgFromStart >= 0 ? '#00dc5a' : '#ff5000') + ';font-size:9px">' +
+      (chgFromStart >= 0 ? '+$' : '-$') + Math.abs(chgFromStart).toFixed(2) + ' from start</div>';
+
+    var tx = xPos(closest);
+    var ty = yPos(p.value);
+    tooltip.style.display = 'block';
+    tooltip.style.left = Math.min(tx + 10, canvas._perfW - 140) + 'px';
+    tooltip.style.top = Math.max(ty - 50, 0) + 'px';
+
+    // Redraw with crosshair
+    drawPerfLineChart();
+    var ctx = canvas.getContext('2d');
+    var dpr = window.devicePixelRatio || 1;
+    ctx.save();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.strokeStyle = '#444';
+    ctx.lineWidth = 0.5;
+    ctx.setLineDash([2, 2]);
+    ctx.beginPath(); ctx.moveTo(tx, pad.top); ctx.lineTo(tx, canvas._perfH - pad.bottom); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.arc(tx, ty, 5, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff';
+    ctx.fill();
+    ctx.restore();
+  });
+
+  canvas.addEventListener('mouseleave', function() {
+    if (tooltip) tooltip.style.display = 'none';
+  });
+}
+// Init tooltip bindings after DOM is ready and on first chart draw
+document.addEventListener('DOMContentLoaded', _initPerfTooltip);
+
 function drawPLChart(trades) {
   const canvas = document.getElementById('pl-chart');
   if (!canvas) return;
@@ -15185,6 +15507,8 @@ async function loadSettled() {
 
 // === COMBINED PERFORMANCE TAB ===
 async function loadPerformance() {
+  // Load performance history chart in parallel (non-blocking)
+  loadPerfHistory();
   try {
     // Fetch all data in parallel
     var [settledData, analyticsData, tradesData, insightsData, portfolioData] = await Promise.all([
