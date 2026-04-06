@@ -7797,6 +7797,85 @@ def settled_positions():
         return jsonify({"settled": [], "error": str(e)})
 
 
+@app.route("/debug-settled")
+def debug_settled():
+    """Diagnostic: why are settled positions empty?"""
+    try:
+        path = "/portfolio/positions"
+        positions_list = []
+        counts_by_status = {}
+        for _status in ["settled", "unsettled"]:
+            h = signed_headers("GET", path)
+            if not h:
+                return jsonify({"error": "No API key"})
+            cursor = None
+            page_count = 0
+            for _ in range(10):
+                params = {"limit": 200, "settlement_status": _status}
+                if cursor:
+                    params["cursor"] = cursor
+                h = signed_headers("GET", path)
+                resp = requests.get(
+                    KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
+                    headers=h, params=params, timeout=TIMEOUT,
+                )
+                resp.raise_for_status()
+                page = resp.json()
+                batch = page.get("market_positions", [])
+                positions_list.extend(batch)
+                page_count += len(batch)
+                cursor = page.get("cursor")
+                if not cursor:
+                    break
+            counts_by_status[_status] = page_count
+        # Analyze
+        game_positions = [p for p in positions_list if "GAME" in (p.get("ticker", "") or "").upper()]
+        nonzero_pnl = [p for p in positions_list if abs(_parse_kalshi_dollars(p.get("realized_pnl_dollars") or p.get("realized_pnl") or 0)) > 0]
+        # Recent game positions (Apr 2026)
+        recent_games = [p for p in game_positions if "APR" in (p.get("ticker", "") or "").upper()]
+        # trade_dates from fills
+        _trade_dates_debug = {}
+        try:
+            _fills_h = signed_headers("GET", "/portfolio/fills")
+            _fills_r = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/fills",
+                headers=_fills_h, params={"limit": 200}, timeout=10,
+            )
+            if _fills_r.ok:
+                fills = _fills_r.json().get("fills", [])
+                for _f in fills:
+                    _fk = _f.get("ticker", "")
+                    _ft = (_f.get("created_time", "") or "")[:10]
+                    if _fk and _ft:
+                        if _fk not in _trade_dates_debug or _ft > _trade_dates_debug[_fk]:
+                            _trade_dates_debug[_fk] = _ft
+        except:
+            pass
+        game_fills = {k: v for k, v in _trade_dates_debug.items() if "GAME" in k.upper()}
+        return jsonify({
+            "total_positions": len(positions_list),
+            "by_status": counts_by_status,
+            "game_positions_count": len(game_positions),
+            "recent_game_positions": len(recent_games),
+            "nonzero_pnl_count": len(nonzero_pnl),
+            "trade_journal_start": TRADE_JOURNAL_START,
+            "game_fills_from_api": game_fills,
+            "recent_game_details": [{
+                "ticker": p.get("ticker", "")[:40],
+                "realized_pnl": p.get("realized_pnl_dollars") or p.get("realized_pnl"),
+                "settlement_status": p.get("settlement_status"),
+            } for p in recent_games[:20]],
+            "sample_nonzero": [{
+                "ticker": p.get("ticker", "")[:35],
+                "rpnl": p.get("realized_pnl_dollars") or p.get("realized_pnl"),
+                "trade_date": _trade_dates_debug.get(p.get("ticker", ""), "NONE"),
+                "passes_cutoff": (_trade_dates_debug.get(p.get("ticker", ""), "") >= TRADE_JOURNAL_START) if _trade_dates_debug.get(p.get("ticker", "")) else "no_date",
+            } for p in nonzero_pnl[:15]],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
 @app.route("/debug-scan")
 def debug_scan():
     """Quick diagnostic: what can the snipers see right now?"""
