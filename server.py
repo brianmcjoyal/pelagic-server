@@ -55,6 +55,7 @@ STOP_WORDS = {
 
 TIMEOUT = 8
 API_SECRET = os.environ.get("TRADESHARK_API_SECRET", "")
+ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")
 
 # ---------------------------------------------------------------------------
 # Bot version — tags every trade so we can separate old vs new performance
@@ -490,6 +491,21 @@ def _hydrate_from_kalshi():
 _load_state()
 
 
+def _extract_hour_from_timestamp(ts_str):
+    """Extract hour (Pacific) from an ISO timestamp string. Returns 12 as default."""
+    if not ts_str:
+        return 12  # reasonable default (afternoon)
+    try:
+        # Parse ISO format like "2026-03-31T19:45:00Z"
+        ts_str_clean = ts_str.replace("Z", "+00:00")
+        dt = datetime.datetime.fromisoformat(ts_str_clean)
+        # Convert to Pacific
+        dt_pacific = dt.astimezone(_PACIFIC)
+        return dt_pacific.hour
+    except Exception:
+        return 12
+
+
 def _rebuild_journal_from_kalshi():
     """Rebuild _TRADE_JOURNAL and _CATEGORY_STATS from Kalshi settled positions.
 
@@ -635,7 +651,7 @@ def _rebuild_journal_from_kalshi():
                 "is_live": False,
                 "volatility": 0,
                 "entry_time": created or close_time or "",
-                "entry_hour": 0,
+                "entry_hour": _extract_hour_from_timestamp(created or close_time or ""),
                 "entry_day": "",
                 "entry_date": (created or "")[:10] if created else "",
                 "result": "win" if won else ("loss" if pnl_usd < -0.005 else "even"),
@@ -2874,8 +2890,8 @@ def live_game_snipe():
                 # Signal 4: Closing soon (live edge)
                 if closing_boost > 1:
                     conviction += 1
-                # Require minimum conviction of 2 to bet
-                if conviction < 2:
+                # Require minimum conviction of 4 to bet (raised — ESPN validation makes this achievable)
+                if conviction < 4:
                     continue
 
                 # ESPN LIVE WIN PROBABILITY VALIDATION
@@ -2918,8 +2934,29 @@ def live_game_snipe():
                         "info"
                     )
 
+                # The Odds API consensus validation for Sniper
+                _snipe_consensus = None
+                if _snipe_team and _snipe_game:
+                    _snipe_league_oa = (_snipe_game.get("league") or "").lower()
+                    if _snipe_league_oa:
+                        _snipe_consensus = _get_consensus_odds(_snipe_team, _snipe_league_oa)
+                if _snipe_consensus is not None:
+                    _snipe_cons_edge = _snipe_consensus - implied_prob_snipe
+                    _log_activity(
+                        f"SNIPE ODDS API: {ticker} — consensus={_snipe_consensus:.1%} vs Kalshi={implied_prob_snipe:.0%} edge={_snipe_cons_edge:+.1%}",
+                        "info"
+                    )
+                    if _snipe_cons_edge >= 0.03 and _snipe_espn_prob and (_snipe_espn_prob - implied_prob_snipe) > 0.02:
+                        conviction += 1  # both sources agree
+                    elif _snipe_cons_edge < -0.03 and _snipe_espn_prob and (_snipe_espn_prob - implied_prob_snipe) > 0.03:
+                        conviction -= 2  # sportsbook consensus disagrees with ESPN
+                        _log_activity(
+                            f"SNIPE: Sportsbook consensus disagrees with ESPN — consensus={_snipe_consensus:.1%} vs ESPN={_snipe_espn_prob:.1%}",
+                            "warn"
+                        )
+
                 # Re-check conviction after ESPN adjustment
-                if conviction < 2:
+                if conviction < 4:
                     _ms_reasons["low_conviction_post_espn"] = _ms_reasons.get("low_conviction_post_espn", 0) + 1
                     continue
 
@@ -3001,7 +3038,7 @@ def live_game_snipe():
                     elif not _snipe_buying_yes and _snipe_ob_imb < -0.3:
                         conviction += 1
                     # Re-check conviction after orderbook adjustment
-                    if conviction < 2:
+                    if conviction < 4:
                         _ms_reasons["low_conviction_ob"] = _ms_reasons.get("low_conviction_ob", 0) + 1
                         continue
 
@@ -3533,6 +3570,32 @@ def moonshark_snipe():
                         except (ValueError, TypeError):
                             pass
 
+                # Signal 8: The Odds API consensus validation
+                # Cross-reference ESPN edge against real sportsbook consensus
+                _consensus_prob = None
+                if _game_info and _league:
+                    _ms_team_abbrev = _tk_parts_odds[-1].upper() if len(_tk_parts_odds) >= 2 else ""
+                    if _ms_team_abbrev:
+                        _consensus_prob = _get_consensus_odds(_ms_team_abbrev, _league)
+                if _consensus_prob is not None:
+                    _consensus_edge = _consensus_prob - implied_prob
+                    _log_activity(
+                        f"ODDS API CHECK: {ticker} — consensus={_consensus_prob:.1%} vs Kalshi={implied_prob:.0%} edge={_consensus_edge:+.1%} (ESPN={espn_implied:.1%})",
+                        "info"
+                    )
+                    # If consensus AND ESPN both show edge > 3%, boost conviction
+                    if _consensus_edge > 0.03 and espn_edge and espn_edge > 0.03:
+                        ms_conviction += 1
+                        _conv_reasons.append(f"consensus+{_consensus_edge:.0%}")
+                    # If consensus DISAGREES with ESPN (consensus says no edge, ESPN says edge)
+                    elif _consensus_edge < 0 and espn_edge and espn_edge > 0.03:
+                        ms_conviction -= 2
+                        _conv_reasons.append(f"consensus_disagree({_consensus_edge:+.0%})")
+                        _log_activity(
+                            f"MOONSHARK: Sportsbook consensus disagrees with ESPN — consensus={_consensus_prob:.1%} vs ESPN={espn_implied:.1%}",
+                            "warn"
+                        )
+
                 # Require minimum conviction — never drop below 3, even in floor mode
                 _ms_min_conviction = 3 if _ms_below_floor else 4
                 if ms_conviction < _ms_min_conviction:
@@ -3978,6 +4041,18 @@ def closegame_snipe():
                 if underdog not in ticker.upper():
                     continue
 
+                # Block banned categories (same as MoonShark/Sniper)
+                blocked = BOT_CONFIG.get("blocked_categories", [])
+                mcat = classify_market_category(title, ticker)
+                if mcat in blocked:
+                    continue
+
+                # Block known junk keywords
+                title_lower = title.lower()
+                blocked_kw = BOT_CONFIG.get("blocked_keywords", [])
+                if any(kw in title_lower for kw in blocked_kw):
+                    continue
+
                 if ticker in existing_tickers:
                     continue
                 event_key = "-".join(ticker.split("-")[:2]) if ticker else ""
@@ -4103,6 +4178,26 @@ def closegame_snipe():
                                 f"CLOSEGAME: ESPN signal gap {_cg_signal_gap:.0%} > 10%, discounting edge 50% to {espn_edge_cg:.1%}",
                                 "info"
                             )
+
+                # The Odds API consensus validation for CloseGame
+                _cg_consensus = _get_consensus_odds(underdog, cg["sport"]) if underdog else None
+                if _cg_consensus is not None:
+                    _cg_cons_edge = _cg_consensus - kalshi_implied
+                    _log_activity(
+                        f"CLOSEGAME ODDS API: {ticker} — consensus={_cg_consensus:.1%} vs Kalshi={kalshi_implied:.0%} edge={_cg_cons_edge:+.1%}",
+                        "info"
+                    )
+                    # Consensus agrees with ESPN edge — boost the edge estimate
+                    if _cg_cons_edge > 0.03 and espn_edge_cg and espn_edge_cg > 0.03:
+                        espn_edge_cg = espn_edge_cg + 0.01  # small boost for double-confirmation
+                        _log_activity(f"CLOSEGAME: Odds API confirms ESPN edge, boosted to {espn_edge_cg:.1%}", "info")
+                    # Consensus disagrees — discount the edge
+                    elif _cg_cons_edge < 0 and espn_edge_cg and espn_edge_cg > 0.03:
+                        espn_edge_cg = espn_edge_cg * 0.5
+                        _log_activity(
+                            f"CLOSEGAME: Sportsbook consensus disagrees — consensus={_cg_consensus:.1%}, discounting edge to {espn_edge_cg:.1%}",
+                            "warn"
+                        )
 
                 # Require real ESPN edge — no more guessing with hardcoded model
                 # Allow spread edge to supplement: if moneyline edge is 2% but spread adds 3%, total is enough
@@ -5279,7 +5374,8 @@ _CATEGORY_KEYWORDS = {
     "weather": ["temperature", "weather", "hurricane", "tornado", "rainfall",
                 "snow", "climate", "degrees", "fahrenheit", "celsius"],
     "crypto": ["bitcoin", "ethereum", "crypto", "btc", "eth", "solana"],
-    "tech": ["ai", "artificial intelligence", "openai", "google", "apple",
+    "tech": ["artificial intelligence", "openai", "chatgpt", "gemini ai",
+             " ai ", "a.i.", "google", "apple",
              "microsoft", "meta", "tesla", "spacex", "tech"],
     "entertainment": ["oscar", "grammy", "emmy", "movie", "film", "box office",
                       "netflix", "disney", "streaming"],
@@ -5288,6 +5384,12 @@ _CATEGORY_KEYWORDS = {
                "roland garros", "miami open"],
     "mma": ["ufc", "mma", "bellator", "fight night", "ppv", "octagon"],
     "golf": ["pga", "golf", "masters", "open championship", "ryder cup"],
+    "kbo": ["kbo", "kbl", "korean baseball", "lg twins", "samsung lions", "doosan bears",
+            "kia tigers", "ssg landers", "nc dinos", "lotte giants", "hanwha eagles",
+            "kt wiz", "kiwoom heroes"],
+    "ncaa": ["ncaa", "college", "march madness", "big ten", "big 12",
+             "sec tournament", "acc tournament", "final four"],
+    "afl": ["afl", "australian football"],
 }
 
 
@@ -5713,7 +5815,7 @@ TRADE_JOURNAL_START = "2026-03-31"  # Skip pre-bugfix trades (03-16 to 03-20 wer
 
 def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, strategy, is_live=False, close_time=None, game_info=None, espn_edge_data=None, orderbook_data=None, conviction=0, conviction_reasons=None):
     """Create an enriched trade record with all metadata for pattern analysis."""
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(tz=_PACIFIC)
     cat = classify_market_category(title or "", ticker or "")
     vol_score = get_volatility_score(ticker)
 
@@ -9109,6 +9211,15 @@ def status():
         },
         "clv_stats": _get_clv_stats(),
         "game_exposure": dict(_GAME_EXPOSURE),
+        "odds_api": {
+            "configured": bool(ODDS_API_KEY),
+            "last_fetch": _ODDS_API_STATS.get("last_fetch"),
+            "total_requests": _ODDS_API_STATS.get("total_requests", 0),
+            "remaining_requests": _ODDS_API_STATS.get("remaining_requests"),
+            "errors": _ODDS_API_STATS.get("errors", 0),
+            "cached_sports": list(_ODDS_API_CACHE.keys()),
+            "cache_ttl_seconds": _ODDS_API_TTL,
+        },
     })
 
 
@@ -10015,6 +10126,214 @@ def _get_espn_win_prob(event_id, league, home_team=True):
     except Exception:
         pass
     return None  # Caller should fall back to _lookup_win_prob
+
+
+# ---------------------------------------------------------------------------
+# The Odds API — real-time sportsbook odds from 15+ bookmakers
+# ---------------------------------------------------------------------------
+_ODDS_API_CACHE = {}  # sport_key -> {"data": [...], "ts": float}
+_ODDS_API_TTL = 7200  # 2-hour cache — free tier = 500 req/month (~16/day)
+_ODDS_API_STATS = {
+    "last_fetch": None,
+    "total_requests": 0,
+    "remaining_requests": None,
+    "errors": 0,
+}
+
+_ODDS_API_SPORT_MAP = {
+    "nba": "basketball_nba",
+    "mlb": "baseball_mlb",
+    "nhl": "icehockey_nhl",
+    "ncaab": "basketball_ncaab",
+    "mma": "mma_mixed_martial_arts",
+}
+
+# Abbreviation -> full team name fragments for fuzzy matching
+# The Odds API uses full names like "Los Angeles Lakers"; Kalshi uses "LAL"
+_ODDS_API_TEAM_ALIASES = {
+    # NBA
+    "atl": ["atlanta", "hawks"], "bos": ["boston", "celtics"], "bkn": ["brooklyn", "nets"],
+    "cha": ["charlotte", "hornets"], "chi": ["chicago", "bulls"], "cle": ["cleveland", "cavaliers"],
+    "dal": ["dallas", "mavericks"], "den": ["denver", "nuggets"], "det": ["detroit", "pistons"],
+    "gs": ["golden state", "warriors"], "gsw": ["golden state", "warriors"],
+    "hou": ["houston", "rockets"], "ind": ["indiana", "pacers"],
+    "lac": ["la clippers", "clippers"], "lal": ["los angeles lakers", "lakers"],
+    "mem": ["memphis", "grizzlies"], "mia": ["miami", "heat"], "mil": ["milwaukee", "bucks"],
+    "min": ["minnesota", "timberwolves"], "no": ["new orleans", "pelicans"],
+    "nop": ["new orleans", "pelicans"], "ny": ["new york", "knicks"], "nyk": ["new york", "knicks"],
+    "okc": ["oklahoma city", "thunder"], "orl": ["orlando", "magic"],
+    "phi": ["philadelphia", "76ers"], "phx": ["phoenix", "suns"], "por": ["portland", "trail blazers"],
+    "sac": ["sacramento", "kings"], "sa": ["san antonio", "spurs"], "sas": ["san antonio", "spurs"],
+    "tor": ["toronto", "raptors"], "uta": ["utah", "jazz"], "wsh": ["washington", "wizards"],
+    # MLB
+    "ari": ["arizona", "diamondbacks"], "bal": ["baltimore", "orioles"],
+    "cin": ["cincinnati", "reds"], "col": ["colorado", "rockies"],
+    "chc": ["chicago cubs", "cubs"], "chw": ["chicago white sox", "white sox"],
+    "hou": ["houston", "astros"], "kc": ["kansas city", "royals"],
+    "laa": ["los angeles angels", "angels"], "lad": ["los angeles dodgers", "dodgers"],
+    "mia": ["miami", "marlins"], "mil": ["milwaukee", "brewers"],
+    "min": ["minnesota", "twins"], "nym": ["new york mets", "mets"],
+    "nyy": ["new york yankees", "yankees"], "oak": ["oakland", "athletics"],
+    "pit": ["pittsburgh", "pirates"], "sd": ["san diego", "padres"],
+    "sf": ["san francisco", "giants"], "sea": ["seattle", "mariners"],
+    "stl": ["st. louis", "cardinals"], "tb": ["tampa bay", "rays"],
+    "tex": ["texas", "rangers"], "tor": ["toronto", "blue jays"],
+    "wsh": ["washington", "nationals"],
+    # NHL
+    "ana": ["anaheim", "ducks"], "bos": ["boston", "bruins"],
+    "buf": ["buffalo", "sabres"], "cgy": ["calgary", "flames"], "car": ["carolina", "hurricanes"],
+    "cbj": ["columbus", "blue jackets"], "col": ["colorado", "avalanche"],
+    "dal": ["dallas", "stars"], "det": ["detroit", "red wings"],
+    "edm": ["edmonton", "oilers"], "fla": ["florida", "panthers"],
+    "la": ["los angeles", "kings"], "min": ["minnesota", "wild"],
+    "mtl": ["montreal", "canadiens"], "nsh": ["nashville", "predators"],
+    "nj": ["new jersey", "devils"], "nyi": ["new york islanders", "islanders"],
+    "nyr": ["new york rangers", "rangers"], "ott": ["ottawa", "senators"],
+    "phi": ["philadelphia", "flyers"], "pit": ["pittsburgh", "penguins"],
+    "sea": ["seattle", "kraken"], "sj": ["san jose", "sharks"],
+    "stl": ["st. louis", "blues"], "tb": ["tampa bay", "lightning"],
+    "tor": ["toronto", "maple leafs"], "van": ["vancouver", "canucks"],
+    "vgk": ["vegas", "golden knights"], "wpg": ["winnipeg", "jets"],
+    "wsh": ["washington", "capitals"],
+}
+
+
+def _fetch_odds_api(sport_key):
+    """Fetch odds from The Odds API for a given sport. Returns list of games or None.
+
+    Caches for 2 hours to stay within the 500 req/month free tier.
+    Returns None if ODDS_API_KEY is not set (graceful degradation).
+    """
+    import time as _t
+    if not ODDS_API_KEY:
+        return None
+
+    now = _t.time()
+    cached = _ODDS_API_CACHE.get(sport_key)
+    if cached and now - cached["ts"] < _ODDS_API_TTL:
+        return cached["data"]
+
+    try:
+        url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/"
+        resp = requests.get(url, params={
+            "apiKey": ODDS_API_KEY,
+            "regions": "us",
+            "markets": "h2h",
+            "oddsFormat": "american",
+        }, timeout=10)
+
+        _ODDS_API_STATS["total_requests"] += 1
+        _ODDS_API_STATS["last_fetch"] = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Track remaining requests from response headers
+        remaining = resp.headers.get("x-requests-remaining")
+        if remaining is not None:
+            try:
+                _ODDS_API_STATS["remaining_requests"] = int(remaining)
+            except (ValueError, TypeError):
+                pass
+
+        if not resp.ok:
+            _ODDS_API_STATS["errors"] += 1
+            _log_activity(f"Odds API error for {sport_key}: HTTP {resp.status_code}", "warn")
+            return None
+
+        data = resp.json()
+        _ODDS_API_CACHE[sport_key] = {"data": data, "ts": now}
+        _log_activity(
+            f"Odds API fetched {len(data)} games for {sport_key} (remaining: {_ODDS_API_STATS['remaining_requests']})",
+            "info"
+        )
+        return data
+
+    except Exception as e:
+        _ODDS_API_STATS["errors"] += 1
+        _log_activity(f"Odds API exception for {sport_key}: {e}", "warn")
+        return None
+
+
+def _match_odds_api_team(team_abbrev, odds_api_name):
+    """Check if a team abbreviation matches an Odds API full team name.
+
+    team_abbrev: e.g. "LAL", "NYY"
+    odds_api_name: e.g. "Los Angeles Lakers", "New York Yankees"
+    Returns True if match found.
+    """
+    abbrev_lower = team_abbrev.lower()
+    name_lower = odds_api_name.lower()
+
+    # Direct check via alias table
+    aliases = _ODDS_API_TEAM_ALIASES.get(abbrev_lower, [])
+    for alias in aliases:
+        if alias in name_lower:
+            return True
+
+    # Fallback: fuzzy match using SequenceMatcher
+    # Split the full name and check if any word strongly matches the abbreviation
+    if SequenceMatcher(None, abbrev_lower, name_lower.split()[-1] if name_lower.split() else "").ratio() > 0.7:
+        return True
+
+    return False
+
+
+def _get_consensus_odds(team_abbrev, league):
+    """Get consensus implied probability from multiple sportsbooks via The Odds API.
+
+    team_abbrev: e.g. "LAL", "NYY", "BOS"
+    league: e.g. "NBA", "MLB", "NHL"
+
+    Returns float probability (0-1) or None if unavailable.
+    Averages h2h moneyline odds across all available bookmakers.
+    """
+    sport_key = _ODDS_API_SPORT_MAP.get(league.lower())
+    if not sport_key:
+        return None
+
+    games = _fetch_odds_api(sport_key)
+    if not games:
+        return None
+
+    abbrev_upper = team_abbrev.upper()
+
+    for game in games:
+        home_team = game.get("home_team", "")
+        away_team = game.get("away_team", "")
+
+        # Find which side our team is on
+        is_home = _match_odds_api_team(abbrev_upper, home_team)
+        is_away = _match_odds_api_team(abbrev_upper, away_team)
+
+        if not is_home and not is_away:
+            continue
+
+        # Collect moneylines from all bookmakers
+        probs = []
+        for bookmaker in game.get("bookmakers", []):
+            for market in bookmaker.get("markets", []):
+                if market.get("key") != "h2h":
+                    continue
+                for outcome in market.get("outcomes", []):
+                    outcome_name = outcome.get("name", "")
+                    target_name = home_team if is_home else away_team
+                    if outcome_name == target_name:
+                        odds_val = outcome.get("price")
+                        if odds_val is not None:
+                            # Convert American odds to implied probability
+                            odds_val = float(odds_val)
+                            if odds_val > 0:
+                                prob = 100.0 / (odds_val + 100.0)
+                            elif odds_val < 0:
+                                prob = abs(odds_val) / (abs(odds_val) + 100.0)
+                            else:
+                                prob = 0.5
+                            probs.append(prob)
+                        break  # found our team in this bookmaker
+
+        if probs:
+            consensus = sum(probs) / len(probs)
+            return round(consensus, 4)
+
+    return None
 
 
 def _parse_clock_to_seconds(clock_str, sport="nba"):
