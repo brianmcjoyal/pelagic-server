@@ -66,7 +66,7 @@ BOT_VERSION_DATE = "2026-03-15"
 BOT_CONFIG = {
     "enabled": True,  # default ON — safety floor will auto-disable if needed
     "max_bet_usd": 25.0,          # max $25 per single trade — let Kelly size up on high-edge bets
-    "max_daily_usd": 150.0,        # max $150/day — scales with bankroll via smart sizing
+    "max_daily_usd": 125.0,        # max $125/day — 25% of $500 bankroll across all strategies
     "min_balance_usd": 250.0,     # SAFETY FLOOR: stop all trading if cash below $250
     "min_cash_reserve_pct": 0.05, # keep 5% of portfolio in cash — legacy positions skew ratio
     "max_open_positions": 150,    # high limit — legacy positions settling, bot uses daily trade cap instead
@@ -390,14 +390,18 @@ def _hydrate_from_kalshi():
             _inferred_strategy = None
             _is_today = created and created[:10] == today_str
             _tk_upper = ticker.upper()
-            # Sport/event tickers are bot trades (MoonShark)
+            # Sport/event tickers are bot trades — use PRICE to differentiate strategy
             _bot_prefixes = ("KXKBL", "KXATP", "KXWTA", "KXNCAA", "KXNBA",
                              "KXNHL", "KXMLB", "KXUFC", "KXMMA", "KXEPL",
                              "KXNFL", "KXMLS", "KXWNBA", "KXSOCCER", "KXPGA")
-            if any(_tk_upper.startswith(p) for p in _bot_prefixes):
-                _inferred_strategy = "moonshark"
-            elif _is_today and action == "buy" and price_cents <= 30:
-                _inferred_strategy = "moonshark"
+            if any(_tk_upper.startswith(p) for p in _bot_prefixes) or (_is_today and action == "buy"):
+                # Use price paid to infer which strategy placed the trade
+                if 25 <= price_cents <= 45:
+                    _inferred_strategy = "moonshark"  # MoonShark/CloseGame range
+                elif 60 <= price_cents <= 85:
+                    _inferred_strategy = "live_sniper"  # Sniper range
+                else:
+                    _inferred_strategy = "unknown"
             trade_rec = {
                 "timestamp": created,
                 "ticker": ticker,
@@ -445,16 +449,29 @@ def _hydrate_from_kalshi():
         BOT_STATE["trades_today"] = today_trades
         # Rebuild per-strategy daily counters from today's fills so the bot
         # respects daily caps after a deploy (was ignoring pre-deploy trades)
+        # Merge hydrated trades with existing in-memory trades (preserve conviction/edge)
         _ms_today = [t for t in today_trades if t.get("strategy") == "moonshark"]
-        _snipe_today = [t for t in today_trades if t.get("strategy") == "snipe"]
-        if len(_ms_today) > len(BOT_STATE.get("moonshark_trades_today", [])):
-            BOT_STATE["moonshark_trades_today"] = _ms_today
-            BOT_STATE["moonshark_daily_spent"] = round(sum(t.get("cost_usd", 0) for t in _ms_today), 2)
-            BOT_STATE["moonshark_date"] = today_str
-        if len(_snipe_today) > len(BOT_STATE.get("snipe_trades_today", [])):
-            BOT_STATE["snipe_trades_today"] = _snipe_today
-            BOT_STATE["snipe_daily_spent"] = round(sum(t.get("cost_usd", 0) for t in _snipe_today), 2)
-            BOT_STATE["snipe_date"] = today_str
+        _existing_ms_ids = set(t.get("order_id") or t.get("ticker", "") + str(t.get("timestamp", "")) for t in BOT_STATE.get("moonshark_trades_today", []))
+        _new_ms = [t for t in _ms_today if (t.get("order_id") or t.get("ticker", "") + str(t.get("timestamp", ""))) not in _existing_ms_ids]
+        if _new_ms:
+            BOT_STATE.setdefault("moonshark_trades_today", []).extend(_new_ms)
+        BOT_STATE["moonshark_daily_spent"] = round(sum(t.get("cost_usd", 0) for t in BOT_STATE.get("moonshark_trades_today", [])), 2)
+        BOT_STATE["moonshark_date"] = today_str
+
+        _snipe_today = [t for t in today_trades if t.get("strategy") in ("snipe", "live_sniper")]
+        _existing_sn_ids = set(t.get("order_id") or t.get("ticker", "") + str(t.get("timestamp", "")) for t in BOT_STATE.get("snipe_trades_today", []))
+        _new_sn = [t for t in _snipe_today if (t.get("order_id") or t.get("ticker", "") + str(t.get("timestamp", ""))) not in _existing_sn_ids]
+        if _new_sn:
+            BOT_STATE.setdefault("snipe_trades_today", []).extend(_new_sn)
+        BOT_STATE["snipe_daily_spent"] = round(sum(t.get("cost_usd", 0) for t in BOT_STATE.get("snipe_trades_today", [])), 2)
+        BOT_STATE["snipe_date"] = today_str
+
+        _cg_today = [t for t in today_trades if t.get("strategy") == "closegame"]
+        _existing_cg_ids = set(t.get("order_id") or t.get("ticker", "") + str(t.get("timestamp", "")) for t in BOT_STATE.get("closegame_trades_today", []))
+        _new_cg = [t for t in _cg_today if (t.get("order_id") or t.get("ticker", "") + str(t.get("timestamp", ""))) not in _existing_cg_ids]
+        if _new_cg:
+            BOT_STATE.setdefault("closegame_trades_today", []).extend(_new_cg)
+        BOT_STATE["closegame_daily_spent"] = round(sum(t.get("cost_usd", 0) for t in BOT_STATE.get("closegame_trades_today", [])), 2)
         BOT_STATE["daily_spent_usd"] = round(today_spent, 2)
         # Also seed global event lock with today's events
         with _EVENT_LOCK:
@@ -464,7 +481,7 @@ def _hydrate_from_kalshi():
                 if len(parts) >= 2:
                     _EVENTS_BET_TODAY.add("-".join(parts[:2]))
         _save_state()
-        print(f"[HYDRATE] Rebuilt {len(all_trades_rebuilt)} trades from Kalshi ({new_count} new), today: {today_count} trades (MS:{len(_ms_today)} SN:{len(_snipe_today)}), ${today_spent:.2f} spent, titles: {len(title_map)}")
+        print(f"[HYDRATE] Rebuilt {len(all_trades_rebuilt)} trades from Kalshi ({new_count} new), today: {today_count} trades (MS:{len(_ms_today)} SN:{len(_snipe_today)} CG:{len(_cg_today)}), ${today_spent:.2f} spent, titles: {len(title_map)}")
     except Exception as e:
         print(f"[HYDRATE] Error: {e}")
         import traceback
@@ -2502,7 +2519,7 @@ LIVE_GAME_SERIES = [
 SNIPE_MIN_PRICE = 65   # cents — catch games earlier when edge is bigger
 SNIPE_MAX_PRICE = 85   # cents — cap at 85c (need 15%+ profit margin, one upset can't wipe 6 wins)
 SNIPE_BET_USD = 15.0   # fallback — now uses _smart_bet_size() for bankroll scaling
-SNIPE_MAX_DAILY = 150.0  # daily safety cap — Kelly sizes the actual bets
+SNIPE_MAX_DAILY = 50.0   # daily safety cap — reduced to 25% of bankroll total across strategies
 SNIPE_MAX_TRADES = 20    # more room — this is our best strategy
 
 BOT_STATE["snipe_trades_today"] = []
@@ -2514,7 +2531,7 @@ BOT_STATE["snipe_profit_usd"] = 0.0
 # MoonShark settings — KELLY-SIZED: fewer bets, larger when edge is real
 MOONSHARK_MIN_PRICE = 25   # cents — skip sub-25c lottery tickets
 MOONSHARK_MAX_PRICE = 40   # cents — tighter range, only best underdogs
-MOONSHARK_MAX_DAILY = 75.0  # daily safety cap (not used for Kelly sizing)
+MOONSHARK_MAX_DAILY = 50.0  # daily safety cap — reduced to 25% of bankroll total across strategies
 MOONSHARK_BET_USD = 3.0     # fallback only — Kelly sizes most bets
 MOONSHARK_MIN_TRADES = 0    # no floor — only trade when edge is real
 MOONSHARK_MAX_TRADES = 10   # max 10/day
@@ -2799,8 +2816,8 @@ def live_game_snipe():
                 if BOT_STATE["snipe_daily_spent"] >= SNIPE_MAX_DAILY:
                     break
 
-                # SAFETY: check total spending across BOTH bot + sniper vs cash
-                total_daily = BOT_STATE.get("daily_spent_usd", 0) + BOT_STATE["snipe_daily_spent"]
+                # SAFETY: check total spending across ALL strategies vs cash
+                total_daily = BOT_STATE.get("daily_spent_usd", 0) + BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0) + BOT_STATE.get("closegame_daily_spent", 0)
                 if total_daily >= BOT_CONFIG["max_daily_usd"]:
                     break
 
@@ -3318,7 +3335,8 @@ def moonshark_snipe():
                 # SAFETY: check total spending across ALL strategies vs cash
                 total_daily = (BOT_STATE.get("daily_spent_usd", 0)
                                + BOT_STATE.get("snipe_daily_spent", 0)
-                               + BOT_STATE["moonshark_daily_spent"])
+                               + BOT_STATE.get("moonshark_daily_spent", 0)
+                               + BOT_STATE.get("closegame_daily_spent", 0))
                 if total_daily >= BOT_CONFIG["max_daily_usd"]:
                     break
 
@@ -3917,6 +3935,10 @@ def closegame_snipe():
         if BOT_STATE.get("closegame_daily_spent", 0) >= CLOSEGAME_MAX_DAILY:
             break
         if len(BOT_STATE.get("closegame_trades_today", [])) >= CLOSEGAME_MAX_TRADES:
+            break
+        # SAFETY: check total spending across ALL strategies
+        _cg_total_daily = BOT_STATE.get("daily_spent_usd", 0) + BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0) + BOT_STATE.get("closegame_daily_spent", 0)
+        if _cg_total_daily >= BOT_CONFIG["max_daily_usd"]:
             break
 
         underdog = cg["underdog"].upper()
@@ -4838,7 +4860,7 @@ def run_quant_strategies(all_markets):
         return
 
     # Check daily limit
-    total_daily = BOT_STATE["daily_spent_usd"] + BOT_STATE.get("snipe_daily_spent", 0)
+    total_daily = BOT_STATE.get("daily_spent_usd", 0) + BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0) + BOT_STATE.get("closegame_daily_spent", 0)
     if total_daily >= BOT_CONFIG["max_daily_usd"]:
         return
 
@@ -4984,7 +5006,7 @@ def run_quant_strategies(all_markets):
             continue
 
         # Daily limit re-check
-        total_daily = BOT_STATE["daily_spent_usd"] + BOT_STATE.get("snipe_daily_spent", 0)
+        total_daily = BOT_STATE.get("daily_spent_usd", 0) + BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0) + BOT_STATE.get("closegame_daily_spent", 0)
         if total_daily >= BOT_CONFIG["max_daily_usd"]:
             break
 
@@ -8219,8 +8241,8 @@ def insights_endpoint():
         pending = [t for t in _TRADE_JOURNAL if t.get("result") is None]
         markets_scanned = BOT_STATE.get("last_scan_markets", 0)
         mispriced_count = BOT_STATE.get("last_scan_mispriced", 0)
-        daily_spent = BOT_STATE.get("daily_spent_usd", 0.0)
-        max_daily = BOT_CONFIG.get("max_daily_usd", 150.0)
+        daily_spent = BOT_STATE.get("daily_spent_usd", 0) + BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0) + BOT_STATE.get("closegame_daily_spent", 0)
+        max_daily = BOT_CONFIG.get("max_daily_usd", 125.0)
         moonshark_trades = BOT_STATE.get("moonshark_trades_today", [])
         moonshark_spent = BOT_STATE.get("moonshark_daily_spent", 0.0)
 
@@ -10204,8 +10226,8 @@ def _check_arbitrage():
             )
             # Buy both sides
             # Budget check — arb trades must respect daily limits
-            daily_spent = BOT_STATE.get("daily_spent_usd", 0)
-            daily_max = BOT_CONFIG.get("max_daily_usd", 150)
+            daily_spent = BOT_STATE.get("daily_spent_usd", 0) + BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0) + BOT_STATE.get("closegame_daily_spent", 0)
+            daily_max = BOT_CONFIG.get("max_daily_usd", 125)
             remaining_budget = max(0, daily_max - daily_spent)
             max_contracts = min(50, int(BOT_CONFIG.get("max_bet_usd", 5) * 100 / total))
             arb_cost = (total * max_contracts) / 100.0
@@ -12810,8 +12832,8 @@ def execute_trade():
     pc = int(price_cents)
     count = max(1, 500 // pc) if pc > 0 else 1  # target $5 per trade
     cost_usd = (pc * count) / 100.0
-    daily_spent = BOT_STATE.get("daily_spent_usd", 0)
-    daily_max = BOT_CONFIG.get("max_daily_usd", 150)
+    daily_spent = BOT_STATE.get("daily_spent_usd", 0) + BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0) + BOT_STATE.get("closegame_daily_spent", 0)
+    daily_max = BOT_CONFIG.get("max_daily_usd", 125)
     if daily_spent + cost_usd > daily_max:
         return jsonify({"error": f"Would exceed daily limit (${daily_spent:.2f} + ${cost_usd:.2f} > ${daily_max:.2f})"}), 400
     result = place_kalshi_order(ticker, side, pc, count=count)
