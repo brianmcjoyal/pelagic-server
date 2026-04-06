@@ -2676,7 +2676,7 @@ LIVE_GAME_SERIES = [
 ]
 
 # Sniper settings
-SNIPE_MIN_PRICE = 65   # cents — catch games earlier when edge is bigger
+SNIPE_MIN_PRICE = 70   # cents — tightened from 65 (higher entry = more confident favorites)
 SNIPE_MAX_PRICE = 85   # cents — cap at 85c (need 15%+ profit margin, one upset can't wipe 6 wins)
 SNIPE_BET_USD = 15.0   # fallback — now uses _smart_bet_size() for bankroll scaling
 SNIPE_MAX_DAILY = 50.0   # daily safety cap — reduced to 25% of bankroll total across strategies
@@ -2690,7 +2690,7 @@ BOT_STATE["snipe_profit_usd"] = 0.0
 
 # MoonShark settings — KELLY-SIZED: fewer bets, larger when edge is real
 MOONSHARK_MIN_PRICE = 25   # cents — skip sub-25c lottery tickets
-MOONSHARK_MAX_PRICE = 40   # cents — tighter range, only best underdogs
+MOONSHARK_MAX_PRICE = 35   # cents — tightened from 40 (sweet spot is 25-30, cap at 35)
 MOONSHARK_MAX_DAILY = 50.0  # daily safety cap — reduced to 25% of bankroll total across strategies
 MOONSHARK_BET_USD = 3.0     # fallback only — Kelly sizes most bets
 MOONSHARK_MIN_TRADES = 0    # no floor — only trade when edge is real
@@ -3034,8 +3034,8 @@ def live_game_snipe():
                 # Signal 4: Closing soon (live edge)
                 if closing_boost > 1:
                     conviction += 1
-                # Require minimum conviction of 4 to bet (raised — ESPN validation makes this achievable)
-                if conviction < 4:
+                # Require minimum conviction of 5 to bet (tightened from 4 for better selectivity)
+                if conviction < 5:
                     continue
 
                 # ESPN LIVE WIN PROBABILITY VALIDATION
@@ -3099,8 +3099,8 @@ def live_game_snipe():
                             "warn"
                         )
 
-                # Re-check conviction after ESPN adjustment
-                if conviction < 4:
+                # Re-check conviction after ESPN adjustment (match tightened threshold)
+                if conviction < 5:
                     _ms_reasons["low_conviction_post_espn"] = _ms_reasons.get("low_conviction_post_espn", 0) + 1
                     continue
 
@@ -3181,8 +3181,8 @@ def live_game_snipe():
                         conviction += 1
                     elif not _snipe_buying_yes and _snipe_ob_imb < -0.3:
                         conviction += 1
-                    # Re-check conviction after orderbook adjustment
-                    if conviction < 4:
+                    # Re-check conviction after orderbook adjustment (match tightened threshold)
+                    if conviction < 5:
                         _ms_reasons["low_conviction_ob"] = _ms_reasons.get("low_conviction_ob", 0) + 1
                         continue
 
@@ -3551,10 +3551,10 @@ def moonshark_snipe():
                             espn_implied = 0
                         if espn_implied > 0:
                             espn_edge = espn_implied - implied_prob
-                            # SKIP unless ESPN gives at least 3% edge over Kalshi price
+                            # SKIP unless ESPN gives at least 5% edge over Kalshi price
                             # e.g., ESPN says 30% but Kalshi prices at 20c (20%) = +10% edge = BET
-                            # ESPN says 22% and Kalshi prices at 20c (20%) = +2% edge = SKIP (too thin)
-                            if espn_edge < 0.03:
+                            # ESPN says 24% and Kalshi prices at 20c (20%) = +4% edge = SKIP (too thin)
+                            if espn_edge < 0.05:
                                 _ms_reasons["no_edge"] = _ms_reasons.get("no_edge", 0) + 1
                                 continue
                         else:
@@ -3567,7 +3567,7 @@ def moonshark_snipe():
                     continue
 
                 # espn_edge must be confirmed at this point — reject if still None
-                if espn_edge is None or espn_edge < 0.03:
+                if espn_edge is None or espn_edge < 0.05:
                     _ms_reasons["no_edge"] = _ms_reasons.get("no_edge", 0) + 1
                     continue
 
@@ -3580,7 +3580,7 @@ def moonshark_snipe():
                     _stale_threshold = 3 if _stale_league == "mlb" else 10  # MLB: 3 runs, others: 10 pts
                     if _stale_margin >= _stale_threshold and espn_edge > 0.08:
                         espn_edge = espn_edge * 0.5  # Discount stale edge by 50%
-                        if espn_edge < 0.03:
+                        if espn_edge < 0.05:
                             _ms_reasons["stale_odds"] = _ms_reasons.get("stale_odds", 0) + 1
                             continue
 
@@ -3645,7 +3645,7 @@ def moonshark_snipe():
                                 f"MOONSHARK: ESPN signal gap {_ms_signal_gap:.0%} > 10%, discounting edge 50% to {espn_edge:.1%}",
                                 "info"
                             )
-                            if espn_edge < 0.03:
+                            if espn_edge < 0.05:
                                 _ms_reasons["stale_signal_gap"] = _ms_reasons.get("stale_signal_gap", 0) + 1
                                 continue
 
@@ -3740,8 +3740,8 @@ def moonshark_snipe():
                             "warn"
                         )
 
-                # Require minimum conviction — never drop below 3, even in floor mode
-                _ms_min_conviction = 3 if _ms_below_floor else 4
+                # Require minimum conviction — raised thresholds for better win rate
+                _ms_min_conviction = 4 if _ms_below_floor else 5
                 if ms_conviction < _ms_min_conviction:
                     _ms_reasons["low_conviction"] = _ms_reasons.get("low_conviction", 0) + 1
                     continue
@@ -6846,6 +6846,16 @@ def _background_loop():
             "wins": 0, "losses": 0, "breakeven": 0, "win_rate": 0,
             "total_realized_usd": 0, "settled_history": [],
         }
+        # Include today's settled results in startup daily P&L (fix: was unrealized-only)
+        try:
+            _startup_daily = sum((p.get("unrealized_pnl_cents") or 0) for p in _pos_early) / 100
+            _today_str_startup = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+            for _jt in _TRADE_JOURNAL:
+                if _jt.get("result") is not None and str(_jt.get("settlement_time") or "")[:10] == _today_str_startup:
+                    _startup_daily += float(_jt.get("pnl") or 0)
+            _PORTFOLIO_CACHE["data"]["daily_pnl_usd"] = round(_startup_daily, 2)
+        except Exception:
+            pass
         # Warm realized P&L on startup so Total P&L doesn't flash $0.00
         # Split into "since Day 1" and "legacy" (pre-Day-1 junk)
         _early_realized = 0.0
@@ -6918,6 +6928,12 @@ def _background_loop():
             with app.test_request_context():
                 settled_positions()
                 print(f"[BG] Settled cache warmed: {_SETTLED_CACHE['data']['wins']}W/{_SETTLED_CACHE['data']['losses']}L, P&L ${_SETTLED_CACHE['data']['total_pnl_usd']:+.2f}")
+                # Sync portfolio cache with settled data so header shows correct W/L immediately
+                if _SETTLED_CACHE.get("data") and _PORTFOLIO_CACHE.get("data"):
+                    _PORTFOLIO_CACHE["data"]["wins"] = _SETTLED_CACHE["data"]["wins"]
+                    _PORTFOLIO_CACHE["data"]["losses"] = _SETTLED_CACHE["data"]["losses"]
+                    _PORTFOLIO_CACHE["data"]["win_rate"] = _SETTLED_CACHE["data"]["win_rate"]
+                    _PORTFOLIO_CACHE["data"]["total_realized_usd"] = _SETTLED_CACHE["data"]["total_pnl_usd"]
         except Exception as _se:
             print(f"[BG] Settled cache warm failed (non-fatal): {_se}")
     except Exception as e:
@@ -7550,6 +7566,7 @@ def positions():
 
 _SETTLED_CACHE = {"data": None, "ts": 0}
 _SETTLED_CACHE_TTL = 300  # 5 minutes — expensive call, data changes slowly
+_GAME_RESULT_CACHE = {}  # {ticker: {"result": "yes"/"no", "title": "..."}} — persists across settled calls
 
 @app.route("/settled")
 def settled_positions():
@@ -7924,10 +7941,15 @@ def settled_positions():
             _buy_fills = [f for f in _flist if f.get("action") == "buy"]
             if _buy_fills:
                 _game_ticker_candidates.append((_fticker, _flist, _ftrade_date))
-        # Sort by date descending, limit to 30 most recent to avoid API timeout
+        # Sort by date descending — process all using cached results when available
         _game_ticker_candidates.sort(key=lambda x: x[2], reverse=True)
-        _game_ticker_candidates = _game_ticker_candidates[:30]
+        _game_api_start = _time.time()
+        _game_api_calls = 0
         for _fticker, _flist, _ftrade_date in _game_ticker_candidates:
+            # Time limit: 60s for API calls (prevents Railway timeout)
+            if _time.time() - _game_api_start > 60 and _fticker not in _GAME_RESULT_CACHE:
+                print(f"[SETTLED] Game API time limit reached after {_game_api_calls} calls, {_fills_added} results added")
+                break
             # Compute cost and result from fills
             _buy_fills = [f for f in _flist if f.get("action") == "buy"]
             if not _buy_fills:
@@ -7943,22 +7965,30 @@ def settled_positions():
                     _price_cents = _parse_kalshi_dollars(_bf.get("yes_price") or 0)
                 _total_cost_cents += _price_cents * int(_bf.get("count", 0))
             _avg_entry = _total_cost_cents // max(1, _total_count)
-            # Check if market settled — try the market API (3s timeout to stay fast)
+            # Check if market settled — use cache first, then API
             _settled_result = None
-            try:
-                _mkt_h = signed_headers("GET", f"/markets/{_fticker}")
-                _mkt_r = requests.get(
-                    KALSHI_BASE_URL + KALSHI_API_PREFIX + f"/markets/{_fticker}",
-                    headers=_mkt_h, timeout=3,
-                )
-                if _mkt_r.ok:
-                    _mkt = _mkt_r.json().get("market", {})
-                    _title_cache[_fticker] = _mkt.get("title", _fticker)
-                    _settled_result = _mkt.get("result", "")
+            if _fticker in _GAME_RESULT_CACHE:
+                _settled_result = _GAME_RESULT_CACHE[_fticker].get("result")
+                _title_cache[_fticker] = _GAME_RESULT_CACHE[_fticker].get("title", _fticker)
+            else:
+                try:
+                    _mkt_h = signed_headers("GET", f"/markets/{_fticker}")
+                    _mkt_r = requests.get(
+                        KALSHI_BASE_URL + KALSHI_API_PREFIX + f"/markets/{_fticker}",
+                        headers=_mkt_h, timeout=3,
+                    )
+                    _game_api_calls += 1
+                    if _mkt_r.ok:
+                        _mkt = _mkt_r.json().get("market", {})
+                        _title_cache[_fticker] = _mkt.get("title", _fticker)
+                        _settled_result = _mkt.get("result", "")
                     if not _settled_result and _mkt.get("status") != "settled":
                         continue  # Market not settled yet — skip
-            except Exception:
-                continue  # Can't check market — skip
+                    # Cache the result so we don't re-fetch on next settled call
+                    if _settled_result:
+                        _GAME_RESULT_CACHE[_fticker] = {"result": _settled_result, "title": _title_cache.get(_fticker, _fticker)}
+                except Exception:
+                    continue  # Can't check market — skip
             # Compute P&L
             if _settled_result == "yes":
                 _game_pnl_cents = (100 - _avg_entry) * _total_count if _fill_side == "yes" else -_avg_entry * _total_count
@@ -8052,83 +8082,7 @@ def settled_positions():
         return jsonify({"settled": [], "error": str(e)})
 
 
-@app.route("/debug-settled")
-def debug_settled():
-    """Diagnostic: why are settled positions empty?"""
-    try:
-        path = "/portfolio/positions"
-        positions_list = []
-        counts_by_status = {}
-        for _status in ["settled", "unsettled"]:
-            h = signed_headers("GET", path)
-            if not h:
-                return jsonify({"error": "No API key"})
-            cursor = None
-            page_count = 0
-            for _ in range(10):
-                params = {"limit": 200, "settlement_status": _status}
-                if cursor:
-                    params["cursor"] = cursor
-                h = signed_headers("GET", path)
-                resp = requests.get(
-                    KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
-                    headers=h, params=params, timeout=TIMEOUT,
-                )
-                resp.raise_for_status()
-                page = resp.json()
-                batch = page.get("market_positions", [])
-                positions_list.extend(batch)
-                page_count += len(batch)
-                cursor = page.get("cursor")
-                if not cursor:
-                    break
-            counts_by_status[_status] = page_count
-        # Analyze
-        game_positions = [p for p in positions_list if "GAME" in (p.get("ticker", "") or "").upper()]
-        nonzero_pnl = [p for p in positions_list if abs(_parse_kalshi_dollars(p.get("realized_pnl_dollars") or p.get("realized_pnl") or 0)) > 0]
-        # Recent game positions (Apr 2026)
-        recent_games = [p for p in game_positions if "APR" in (p.get("ticker", "") or "").upper()]
-        # trade_dates from fills
-        _trade_dates_debug = {}
-        try:
-            _fills_h = signed_headers("GET", "/portfolio/fills")
-            _fills_r = requests.get(
-                KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/fills",
-                headers=_fills_h, params={"limit": 200}, timeout=10,
-            )
-            if _fills_r.ok:
-                fills = _fills_r.json().get("fills", [])
-                for _f in fills:
-                    _fk = _f.get("ticker", "")
-                    _ft = (_f.get("created_time", "") or "")[:10]
-                    if _fk and _ft:
-                        if _fk not in _trade_dates_debug or _ft > _trade_dates_debug[_fk]:
-                            _trade_dates_debug[_fk] = _ft
-        except:
-            pass
-        game_fills = {k: v for k, v in _trade_dates_debug.items() if "GAME" in k.upper()}
-        return jsonify({
-            "total_positions": len(positions_list),
-            "by_status": counts_by_status,
-            "game_positions_count": len(game_positions),
-            "recent_game_positions": len(recent_games),
-            "nonzero_pnl_count": len(nonzero_pnl),
-            "trade_journal_start": TRADE_JOURNAL_START,
-            "game_fills_from_api": game_fills,
-            "recent_game_details": [{
-                "ticker": p.get("ticker", "")[:40],
-                "realized_pnl": p.get("realized_pnl_dollars") or p.get("realized_pnl"),
-                "settlement_status": p.get("settlement_status"),
-            } for p in recent_games[:20]],
-            "sample_nonzero": [{
-                "ticker": p.get("ticker", "")[:35],
-                "rpnl": p.get("realized_pnl_dollars") or p.get("realized_pnl"),
-                "trade_date": _trade_dates_debug.get(p.get("ticker", ""), "NONE"),
-                "passes_cutoff": (_trade_dates_debug.get(p.get("ticker", ""), "") >= TRADE_JOURNAL_START) if _trade_dates_debug.get(p.get("ticker", "")) else "no_date",
-            } for p in nonzero_pnl[:15]],
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)})
+## debug-settled endpoint removed — no longer needed
 
 
 @app.route("/debug-scan")
@@ -9443,23 +9397,7 @@ def performance_history():
     return jsonify({"history": pts, "count": len(pts)})
 
 
-@app.route("/seed-perf-history")
-def seed_perf_history_endpoint():
-    """Debug: manually trigger performance history backfill."""
-    try:
-        before = len(_PERF_HISTORY)
-        first_before = _PERF_HISTORY[0]["ts"][:10] if _PERF_HISTORY else "none"
-        _seed_perf_history_from_fills()
-        after = len(_PERF_HISTORY)
-        first_after = _PERF_HISTORY[0]["ts"][:10] if _PERF_HISTORY else "none"
-        return jsonify({
-            "status": "ok",
-            "before": {"count": before, "first_date": first_before},
-            "after": {"count": after, "first_date": first_after},
-        })
-    except Exception as e:
-        import traceback
-        return jsonify({"status": "error", "error": str(e), "trace": traceback.format_exc()})
+## seed-perf-history debug endpoint removed — backfill runs automatically on startup
 
 
 @app.route("/portfolio-summary")
