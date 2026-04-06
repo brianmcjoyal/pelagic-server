@@ -2861,6 +2861,51 @@ def live_game_snipe():
                 if conviction < 2:
                     continue
 
+                # ESPN LIVE WIN PROBABILITY VALIDATION
+                # Compare ESPN's model to Kalshi price before betting
+                _snipe_espn_prob = None
+                implied_prob_snipe = price / 100.0
+                if _snipe_game and _snipe_game.get("event_id"):
+                    _snipe_league = _snipe_game.get("league", "").lower()
+                    _snipe_event_id = _snipe_game["event_id"]
+                    # Determine if bet team is home or away
+                    _snipe_is_home = _snipe_game.get("home_abbrev", "").upper() == _snipe_team if _snipe_team else True
+                    _snipe_espn_prob = _get_espn_win_prob(_snipe_event_id, _snipe_league, home_team=_snipe_is_home)
+
+                if _snipe_espn_prob is not None:
+                    _espn_edge = _snipe_espn_prob - implied_prob_snipe
+                    _log_activity(
+                        f"SNIPE ESPN CHECK: {ticker} — ESPN={_snipe_espn_prob:.1%} vs Kalshi={implied_prob_snipe:.0%} edge={_espn_edge:+.1%}",
+                        "info"
+                    )
+                    # SKIP if ESPN says favorite is overpriced by >5%
+                    if _espn_edge < -0.05:
+                        _log_activity(
+                            f"SNIPE SKIP: {ticker} — ESPN win prob {_snipe_espn_prob:.1%} < Kalshi {implied_prob_snipe:.0%} by {abs(_espn_edge):.1%}, overpriced",
+                            "info"
+                        )
+                        _ms_reasons["espn_overpriced"] = _ms_reasons.get("espn_overpriced", 0) + 1
+                        continue
+                    # ESPN edge conviction scoring
+                    if _espn_edge >= 0.05:
+                        conviction += 2  # ESPN says underpriced by 5%+
+                    elif _espn_edge >= 0.02:
+                        conviction += 1  # ESPN says underpriced by 2-5%
+                    elif _espn_edge < 0:
+                        conviction -= 1  # ESPN says slightly overpriced
+                else:
+                    # ESPN not available — allow trade but reduce conviction
+                    conviction -= 1
+                    _log_activity(
+                        f"SNIPE ESPN CHECK: {ticker} — ESPN win prob unavailable, conviction reduced to {conviction}",
+                        "info"
+                    )
+
+                # Re-check conviction after ESPN adjustment
+                if conviction < 2:
+                    _ms_reasons["low_conviction_post_espn"] = _ms_reasons.get("low_conviction_post_espn", 0) + 1
+                    continue
+
                 # Calculate quantity — bankroll-scaled sizing for compound growth
                 cat_mult = _learning_multiplier(ticker, title, price)
                 if cat_mult <= 0:
@@ -2882,6 +2927,11 @@ def live_game_snipe():
                 reasons = []
                 reasons.append(f"cat={mcat}")
                 reasons.append(f"vol={_ask_size:.0f}")
+                if _snipe_espn_prob is not None:
+                    _espn_edge_display = _snipe_espn_prob - implied_prob_snipe
+                    reasons.append(f"ESPN={_snipe_espn_prob:.0%} edge={_espn_edge_display:+.0%}")
+                else:
+                    reasons.append("ESPN=N/A")
                 if closing_boost > 1:
                     reasons.append(f"CLOSING EDGE")
                 if cat_mult > 1:
@@ -2911,6 +2961,32 @@ def live_game_snipe():
                     _snipe_ob_pre = analyze_orderbook(ticker)
                 except Exception:
                     pass
+
+                # Orderbook imbalance confirmation — does order flow agree with our side?
+                if _snipe_ob_pre and _snipe_ob_pre.get("imbalance") is not None:
+                    _snipe_ob_imb = _snipe_ob_pre["imbalance"]
+                    _snipe_buying_yes = (side == "yes")
+                    _snipe_espn_edge_val = (_snipe_espn_prob - implied_prob_snipe) if _snipe_espn_prob is not None else None
+                    if _snipe_buying_yes and _snipe_ob_imb < -0.3:
+                        conviction -= 2
+                        if _snipe_ob_imb < -0.5 and (_snipe_espn_edge_val is None or _snipe_espn_edge_val < 0.05):
+                            _log_activity(f"SNIPE SKIP: {ticker} — Orderbook opposes trade — likely stale odds (imb={_snipe_ob_imb:+.2f})", "info")
+                            _ms_reasons["ob_opposes"] = _ms_reasons.get("ob_opposes", 0) + 1
+                            continue
+                    elif not _snipe_buying_yes and _snipe_ob_imb > 0.3:
+                        conviction -= 2
+                        if _snipe_ob_imb > 0.5 and (_snipe_espn_edge_val is None or _snipe_espn_edge_val < 0.05):
+                            _log_activity(f"SNIPE SKIP: {ticker} — Orderbook opposes trade — likely stale odds (imb={_snipe_ob_imb:+.2f})", "info")
+                            _ms_reasons["ob_opposes"] = _ms_reasons.get("ob_opposes", 0) + 1
+                            continue
+                    elif _snipe_buying_yes and _snipe_ob_imb > 0.3:
+                        conviction += 1
+                    elif not _snipe_buying_yes and _snipe_ob_imb < -0.3:
+                        conviction += 1
+                    # Re-check conviction after orderbook adjustment
+                    if conviction < 2:
+                        _ms_reasons["low_conviction_ob"] = _ms_reasons.get("low_conviction_ob", 0) + 1
+                        continue
 
                 result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_snipe_ob_pre)
                 success = "error" not in result
@@ -3349,7 +3425,32 @@ def moonshark_snipe():
                         _log_activity(f"MOONSHARK SKIP: {ticker} — MLB requires ESPN live win prob, not available", "info")
                         _ms_reasons["mlb_no_espn_prob"] = _ms_reasons.get("mlb_no_espn_prob", 0) + 1
                         continue
-                    _model_prob = _espn_live_prob if _espn_live_prob is not None else _lookup_win_prob(_league, _margin, _clock)
+
+                    # Cross-signal stale odds detection — compare ESPN moneyline vs live model
+                    if _espn_live_prob is not None and espn_implied > 0:
+                        _ms_signal_gap = abs(espn_implied - _espn_live_prob)
+                        _log_activity(
+                            f"ESPN signal check: moneyline={espn_implied:.0%} vs live={_espn_live_prob:.0%}, gap={_ms_signal_gap:.0%}",
+                            "info"
+                        )
+                        if _ms_signal_gap > 0.15:
+                            _log_activity(
+                                f"MOONSHARK SKIP: {ticker} — ESPN signal divergence {_ms_signal_gap:.0%} > 15%, moneyline likely stale",
+                                "info"
+                            )
+                            _ms_reasons["stale_signal_gap"] = _ms_reasons.get("stale_signal_gap", 0) + 1
+                            continue
+                        if _ms_signal_gap > 0.10:
+                            espn_edge = espn_edge * 0.5 if espn_edge else 0
+                            _log_activity(
+                                f"MOONSHARK: ESPN signal gap {_ms_signal_gap:.0%} > 10%, discounting edge 50% to {espn_edge:.1%}",
+                                "info"
+                            )
+                            if espn_edge < 0.03:
+                                _ms_reasons["stale_signal_gap"] = _ms_reasons.get("stale_signal_gap", 0) + 1
+                                continue
+
+                    _model_prob = _espn_live_prob if _espn_live_prob is not None else _time_adjusted_win_prob(_league, _margin, _clock, _clock, period_num=_game_info.get("period"))
                     _model_edge = _model_prob - implied_prob
                     if _model_edge > 0.05:
                         ms_conviction += 2  # model says underpriced by 5%+
@@ -3526,6 +3627,39 @@ def moonshark_snipe():
                         continue
                 except Exception:
                     pass
+
+                # Orderbook imbalance confirmation — does order flow agree with our side?
+                if _ob and _ob.get("imbalance") is not None:
+                    _ob_imbalance = _ob["imbalance"]
+                    _buying_yes = (side == "yes")
+                    # Imbalance > 0 = buy pressure (supports YES), < 0 = sell pressure (supports NO)
+                    if _buying_yes and _ob_imbalance < -0.3:
+                        # Orderbook opposes our YES bet (heavy selling)
+                        ms_conviction -= 2
+                        _conv_reasons.append(f"OB_oppose({_ob_imbalance:+.2f})")
+                        if _ob_imbalance < -0.5 and espn_edge is not None and espn_edge < 0.05:
+                            _log_activity(f"MOONSHARK SKIP: {ticker} — Orderbook opposes trade — likely stale odds (imb={_ob_imbalance:+.2f}, edge={espn_edge:.1%})", "info")
+                            _ms_reasons["ob_opposes"] = _ms_reasons.get("ob_opposes", 0) + 1
+                            continue
+                    elif not _buying_yes and _ob_imbalance > 0.3:
+                        # Orderbook opposes our NO bet (heavy buying)
+                        ms_conviction -= 2
+                        _conv_reasons.append(f"OB_oppose({_ob_imbalance:+.2f})")
+                        if _ob_imbalance > 0.5 and espn_edge is not None and espn_edge < 0.05:
+                            _log_activity(f"MOONSHARK SKIP: {ticker} — Orderbook opposes trade — likely stale odds (imb={_ob_imbalance:+.2f}, edge={espn_edge:.1%})", "info")
+                            _ms_reasons["ob_opposes"] = _ms_reasons.get("ob_opposes", 0) + 1
+                            continue
+                    elif _buying_yes and _ob_imbalance > 0.3:
+                        ms_conviction += 1
+                        _conv_reasons.append(f"OB_confirm({_ob_imbalance:+.2f})")
+                    elif not _buying_yes and _ob_imbalance < -0.3:
+                        ms_conviction += 1
+                        _conv_reasons.append(f"OB_confirm({_ob_imbalance:+.2f})")
+
+                    # Re-check conviction after orderbook adjustment
+                    if ms_conviction < _ms_min_conviction:
+                        _ms_reasons["low_conviction_ob"] = _ms_reasons.get("low_conviction_ob", 0) + 1
+                        continue
 
                 _log_activity(
                     f"🦈 MOON {side.upper()} {title[:30]} @ {price}c x{count} (${cost_usd:.2f}) [{','.join(_conv_reasons[:3])}]",
@@ -3889,12 +4023,73 @@ def closegame_snipe():
                 except (ValueError, TypeError):
                     pass
 
+                # ESPN live win probability — more accurate than stale moneylines
+                _cg_live_prob = None
+                if _cg_game and _cg_game.get("event_id"):
+                    _cg_is_home = _cg_game.get("home_abbrev") == underdog
+                    _cg_live_prob = _get_espn_win_prob(
+                        _cg_game["event_id"],
+                        cg["sport"],
+                        home_team=_cg_is_home,
+                    )
+
+                if _cg_live_prob is not None:
+                    # Use live win prob as PRIMARY edge signal
+                    live_edge_cg = _cg_live_prob - kalshi_implied
+                    _log_activity(
+                        f"CLOSEGAME ESPN LIVE: {ticker} — live_prob={_cg_live_prob:.1%} vs Kalshi={kalshi_implied:.0%} live_edge={live_edge_cg:+.1%}",
+                        "info"
+                    )
+                    if live_edge_cg < 0.02:
+                        _log_activity(
+                            f"CLOSEGAME SKIP: {ticker} — ESPN live edge too thin ({live_edge_cg:.1%} < 2%)",
+                            "info"
+                        )
+                        continue
+                    # Override moneyline edge with live edge
+                    espn_edge_cg = live_edge_cg
+                    espn_win_prob_cg = _cg_live_prob
+
+                # Cross-signal stale odds detection — compare ESPN moneyline vs live model
+                if _cg_live_prob is not None and espn_win_prob_cg is not None and _cg_live_prob != espn_win_prob_cg:
+                    # espn_win_prob_cg was already overwritten above, use the original moneyline implied
+                    _cg_ml_implied = None
+                    try:
+                        if _cg_game and _cg_game.get("odds"):
+                            _cg_ml_odds = _cg_game["odds"]
+                            if _cg_game["home_abbrev"] == underdog:
+                                _cg_ml_implied = _cg_ml_odds.get("home_implied", 0)
+                            elif _cg_game["away_abbrev"] == underdog:
+                                _cg_ml_implied = _cg_ml_odds.get("away_implied", 0)
+                    except Exception:
+                        pass
+                    if _cg_ml_implied and _cg_ml_implied > 0:
+                        _cg_signal_gap = abs(_cg_ml_implied - _cg_live_prob)
+                        _log_activity(
+                            f"CLOSEGAME ESPN signal check: moneyline={_cg_ml_implied:.0%} vs live={_cg_live_prob:.0%}, gap={_cg_signal_gap:.0%}",
+                            "info"
+                        )
+                        if _cg_signal_gap > 0.15:
+                            _log_activity(
+                                f"CLOSEGAME SKIP: {ticker} — ESPN signal divergence {_cg_signal_gap:.0%} > 15%, moneyline likely stale",
+                                "info"
+                            )
+                            continue
+                        if _cg_signal_gap > 0.10:
+                            espn_edge_cg = espn_edge_cg * 0.5 if espn_edge_cg else 0
+                            _log_activity(
+                                f"CLOSEGAME: ESPN signal gap {_cg_signal_gap:.0%} > 10%, discounting edge 50% to {espn_edge_cg:.1%}",
+                                "info"
+                            )
+
                 # Require real ESPN edge — no more guessing with hardcoded model
                 # Allow spread edge to supplement: if moneyline edge is 2% but spread adds 3%, total is enough
                 _combined_edge_cg = max(espn_edge_cg or 0, (espn_edge_cg or 0) + _cg_spread_edge * 0.3)
-                if _combined_edge_cg < 0.03:
+                # If no live win prob available, require higher threshold (5% instead of 3%)
+                _cg_edge_threshold = 0.03 if _cg_live_prob is not None else 0.05
+                if _combined_edge_cg < _cg_edge_threshold:
                     _log_activity(
-                        f"CLOSEGAME SKIP: {title[:35]} — no ESPN edge (need 3%+, got {espn_edge_cg:.1%} )" if espn_edge_cg else f"CLOSEGAME SKIP: {title[:35]} — no ESPN odds data",
+                        f"CLOSEGAME SKIP: {title[:35]} — no ESPN edge (need {_cg_edge_threshold:.0%}+, got {espn_edge_cg:.1%} )" if espn_edge_cg else f"CLOSEGAME SKIP: {title[:35]} — no ESPN odds data",
                         "info"
                     )
                     continue
@@ -3935,6 +4130,21 @@ def closegame_snipe():
                     _cg_ob = analyze_orderbook(ticker)
                 except Exception:
                     pass
+
+                # Orderbook imbalance confirmation — does order flow agree with our side?
+                if _cg_ob and _cg_ob.get("imbalance") is not None:
+                    _cg_ob_imb = _cg_ob["imbalance"]
+                    _cg_buying_yes = (side == "yes")
+                    if _cg_buying_yes and _cg_ob_imb < -0.3:
+                        _log_activity(f"CLOSEGAME: OB opposes YES (imb={_cg_ob_imb:+.2f}), reducing conviction", "info")
+                        if _cg_ob_imb < -0.5 and edge < 0.05:
+                            _log_activity(f"CLOSEGAME SKIP: {ticker} — Orderbook opposes trade — likely stale odds (imb={_cg_ob_imb:+.2f}, edge={edge:.1%})", "info")
+                            continue
+                    elif not _cg_buying_yes and _cg_ob_imb > 0.3:
+                        _log_activity(f"CLOSEGAME: OB opposes NO (imb={_cg_ob_imb:+.2f}), reducing conviction", "info")
+                        if _cg_ob_imb > 0.5 and edge < 0.05:
+                            _log_activity(f"CLOSEGAME SKIP: {ticker} — Orderbook opposes trade — likely stale odds (imb={_cg_ob_imb:+.2f}, edge={edge:.1%})", "info")
+                            continue
 
                 result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_cg_ob)
                 success = "error" not in result
@@ -9854,6 +10064,99 @@ def _lookup_win_prob(sport, deficit, period):
                 best_prob = max(best_prob, prob)
 
     return best_prob
+
+
+def _time_adjusted_win_prob(league, deficit, period_str, clock_str, period_num=None):
+    """Win probability adjusted by time remaining in the game.
+
+    Uses _parse_clock_to_seconds() to get actual seconds remaining,
+    then scales the base static probability based on how much game time is left.
+    Falls back to _lookup_win_prob() if clock parsing fails.
+
+    Args:
+        league: Sport string (nba, nhl, ncaab, mlb, etc.)
+        deficit: Point deficit (positive = trailing)
+        period_str: Period/clock display string (e.g. "5:32 Q3")
+        clock_str: Raw clock string for parsing (often same as period_str)
+        period_num: Integer period number from ESPN (1-based), optional
+
+    Returns:
+        float: Adjusted win probability (0-1)
+    """
+    league_lower = league.lower() if league else ""
+
+    # Get the base probability from the static model
+    base_prob = _lookup_win_prob(league_lower, deficit, period_str)
+
+    # MLB uses innings not clock -- skip time adjustment
+    if league_lower in ("mlb", "kbo"):
+        return base_prob
+
+    # Try to get seconds remaining via _parse_clock_to_seconds
+    seconds_remaining = _parse_clock_to_seconds(clock_str, league_lower)
+
+    # If clock_str didn't work, try period_str
+    if seconds_remaining is None and period_str and period_str != clock_str:
+        seconds_remaining = _parse_clock_to_seconds(period_str, league_lower)
+
+    # If we still can't parse, try to estimate from period_num alone
+    if seconds_remaining is None and period_num is not None:
+        try:
+            pn = int(period_num)
+            if league_lower == "nba":
+                period_length = 720
+                total_periods = 4
+                remaining_full = max(0, total_periods - pn)
+                seconds_remaining = remaining_full * period_length + period_length // 2
+            elif league_lower in ("ncaab", "ncaawb"):
+                period_length = 1200
+                total_periods = 2
+                remaining_full = max(0, total_periods - pn)
+                seconds_remaining = remaining_full * period_length + period_length // 2
+            elif league_lower == "nhl":
+                period_length = 1200
+                total_periods = 3
+                remaining_full = max(0, total_periods - pn)
+                seconds_remaining = remaining_full * period_length + period_length // 2
+        except (ValueError, TypeError):
+            pass
+
+    if seconds_remaining is None:
+        return base_prob  # Can't determine time, use static model
+
+    # Total game seconds by sport
+    if league_lower == "nba":
+        total_game_seconds = 2880  # 4 x 12 min
+    elif league_lower in ("ncaab", "ncaawb"):
+        total_game_seconds = 2400  # 2 x 20 min
+    elif league_lower == "nhl":
+        total_game_seconds = 3600  # 3 x 20 min
+    else:
+        total_game_seconds = 2880  # default to NBA-like
+
+    # Fraction of game remaining (clamp to 0-1)
+    time_factor = max(0.0, min(1.0, seconds_remaining / total_game_seconds))
+
+    # Scale probability based on time remaining
+    if time_factor > 0.60:
+        # Early game (>60% left): deficit is very recoverable, use base prob
+        adjusted = base_prob
+    elif time_factor > 0.30:
+        # Mid game (30-60% left): interpolate toward a more extreme value
+        # Linear interpolation: at 60% use base_prob, at 30% use base_prob * 0.7
+        mid_scale = 0.7 + 0.3 * ((time_factor - 0.30) / 0.30)
+        adjusted = base_prob * mid_scale
+    elif time_factor > 0.10:
+        # Late game (<30% left): being down late is much worse
+        adjusted = base_prob * (time_factor * 2)
+    else:
+        # Very late (<10% left): almost no time to recover
+        adjusted = base_prob * (time_factor * 3)
+
+    # Floor: never go below 1% (there's always *some* chance)
+    adjusted = max(0.01, min(adjusted, base_prob))
+
+    return adjusted
 
 
 def _check_arbitrage():
