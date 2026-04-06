@@ -7477,34 +7477,23 @@ def settled_positions():
                     _trade_dates[_tk] = _ts
         # Fetch fills from Kalshi to fill in any missing trade dates
         # This ensures recent bot trades show up even after Railway deploy resets BOT_STATE
-        # Fetch ALL fills (multiple pages) for trade dates and game result computation
+        # Fetch fills (single page) for trade dates and game result computation
         _all_fills = []
         try:
-            _fills_cursor = None
-            for _fp in range(5):  # up to 5 pages = 1000 fills
-                _fills_h = signed_headers("GET", "/portfolio/fills")
-                _fp_params = {"limit": 200}
-                if _fills_cursor:
-                    _fp_params["cursor"] = _fills_cursor
-                _fills_r = requests.get(
-                    KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/fills",
-                    headers=_fills_h, params=_fp_params, timeout=10,
-                )
-                if not _fills_r.ok:
-                    break
-                _fp_data = _fills_r.json()
-                _fp_fills = _fp_data.get("fills", [])
-                _all_fills.extend(_fp_fills)
-                for _f in _fp_fills:
+            _fills_h = signed_headers("GET", "/portfolio/fills")
+            _fills_r = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/fills",
+                headers=_fills_h, params={"limit": 200}, timeout=10,
+            )
+            if _fills_r.ok:
+                _all_fills = _fills_r.json().get("fills", [])
+                for _f in _all_fills:
                     _fk = _f.get("ticker", "")
                     _ft = (_f.get("created_time", "") or "")[:10]
                     _fa = _f.get("action", "buy")
                     if _fk and _ft and _fa != "sell":
                         if _fk not in _trade_dates or _ft > _trade_dates[_fk]:
                             _trade_dates[_fk] = _ft
-                _fills_cursor = _fp_data.get("cursor")
-                if not _fills_cursor:
-                    break
             print(f"[SETTLED] Fetched {len(_all_fills)} fills, hydrated {len(_trade_dates)} trade dates")
         except Exception as _fe:
             print(f"[SETTLED] Fills fetch error: {_fe}")
@@ -7773,15 +7762,22 @@ def settled_positions():
         # Add game results from fills for tickers NOT in positions API
         # Kalshi removes game positions after settlement — we compute results from fills
         _fills_added = 0
+        _game_ticker_candidates = []
         for _fticker, _flist in _fills_by_ticker.items():
             if _fticker in _seen_tickers:
                 continue  # Already processed from positions API
-            # Only process fills after the cutoff date
             _ftrade_date = _trade_dates.get(_fticker, "")
             if _ftrade_date and _ftrade_date < _day1_cutoff:
                 continue
             if not _ftrade_date:
-                continue  # No date — can't determine if post-cutoff
+                continue
+            _buy_fills = [f for f in _flist if f.get("action") == "buy"]
+            if _buy_fills:
+                _game_ticker_candidates.append((_fticker, _flist, _ftrade_date))
+        # Sort by date descending, limit to 30 most recent to avoid API timeout
+        _game_ticker_candidates.sort(key=lambda x: x[2], reverse=True)
+        _game_ticker_candidates = _game_ticker_candidates[:30]
+        for _fticker, _flist, _ftrade_date in _game_ticker_candidates:
             # Compute cost and result from fills
             _buy_fills = [f for f in _flist if f.get("action") == "buy"]
             if not _buy_fills:
@@ -7797,13 +7793,13 @@ def settled_positions():
                     _price_cents = _parse_kalshi_dollars(_bf.get("yes_price") or 0)
                 _total_cost_cents += _price_cents * int(_bf.get("count", 0))
             _avg_entry = _total_cost_cents // max(1, _total_count)
-            # Check if market settled — try the market API
+            # Check if market settled — try the market API (3s timeout to stay fast)
             _settled_result = None
             try:
                 _mkt_h = signed_headers("GET", f"/markets/{_fticker}")
                 _mkt_r = requests.get(
                     KALSHI_BASE_URL + KALSHI_API_PREFIX + f"/markets/{_fticker}",
-                    headers=_mkt_h, timeout=5,
+                    headers=_mkt_h, timeout=3,
                 )
                 if _mkt_r.ok:
                     _mkt = _mkt_r.json().get("market", {})
