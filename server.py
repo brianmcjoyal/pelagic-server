@@ -7435,6 +7435,16 @@ def settled_positions():
                 if not cursor:
                     break
 
+        # Debug: count positions by status
+        _settled_count = sum(1 for p in positions_list if p.get("settlement_status") == "settled")
+        _unsettled_count = sum(1 for p in positions_list if p.get("settlement_status") != "settled")
+        _game_positions = [p for p in positions_list if "GAME" in (p.get("ticker", "") or "").upper()]
+        print(f"[SETTLED DEBUG] Total positions from Kalshi: {len(positions_list)} (settled={_settled_count}, unsettled={_unsettled_count})")
+        print(f"[SETTLED DEBUG] Game positions: {len(_game_positions)}")
+        for _gp in _game_positions[:5]:
+            _rpnl = _gp.get("realized_pnl_dollars") or _gp.get("realized_pnl", 0)
+            print(f"  GAME: {_gp.get('ticker', '')[:40]} rpnl={_rpnl} count={_gp.get('market_position', {}).get('position', 0) if isinstance(_gp.get('market_position'), dict) else ''}")
+
         # Only keep positions with non-zero realized P&L (completed trades)
         _day1_cutoff = TRADE_JOURNAL_START  # "2026-03-16"
         wins = 0
@@ -7532,18 +7542,24 @@ def settled_positions():
             ):
                 _seen_tickers[ticker] = pos
 
+        _skipped_zero = 0
+        _skipped_date = 0
+        _included = 0
         for pos in _seen_tickers.values():
             pnl_cents = _parse_kalshi_dollars(pos.get("realized_pnl_dollars") or pos.get("realized_pnl"))
             pnl = pnl_cents / 100
+            ticker = pos.get("ticker", "")
             # Skip positions with zero realized P&L (still open, no completed trades)
             if abs(pnl) < 0.005:
+                _skipped_zero += 1
                 continue
 
-            ticker = pos.get("ticker", "")
             # Filter: only Day 1+ trades (cutoff = TRADE_JOURNAL_START)
             trade_date = _trade_dates.get(ticker, "")
             if trade_date and trade_date < _day1_cutoff:
+                _skipped_date += 1
                 continue  # Pre-Day-1 — skip
+            _included += 1
             # If no trade_date at all, include it — likely a recent trade after deploy
 
             title = _get_title(ticker)
@@ -7772,6 +7788,8 @@ def settled_positions():
             "total_bets": total_bets,
             "by_category": by_category,
         }
+        print(f"[SETTLED DEBUG] Deduped: {len(_seen_tickers)} tickers, skipped_zero_pnl={_skipped_zero}, skipped_pre_day1={_skipped_date}, included={_included}")
+        print(f"[SETTLED DEBUG] Result: {wins}W/{losses}L, total_pnl=${total_pnl:.2f}")
         _SETTLED_CACHE["data"] = result
         _SETTLED_CACHE["ts"] = now
         return jsonify(result)
