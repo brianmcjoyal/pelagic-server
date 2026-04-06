@@ -492,37 +492,29 @@ _load_state()
 
 
 def _seed_perf_history_from_fills():
-    """Backfill _PERF_HISTORY with daily snapshots computed from fills.
+    """Backfill _PERF_HISTORY with daily snapshots so the chart has multi-day data.
 
-    On deploy, perf history may be lost (Railway /tmp).  This rebuilds
-    approximate daily portfolio values by:
-    1. Starting at $500 (Day 1 deposit)
-    2. Grouping fills by date, computing daily net cost (buys) and realized P&L
-    3. Using the fills API + market settlement results to approximate end-of-day value
-
-    Only runs if _PERF_HISTORY has no data older than 6 hours, indicating a
-    cold start where the chart would otherwise show only recent data.
+    Uses Kalshi fills API to find which dates had trading activity, then creates
+    approximate daily portfolio values by linearly interpolating from Day 1 ($500)
+    to current value across all trading days.
     """
     import requests as _req
+    import traceback
 
     # Skip if we already have multi-day history
-    if _PERF_HISTORY:
+    if len(_PERF_HISTORY) >= 2:
         try:
-            oldest_ts = _PERF_HISTORY[0].get("ts", "")
-            newest_ts = _PERF_HISTORY[-1].get("ts", "")
-            if oldest_ts and newest_ts:
-                oldest_dt = datetime.datetime.fromisoformat(oldest_ts.replace("Z", "+00:00"))
-                newest_dt = datetime.datetime.fromisoformat(newest_ts.replace("Z", "+00:00"))
-                span_hours = (newest_dt - oldest_dt).total_seconds() / 3600
-                if span_hours > 12:
-                    print(f"[PERF-SEED] Already have {span_hours:.0f}h of history ({len(_PERF_HISTORY)} pts), skipping backfill")
-                    return
+            first_date = _PERF_HISTORY[0].get("ts", "")[:10]
+            last_date = _PERF_HISTORY[-1].get("ts", "")[:10]
+            if first_date and last_date and first_date != last_date:
+                print(f"[PERF-SEED] Already have multi-day history ({first_date} to {last_date}, {len(_PERF_HISTORY)} pts), skipping")
+                return
         except Exception:
             pass
 
-    print("[PERF-SEED] Backfilling performance history from fills...")
+    print(f"[PERF-SEED] Starting backfill (current history: {len(_PERF_HISTORY)} pts)...")
 
-    # Fetch all fills (paginated)
+    # Fetch fills (paginated) to find trading dates
     fills = []
     cursor = None
     for _page in range(10):
@@ -539,6 +531,7 @@ def _seed_perf_history_from_fills():
                 headers=_ph, params=params, timeout=15,
             )
             if not resp.ok:
+                print(f"[PERF-SEED] Fills API returned {resp.status_code} on page {_page}")
                 break
             fd = resp.json()
             page_fills = fd.get("fills", [])
@@ -548,141 +541,87 @@ def _seed_perf_history_from_fills():
                 break
         except Exception as e:
             print(f"[PERF-SEED] Fills page {_page} error: {e}")
+            traceback.print_exc()
             break
 
-    if not fills:
-        print("[PERF-SEED] No fills found, adding Day 1 anchor only")
-        # Add at least the starting point
-        _PERF_HISTORY.insert(0, {
-            "ts": "2026-03-31T09:00:00-07:00",
-            "value": 500.00,
-            "cash": 500.00,
-        })
-        return
+    print(f"[PERF-SEED] Fetched {len(fills)} fills")
 
-    # Group fills by date (Pacific time)
-    daily_buys = {}   # date_str -> total cost in cents
-    daily_sells = {}  # date_str -> total revenue in cents
+    # Extract unique trading dates from fills
     all_dates = set()
-
     for fill in fills:
         ts = fill.get("created_time", "")
         if not ts:
             continue
         try:
-            dt = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(_PACIFIC)
-            date_str = dt.strftime("%Y-%m-%d")
+            # Parse ISO timestamp and convert to Pacific date
+            ts_clean = ts.replace("Z", "+00:00")
+            dt = datetime.datetime.fromisoformat(ts_clean)
+            dt_pac = dt.astimezone(_PACIFIC)
+            all_dates.add(dt_pac.strftime("%Y-%m-%d"))
         except Exception:
-            continue
+            # Fallback: just grab the date portion from the string
+            if len(ts) >= 10:
+                all_dates.add(ts[:10])
 
-        all_dates.add(date_str)
-        action = fill.get("action", "buy")
-        side = fill.get("side", "yes")
-
-        # Get price in cents
-        price_cents = 0
-        try:
-            if side == "yes":
-                yp = fill.get("yes_price_dollars") or fill.get("yes_price")
-                if yp:
-                    price_cents = int(round(float(str(yp)) * 100))
-            else:
-                np_val = fill.get("no_price_dollars") or fill.get("no_price")
-                if np_val:
-                    price_cents = int(round(float(str(np_val)) * 100))
-        except Exception:
-            continue
-
-        count = 0
-        try:
-            count_raw = fill.get("count_fp") or fill.get("count") or 0
-            count = int(float(str(count_raw)))
-        except Exception:
-            continue
-
-        cost_cents = price_cents * count
-
-        if action == "buy":
-            daily_buys[date_str] = daily_buys.get(date_str, 0) + cost_cents
-        else:
-            daily_sells[date_str] = daily_sells.get(date_str, 0) + cost_cents
-
-    # Sort dates
     sorted_dates = sorted(all_dates)
+    print(f"[PERF-SEED] Found {len(sorted_dates)} trading dates: {sorted_dates[:5]}...{sorted_dates[-3:] if len(sorted_dates) > 5 else ''}")
+
     if not sorted_dates:
+        # No fills at all — just add Day 1 anchor
+        _PERF_HISTORY.insert(0, {"ts": "2026-03-31T09:00:00-07:00", "value": 500.00, "cash": 500.00})
+        print("[PERF-SEED] No fills found, added Day 1 anchor only")
+        _save_state()
         return
 
-    # Build daily snapshots
-    # We can't know exact portfolio value from fills alone, but we can
-    # approximate: start at $500, track net cash flow, and use current
-    # portfolio value to calibrate the curve
-    DAY1_VALUE = 500.00
-    total_bought = 0
-    total_sold = 0
-
     # Current portfolio value for calibration
+    DAY1_VALUE = 500.00
     current_value = 598.64  # fallback
     if _PORTFOLIO_CACHE.get("data"):
-        current_value = _PORTFOLIO_CACHE["data"].get("portfolio_value_usd", 598.64)
+        cv = _PORTFOLIO_CACHE["data"].get("portfolio_value_usd")
+        if cv and cv > 0:
+            current_value = cv
 
-    # Compute total net spent
-    total_net_spent = sum(daily_buys.values()) - sum(daily_sells.values())
-    total_net_spent_usd = total_net_spent / 100.0
-
-    # The actual P&L is current_value - DAY1_VALUE
-    # Distribute P&L linearly across days for a smooth approximation
     total_pnl = current_value - DAY1_VALUE
     num_days = max(1, len(sorted_dates))
 
-    # Build historical points (one per day at 11:59 PM Pacific)
+    # Build historical points: Day 1 anchor + 2 points per trading day
     historical_points = []
 
-    # Add Day 1 anchor before first trade
-    first_date = sorted_dates[0]
-    try:
-        anchor_dt = datetime.datetime.strptime(first_date, "%Y-%m-%d")
-        anchor_dt = anchor_dt.replace(hour=8, minute=0, tzinfo=_PACIFIC)
-        # Day before first trade
-        day_before = anchor_dt - datetime.timedelta(days=1)
-        historical_points.append({
-            "ts": day_before.isoformat(),
-            "value": DAY1_VALUE,
-            "cash": DAY1_VALUE,
-        })
-    except Exception:
-        pass
+    # Day before first trade = starting balance
+    historical_points.append({
+        "ts": "2026-03-30T20:00:00-07:00",
+        "value": DAY1_VALUE,
+        "cash": DAY1_VALUE,
+    })
 
-    # Distribute growth across trading days
+    today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
     for i, date_str in enumerate(sorted_dates):
-        # Linearly interpolate portfolio value
-        progress = (i + 1) / num_days
-        day_value = round(DAY1_VALUE + total_pnl * progress, 2)
-
-        try:
-            dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
-            # Morning snapshot
-            dt_morning = dt.replace(hour=9, minute=0, tzinfo=_PACIFIC)
-            prev_value = round(DAY1_VALUE + total_pnl * (i / num_days), 2) if i > 0 else DAY1_VALUE
-            historical_points.append({
-                "ts": dt_morning.isoformat(),
-                "value": prev_value,
-                "cash": prev_value,
-            })
-            # Evening snapshot
-            dt_evening = dt.replace(hour=22, minute=0, tzinfo=_PACIFIC)
-            historical_points.append({
-                "ts": dt_evening.isoformat(),
-                "value": day_value,
-                "cash": day_value,
-            })
-        except Exception:
+        # Skip today — real-time data covers it
+        if date_str == today_str:
             continue
+        progress_start = i / num_days
+        progress_end = (i + 1) / num_days
+        val_morning = round(DAY1_VALUE + total_pnl * progress_start, 2)
+        val_evening = round(DAY1_VALUE + total_pnl * progress_end, 2)
+
+        # Morning point
+        historical_points.append({
+            "ts": f"{date_str}T09:00:00-07:00",
+            "value": val_morning,
+            "cash": val_morning,
+        })
+        # Evening point
+        historical_points.append({
+            "ts": f"{date_str}T22:00:00-07:00",
+            "value": val_evening,
+            "cash": val_evening,
+        })
 
     if not historical_points:
+        print("[PERF-SEED] No historical points generated")
         return
 
-    # Merge: insert historical points BEFORE existing real-time data
-    # Keep any existing real points (they're more accurate)
+    # Merge: prepend historical points before existing real-time data
     existing_real = list(_PERF_HISTORY)
     _PERF_HISTORY.clear()
     _PERF_HISTORY.extend(historical_points)
@@ -692,7 +631,7 @@ def _seed_perf_history_from_fills():
     if len(_PERF_HISTORY) > _PERF_HISTORY_MAX:
         _PERF_HISTORY[:] = _PERF_HISTORY[-_PERF_HISTORY_MAX:]
 
-    print(f"[PERF-SEED] Added {len(historical_points)} historical points across {len(sorted_dates)} trading days")
+    print(f"[PERF-SEED] Success! Added {len(historical_points)} historical points across {len(sorted_dates)} trading days. Total history: {len(_PERF_HISTORY)} pts")
     _save_state()
 
 
@@ -9502,6 +9441,25 @@ def performance_history():
     if limit and limit > 0:
         pts = pts[-limit:]
     return jsonify({"history": pts, "count": len(pts)})
+
+
+@app.route("/seed-perf-history")
+def seed_perf_history_endpoint():
+    """Debug: manually trigger performance history backfill."""
+    try:
+        before = len(_PERF_HISTORY)
+        first_before = _PERF_HISTORY[0]["ts"][:10] if _PERF_HISTORY else "none"
+        _seed_perf_history_from_fills()
+        after = len(_PERF_HISTORY)
+        first_after = _PERF_HISTORY[0]["ts"][:10] if _PERF_HISTORY else "none"
+        return jsonify({
+            "status": "ok",
+            "before": {"count": before, "first_date": first_before},
+            "after": {"count": after, "first_date": first_after},
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({"status": "error", "error": str(e), "trace": traceback.format_exc()})
 
 
 @app.route("/portfolio-summary")
