@@ -3301,7 +3301,9 @@ def moonshark_snipe():
                 # the moneyline is probably a stale pre-game line that hasn't updated
                 if espn_edge is not None and _game_info and _game_info.get("state") == "in":
                     _stale_margin = abs(int(_game_info.get("home_score", 0) or 0) - int(_game_info.get("away_score", 0) or 0))
-                    if _stale_margin > 10 and espn_edge > 0.08:
+                    _stale_league = (_game_info.get("league") or "").lower()
+                    _stale_threshold = 3 if _stale_league == "mlb" else 10  # MLB: 3 runs, others: 10 pts
+                    if _stale_margin >= _stale_threshold and espn_edge > 0.08:
                         espn_edge = espn_edge * 0.5  # Discount stale edge by 50%
                         if espn_edge < 0.03:
                             _ms_reasons["stale_odds"] = _ms_reasons.get("stale_odds", 0) + 1
@@ -3342,6 +3344,11 @@ def moonshark_snipe():
                         _bet_team_abbrev2 = _tk_parts_odds[-1].upper() if len(_tk_parts_odds) >= 2 else ""
                         _bet_is_home = _game_info.get("home_abbrev", "").upper() == _bet_team_abbrev2 if _bet_team_abbrev2 else True
                         _espn_live_prob = _get_espn_win_prob(_game_info["event_id"], _league, home_team=_bet_is_home)
+                    # MLB requires ESPN live win prob — static model is too inaccurate for baseball
+                    if _league == "mlb" and _espn_live_prob is None:
+                        _log_activity(f"MOONSHARK SKIP: {ticker} — MLB requires ESPN live win prob, not available", "info")
+                        _ms_reasons["mlb_no_espn_prob"] = _ms_reasons.get("mlb_no_espn_prob", 0) + 1
+                        continue
                     _model_prob = _espn_live_prob if _espn_live_prob is not None else _lookup_win_prob(_league, _margin, _clock)
                     _model_edge = _model_prob - implied_prob
                     if _model_edge > 0.05:
@@ -3350,11 +3357,20 @@ def moonshark_snipe():
                     elif _model_edge > 0.02:
                         ms_conviction += 1
 
-                    if _margin <= 5:
-                        ms_conviction += 2  # close game = highest value
-                        _conv_reasons.append(f"close({_margin}pt)")
-                    elif _margin <= 10:
-                        ms_conviction += 1  # competitive
+                    if _league == "mlb":
+                        # MLB: tighter close-game thresholds (low-scoring sport)
+                        if _margin <= 2:
+                            ms_conviction += 2  # very close baseball game
+                            _conv_reasons.append(f"close({_margin}run)")
+                        elif _margin <= 3:
+                            ms_conviction += 1  # competitive baseball game
+                            _conv_reasons.append(f"close({_margin}run)")
+                    else:
+                        if _margin <= 5:
+                            ms_conviction += 2  # close game = highest value
+                            _conv_reasons.append(f"close({_margin}pt)")
+                        elif _margin <= 10:
+                            ms_conviction += 1  # competitive
 
                     # Signal 5: Momentum — is the team trending up?
                     _tracker = _game_score_tracker.get(ticker, {})
@@ -3383,8 +3399,9 @@ def moonshark_snipe():
                             _is_home_bet = _game_info.get("home_abbrev", "").upper() == _bet_team_abbrev3
                             # If home spread is -5, home is favored by 5; flip sign for away
                             _our_spread = _espn_spread_val if _is_home_bet else -_espn_spread_val
-                            # Rough conversion: each spread point ~2% win probability shift
-                            _spread_implied = 0.50 + (_our_spread * -0.02)
+                            # Sport-specific spread conversion: MLB run line ~6.7% per run, others ~2% per point
+                            _spread_factor = -0.067 if _league == "mlb" else -0.02
+                            _spread_implied = 0.50 + (_our_spread * _spread_factor)
                             _spread_implied = max(0.10, min(0.90, _spread_implied))
                             _spread_divergence = _spread_implied - implied_prob
                             # If spread says our team has >5% more chance than Kalshi prices
@@ -3454,6 +3471,9 @@ def moonshark_snipe():
 
                 # Apply multipliers BEFORE capping — so Kelly cap is never exceeded
                 adjusted_kelly = kelly_usd * cat_mult * live_boost
+                # MLB: quarter-Kelly (extra /2) — baseball variance is brutal
+                if _league == "mlb":
+                    adjusted_kelly /= 2.0
                 # No artificial $3 floor — trust Kelly. If edge is small, bet small.
                 if adjusted_kelly < 1.0:
                     _ms_reasons["kelly_too_small"] = _ms_reasons.get("kelly_too_small", 0) + 1
@@ -3714,7 +3734,7 @@ def closegame_snipe():
                 is_late = inning >= 7
             except Exception:
                 is_late = False
-            max_margin = 3  # Baseball: within 3 in 7th+
+            max_margin = 2  # Baseball: within 2 in 7th+ (low-scoring, comebacks rare)
         elif sport in ("atp", "wta"):
             is_late = True
             max_margin = 1  # Within 1 set
@@ -9441,7 +9461,7 @@ _BLOWOUT_THRESHOLDS = {
     "nba": 15,     # down by 15+ points
     "ncaab": 15,   # down by 15+ points
     "nhl": 3,      # down by 3+ goals
-    "mlb": 4,      # down by 4+ runs
+    "mlb": 3,      # down by 3+ runs
     "soccer": 2,   # down by 2+ goals (soccer is low-scoring)
 }
 
@@ -9450,7 +9470,7 @@ _LATE_GAME_THRESHOLDS = {
     "nba": {"period": 4, "max_deficit": 8},      # Q4, down 8+
     "ncaab": {"period": 2, "max_deficit": 10},    # 2nd half, down 10+
     "nhl": {"period": 3, "max_deficit": 2},       # P3, down 2+
-    "mlb": {"period": 7, "max_deficit": 3},       # 7th inning+, down 3+
+    "mlb": {"period": 7, "max_deficit": 2},       # 7th inning+, down 2+
 }
 
 
@@ -9674,9 +9694,14 @@ _WIN_PROB_MODEL = {
         (1, ["OT"], 0.50),            # OT is 50/50
     ],
     "mlb": [
-        (1, [], 0.35),                # Down 1 late: 35%
-        (2, [], 0.22),                # Down 2 late: 22%
-        (3, [], 0.14),                # Down 3 late: 14%
+        # Late innings (7th+): comeback much harder
+        (1, ["7th", "8th", "9th", "7", "8", "9"], 0.25),   # Down 1 late: 25%
+        (2, ["7th", "8th", "9th", "7", "8", "9"], 0.12),   # Down 2 late: 12%
+        (3, ["7th", "8th", "9th", "7", "8", "9"], 0.06),   # Down 3 late: 6%
+        # Early innings (1-6): more time to come back
+        (1, [], 0.40),                # Down 1 early: 40%
+        (2, [], 0.30),                # Down 2 early: 30%
+        (3, [], 0.18),                # Down 3 early: 18%
     ],
     "kbo": [
         (1, [], 0.33),
