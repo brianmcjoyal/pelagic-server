@@ -3108,7 +3108,10 @@ def live_game_snipe():
                 cat_mult = _learning_multiplier(ticker, title, price)
                 if cat_mult <= 0:
                     continue  # blocked by learning engine
-                bet_usd = _smart_bet_size(price, bankroll=bal if bal > 0 else None) * closing_boost * cat_mult
+                # Conviction scaling: 5=1x (baseline), 6=1.5x, 7+=2x
+                _conv_mult = 1.0 + max(0, conviction - 5) * 0.5
+                _conv_mult = min(_conv_mult, 2.0)
+                bet_usd = _smart_bet_size(price, bankroll=bal if bal > 0 else None) * closing_boost * cat_mult * _conv_mult
                 count = max(1, min(50, int(bet_usd * 100 / price)))
                 cost_usd = (price * count) / 100.0
 
@@ -3795,8 +3798,11 @@ def moonshark_snipe():
                     except Exception:
                         pass
 
+                # Conviction scaling: 5=1x (baseline), 6=1.5x, 7+=2x
+                _conv_mult = 1.0 + max(0, ms_conviction - 5) * 0.5
+                _conv_mult = min(_conv_mult, 2.0)
                 # Apply multipliers BEFORE capping — so Kelly cap is never exceeded
-                adjusted_kelly = kelly_usd * cat_mult * live_boost
+                adjusted_kelly = kelly_usd * cat_mult * live_boost * _conv_mult
                 # MLB: quarter-Kelly (extra /2) — baseball variance is brutal
                 if _league == "mlb":
                     adjusted_kelly /= 2.0
