@@ -3001,7 +3001,7 @@ def live_game_snipe():
                 # Check if game is LIVE (in-progress)
                 _snipe_game = None
                 try:
-                    _snipe_scores = _fetch_all_espn_scores()
+                    _snipe_scores = _get_espn_scores()
                     _snipe_team = ticker.split("-")[-1].upper() if "-" in ticker else ""
                     if _snipe_team:
                         _snipe_game = _snipe_scores.get(_snipe_team.lower())
@@ -3535,7 +3535,7 @@ def moonshark_snipe():
                 # Try to get live scores for odds check
                 # _fetch_all_espn_scores() returns flat dict: team_key(lowercase) -> game_info
                 try:
-                    _scores_for_odds = _fetch_all_espn_scores()
+                    _scores_for_odds = _get_espn_scores()
                     _bet_team = ticker.split("-")[-1].upper() if "-" in ticker else ""
                     if _bet_team:
                         _game_info = _scores_for_odds.get(_bet_team.lower())
@@ -4052,14 +4052,14 @@ def closegame_snipe():
 
     # Get live scores
     try:
-        scores = _fetch_all_espn_scores()
+        scores = _get_espn_scores()
     except Exception:
         return []
     if not scores:
         return []
 
     # Find games that are LIVE, CLOSE, and LATE
-    # _fetch_all_espn_scores() returns flat dict (team_key -> game_info)
+    # _get_espn_scores() returns flat dict (team_key -> game_info)
     # Deduplicate by building unique games from values
     _seen_matchups = set()
     _unique_games = []
@@ -4241,7 +4241,7 @@ def closegame_snipe():
                 espn_edge_cg = None
                 espn_win_prob_cg = None
                 try:
-                    _cg_scores = _fetch_all_espn_scores()
+                    _cg_scores = _get_espn_scores()
                     _cg_team_key = underdog.lower()
                     _cg_game = _cg_scores.get(_cg_team_key)
                     if _cg_game and _cg_game.get("odds"):
@@ -7001,9 +7001,7 @@ def _background_loop():
             # === FAST TRADING LOOP (every cycle) ===
             # These are the money-makers — run them FIRST and FAST
             _snipe_results = live_game_snipe()
-            _time.sleep(1)
             _ms_results = moonshark_snipe()
-            _time.sleep(1)
 
             # Check for new settlements
             settlements = check_settlements_and_reinvest()
@@ -7573,6 +7571,7 @@ def positions():
 _SETTLED_CACHE = {"data": None, "ts": 0}
 _SETTLED_CACHE_TTL = 300  # 5 minutes — expensive call, data changes slowly
 _GAME_RESULT_CACHE = {}  # {ticker: {"result": "yes"/"no", "title": "..."}} — persists across settled calls
+_TITLE_CACHE = {}  # {ticker: "market title"} — persists across settled calls
 
 @app.route("/settled")
 def settled_positions():
@@ -7681,12 +7680,12 @@ def settled_positions():
                     _fills_by_ticker[_fk] = []
                 _fills_by_ticker[_fk].append(_f)
 
-        # Cache market titles — pre-populate from trade journal to avoid API calls
-        _title_cache = {}
+        # Cache market titles — use global _TITLE_CACHE, pre-populate from trade journal
+        _title_cache = _TITLE_CACHE  # alias to global for backward compat
         for _jt in _TRADE_JOURNAL:
             _tk = _jt.get("ticker", "")
             _tt = _jt.get("title", "")
-            if _tk and _tt:
+            if _tk and _tt and _tk not in _title_cache:
                 _title_cache[_tk] = _tt
         # Also check all_trades
         for _at in BOT_STATE.get("all_trades", []):
@@ -9902,6 +9901,26 @@ _TEAM_ALIASES = {
     "ny rangers": ["nyr", "rangers"], "ny islanders": ["nyi", "islanders"],
 }
 
+# --- Global ESPN scores cache (15-second TTL) ---
+_ESPN_SCORES_CACHE = {"data": {}, "ts": 0}
+_ESPN_CACHE_TTL = 15  # seconds
+
+
+def _get_espn_scores():
+    """Return cached ESPN scores, refreshing at most every 15 seconds."""
+    now = _time.time()
+    if _ESPN_SCORES_CACHE["data"] and (now - _ESPN_SCORES_CACHE["ts"]) < _ESPN_CACHE_TTL:
+        return _ESPN_SCORES_CACHE["data"]
+    try:
+        fresh = _fetch_all_espn_scores()
+        if fresh:
+            _ESPN_SCORES_CACHE["data"] = fresh
+            _ESPN_SCORES_CACHE["ts"] = now
+            return fresh
+    except Exception:
+        pass
+    return _ESPN_SCORES_CACHE["data"]  # return stale on error
+
 
 def _fetch_all_espn_scores():
     """Fetch today's scores from all ESPN endpoints. Returns dict of normalized_team_key -> game info."""
@@ -10157,7 +10176,7 @@ def _check_blowout(ticker, title, bet_team_abbrev=None):
         # Fetch live scores
         now = _time.time()
         if now - _live_scores_cache["ts"] > _LIVE_SCORES_TTL or not _live_scores_cache["data"]:
-            _live_scores_cache["data"] = _fetch_all_espn_scores()
+            _live_scores_cache["data"] = _get_espn_scores()
             _live_scores_cache["ts"] = now
 
         scores = _live_scores_cache["data"]
@@ -10927,7 +10946,7 @@ def _blowout_exit():
     if not game_positions:
         return
 
-    scores = _fetch_all_espn_scores()
+    scores = _get_espn_scores()
     if not scores:
         return
 
@@ -11068,7 +11087,7 @@ def _monitor_live_games():
     if not game_positions:
         return
 
-    scores = _fetch_all_espn_scores()
+    scores = _get_espn_scores()
     if not scores:
         return
 
@@ -11138,7 +11157,7 @@ def live_scores_endpoint():
     now = _time.time()
     if now - _live_scores_cache["ts"] > _LIVE_SCORES_TTL or not _live_scores_cache["data"]:
         try:
-            _live_scores_cache["data"] = _fetch_all_espn_scores()
+            _live_scores_cache["data"] = _get_espn_scores()
             _live_scores_cache["ts"] = now
         except Exception:
             pass
