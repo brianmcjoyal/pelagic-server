@@ -2676,7 +2676,7 @@ LIVE_GAME_SERIES = [
 ]
 
 # Sniper settings
-SNIPE_MIN_PRICE = 70   # cents — tightened from 65 (higher entry = more confident favorites)
+SNIPE_MIN_PRICE = 67   # cents — slightly tightened from 65 (still captures early games)
 SNIPE_MAX_PRICE = 85   # cents — cap at 85c (need 15%+ profit margin, one upset can't wipe 6 wins)
 SNIPE_BET_USD = 15.0   # fallback — now uses _smart_bet_size() for bankroll scaling
 SNIPE_MAX_DAILY = 50.0   # daily safety cap — reduced to 25% of bankroll total across strategies
@@ -3034,8 +3034,8 @@ def live_game_snipe():
                 # Signal 4: Closing soon (live edge)
                 if closing_boost > 1:
                     conviction += 1
-                # Require minimum conviction of 5 to bet (tightened from 4 for better selectivity)
-                if conviction < 5:
+                # Require minimum conviction of 4 to bet (kept at 4 for learning volume)
+                if conviction < 4:
                     continue
 
                 # ESPN LIVE WIN PROBABILITY VALIDATION
@@ -3099,8 +3099,8 @@ def live_game_snipe():
                             "warn"
                         )
 
-                # Re-check conviction after ESPN adjustment (match tightened threshold)
-                if conviction < 5:
+                # Re-check conviction after ESPN adjustment
+                if conviction < 4:
                     _ms_reasons["low_conviction_post_espn"] = _ms_reasons.get("low_conviction_post_espn", 0) + 1
                     continue
 
@@ -3108,8 +3108,8 @@ def live_game_snipe():
                 cat_mult = _learning_multiplier(ticker, title, price)
                 if cat_mult <= 0:
                     continue  # blocked by learning engine
-                # Conviction scaling: 5=1x (baseline), 6=1.5x, 7+=2x
-                _conv_mult = 1.0 + max(0, conviction - 5) * 0.5
+                # Conviction scaling: 4=0.5x (exploratory), 5=1x, 6=1.5x, 7+=2x
+                _conv_mult = 0.5 + max(0, conviction - 4) * 0.5
                 _conv_mult = min(_conv_mult, 2.0)
                 bet_usd = _smart_bet_size(price, bankroll=bal if bal > 0 else None) * closing_boost * cat_mult * _conv_mult
                 count = max(1, min(50, int(bet_usd * 100 / price)))
@@ -3184,8 +3184,8 @@ def live_game_snipe():
                         conviction += 1
                     elif not _snipe_buying_yes and _snipe_ob_imb < -0.3:
                         conviction += 1
-                    # Re-check conviction after orderbook adjustment (match tightened threshold)
-                    if conviction < 5:
+                    # Re-check conviction after orderbook adjustment
+                    if conviction < 4:
                         _ms_reasons["low_conviction_ob"] = _ms_reasons.get("low_conviction_ob", 0) + 1
                         continue
 
@@ -3743,8 +3743,8 @@ def moonshark_snipe():
                             "warn"
                         )
 
-                # Require minimum conviction — raised thresholds for better win rate
-                _ms_min_conviction = 4 if _ms_below_floor else 5
+                # Require minimum conviction — floor mode=3, normal=4 (volume for learning)
+                _ms_min_conviction = 3 if _ms_below_floor else 4
                 if ms_conviction < _ms_min_conviction:
                     _ms_reasons["low_conviction"] = _ms_reasons.get("low_conviction", 0) + 1
                     continue
@@ -3798,8 +3798,8 @@ def moonshark_snipe():
                     except Exception:
                         pass
 
-                # Conviction scaling: 5=1x (baseline), 6=1.5x, 7+=2x
-                _conv_mult = 1.0 + max(0, ms_conviction - 5) * 0.5
+                # Conviction scaling: 4=0.5x (exploratory), 5=1x, 6=1.5x, 7+=2x
+                _conv_mult = 0.5 + max(0, ms_conviction - 4) * 0.5
                 _conv_mult = min(_conv_mult, 2.0)
                 # Apply multipliers BEFORE capping — so Kelly cap is never exceeded
                 adjusted_kelly = kelly_usd * cat_mult * live_boost * _conv_mult
