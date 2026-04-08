@@ -170,7 +170,7 @@ _STATE_FILE = "/tmp/tradeshark_state.json"
 _TRADE_JOURNAL = []  # List of enriched trade records with full metadata
 _CATEGORY_STATS = {}  # {cat: {"wins": 0, "losses": 0, "pnl": 0.0}}
 _GAME_EXPOSURE = {}   # {game_event_key: total_usd_wagered} — per-game exposure cap
-_GAME_EXPOSURE_MAX = 10.0  # max $10 per game across all strategies
+_GAME_EXPOSURE_MAX = 25.0  # max $25 per game across all strategies (raised from $10 to let Kelly-sized winning trades through)
 _PERF_HISTORY = []  # [{ts: ISO string, value: portfolio_value_usd, cash: balance_usd}]
 _PERF_HISTORY_MAX = 5000  # keep ~5000 points (~20 hours at 15s intervals, or many days of hourly)
 _LEARNING_STATE = {
@@ -178,6 +178,20 @@ _LEARNING_STATE = {
     "version": 0,
     "parameters": {},  # learned thresholds/weights per dimension
     "insights": [],    # human-readable learning outputs
+    # Adaptive thresholds — updated by _auto_tune_thresholds() based on rolling
+    # performance. All strategies read these at decision time so the bot
+    # tightens up after bad days and loosens up after good ones.
+    "adaptive": {
+        "min_conviction_sniper": 4,
+        "min_conviction_moonshark": 4,
+        "min_edge_sniper": 0.02,    # ESPN edge required
+        "min_edge_moonshark": 0.05,
+        "min_edge_closegame": 0.03,
+        "min_edge_floor": 0.02,
+        "last_tune": None,
+        "last_win_rate_7d": None,
+        "total_tunes": 0,
+    },
 }
 
 def _save_state():
@@ -213,6 +227,10 @@ def _save_state():
             "closegame_daily_spent": BOT_STATE.get("closegame_daily_spent", 0.0),
             "closegame_trades_today": BOT_STATE.get("closegame_trades_today", []),
             "closegame_date": BOT_STATE.get("closegame_date"),
+            # Persist Floor quota counters
+            "floor_daily_spent": BOT_STATE.get("floor_daily_spent", 0.0),
+            "floor_trades_today": BOT_STATE.get("floor_trades_today", []),
+            "floor_date": BOT_STATE.get("floor_date"),
             # Learning engine state
             "learning_state": _LEARNING_STATE,
             # Per-game exposure tracking
@@ -260,6 +278,10 @@ def _load_state():
             BOT_STATE["closegame_daily_spent"] = data.get("closegame_daily_spent", 0.0)
             BOT_STATE["closegame_trades_today"] = data.get("closegame_trades_today", [])
             BOT_STATE["closegame_date"] = today_str
+            # Restore Floor counters for same-day
+            BOT_STATE["floor_daily_spent"] = data.get("floor_daily_spent", 0.0)
+            BOT_STATE["floor_trades_today"] = data.get("floor_trades_today", [])
+            BOT_STATE["floor_date"] = today_str
             # Restore manual trades for same-day
             BOT_STATE["manual_trades_today"] = data.get("manual_trades_today", [])
             # Restore per-game exposure for same-day
@@ -282,6 +304,9 @@ def _load_state():
             BOT_STATE["closegame_daily_spent"] = 0.0
             BOT_STATE["closegame_trades_today"] = []
             BOT_STATE["closegame_date"] = today_str
+            BOT_STATE["floor_daily_spent"] = 0.0
+            BOT_STATE["floor_trades_today"] = []
+            BOT_STATE["floor_date"] = today_str
             BOT_STATE["manual_trades_today"] = []
 
         # --- Cumulative data: always restore regardless of day ---
@@ -299,8 +324,14 @@ def _load_state():
 
         saved_learning = data.get("learning_state", {})
         if saved_learning:
-            _LEARNING_STATE.clear()
+            # Merge instead of clear so new default keys (e.g. "adaptive")
+            # added in later versions are preserved.
+            _default_adaptive = dict(_LEARNING_STATE.get("adaptive", {}))
             _LEARNING_STATE.update(saved_learning)
+            # Ensure adaptive dict exists and has all expected keys
+            merged_adaptive = dict(_default_adaptive)
+            merged_adaptive.update(_LEARNING_STATE.get("adaptive") or {})
+            _LEARNING_STATE["adaptive"] = merged_adaptive
             print(f"[STATE] Restored learning state v{_LEARNING_STATE.get('version', 0)} from disk")
 
         # Restore performance history (line chart data — persists across days)
@@ -2608,6 +2639,9 @@ def run_bot_scan():
         BOT_STATE["closegame_trades_today"] = []
         BOT_STATE["closegame_daily_spent"] = 0.0
         BOT_STATE["closegame_date"] = today
+        BOT_STATE["floor_trades_today"] = []
+        BOT_STATE["floor_daily_spent"] = 0.0
+        BOT_STATE["floor_date"] = today
         # Clean up stale tracking data to prevent memory leaks
         _game_score_tracker.clear()
         _price_averages.clear()
@@ -2688,6 +2722,11 @@ BOT_STATE["snipe_wins"] = 0
 BOT_STATE["snipe_losses"] = 0
 BOT_STATE["snipe_profit_usd"] = 0.0
 
+# Floor quota strategy — safety-net that guarantees min 5 bets/day
+BOT_STATE["floor_trades_today"] = []
+BOT_STATE["floor_daily_spent"] = 0.0
+BOT_STATE["floor_date"] = None
+
 # MoonShark settings — KELLY-SIZED: fewer bets, larger when edge is real
 MOONSHARK_MIN_PRICE = 25   # cents — skip sub-25c lottery tickets
 MOONSHARK_MAX_PRICE = 35   # cents — tightened from 40 (sweet spot is 25-30, cap at 35)
@@ -2750,12 +2789,70 @@ def _check_and_claim_event(event_key):
 
 def _check_game_exposure(event_key, cost_usd):
     """Check if adding cost_usd to this game would exceed the per-game exposure cap.
-    Returns True if the trade is allowed, False if it would exceed the $10 cap."""
+    Returns True if the trade is allowed, False if it would exceed the cap."""
     with _BOT_STATE_LOCK:
         current = _GAME_EXPOSURE.get(event_key, 0.0)
         if current + cost_usd > _GAME_EXPOSURE_MAX:
             return False
         return True
+
+
+def _fit_to_game_cap(event_key, price_cents, count):
+    """Shrink a bet to fit within the remaining per-game exposure cap.
+
+    Returns (new_count, new_cost_usd). If no room at all (< $1), returns (0, 0).
+    This replaces the "skip" behavior that was killing otherwise-good trades.
+    """
+    with _BOT_STATE_LOCK:
+        current = _GAME_EXPOSURE.get(event_key, 0.0)
+    remaining = _GAME_EXPOSURE_MAX - current
+    if remaining < 1.0:
+        return (0, 0.0)
+    if price_cents <= 0:
+        return (0, 0.0)
+    max_count = int((remaining * 100.0) / price_cents)
+    if max_count <= 0:
+        return (0, 0.0)
+    new_count = min(count, max_count)
+    new_cost = (price_cents * new_count) / 100.0
+    return (new_count, new_cost)
+
+
+# ---------------------------------------------------------------------------
+# DAILY BET FLOOR — guarantee minimum activity so we always learn & earn
+# ---------------------------------------------------------------------------
+DAILY_BET_FLOOR = 5  # minimum bets placed per day across all strategies
+
+def _total_bets_today():
+    """Count every bet placed today across every strategy."""
+    return (
+        len(BOT_STATE.get("trades_today", []))
+        + len(BOT_STATE.get("snipe_trades_today", []))
+        + len(BOT_STATE.get("moonshark_trades_today", []))
+        + len(BOT_STATE.get("closegame_trades_today", []))
+        + len(BOT_STATE.get("manual_trades_today", []))
+        + len(BOT_STATE.get("floor_trades_today", []))
+    )
+
+
+def _quota_shortfall():
+    """How many bets are we short of the daily floor?"""
+    return max(0, DAILY_BET_FLOOR - _total_bets_today())
+
+
+def _floor_mode_active():
+    """True if we should relax filters because we're behind the daily floor.
+
+    Engaged only after a warm-up window so the high-quality strategies get
+    first crack at today's markets. Becomes MORE aggressive later in the day.
+    """
+    shortfall = _quota_shortfall()
+    if shortfall <= 0:
+        return False
+    now_pt = datetime.datetime.now(tz=_PACIFIC)
+    # From 8am PT onwards, nudge the quota engine.
+    # By 2pm PT we're fully aggressive regardless of shortfall size.
+    return now_pt.hour >= 8
 
 
 def _record_game_exposure(event_key, cost_usd):
@@ -3034,8 +3131,12 @@ def live_game_snipe():
                 # Signal 4: Closing soon (live edge)
                 if closing_boost > 1:
                     conviction += 1
-                # Require minimum conviction of 4 to bet (kept at 4 for learning volume)
-                if conviction < 4:
+                # Adaptive minimum conviction — learning engine tunes this value
+                # based on rolling win rate. Floor mode relaxes by 1 more.
+                _min_conv_snipe = _adaptive_get("min_conviction_sniper", 4)
+                if _floor_mode_active():
+                    _min_conv_snipe = max(2, _min_conv_snipe - 1)
+                if conviction < _min_conv_snipe:
                     continue
 
                 # ESPN LIVE WIN PROBABILITY VALIDATION
@@ -3099,8 +3200,8 @@ def live_game_snipe():
                             "warn"
                         )
 
-                # Re-check conviction after ESPN adjustment
-                if conviction < 4:
+                # Re-check conviction after ESPN adjustment (adaptive threshold)
+                if conviction < _min_conv_snipe:
                     _ms_reasons["low_conviction_post_espn"] = _ms_reasons.get("low_conviction_post_espn", 0) + 1
                     continue
 
@@ -3146,10 +3247,15 @@ def live_game_snipe():
                     "info"
                 )
 
-                # Per-game exposure cap — $10 max across all strategies
+                # Per-game exposure cap — shrink bet to fit remaining cap instead of skipping
                 if not _check_game_exposure(event_key, cost_usd):
-                    _log_activity(f"SNIPE SKIP: {ticker} — game exposure cap ${_GAME_EXPOSURE.get(event_key, 0):.2f}/${_GAME_EXPOSURE_MAX}", "info")
-                    continue
+                    new_count, new_cost = _fit_to_game_cap(event_key, price, count)
+                    if new_count <= 0:
+                        _log_activity(f"SNIPE SKIP: {ticker} — game exposure cap full ${_GAME_EXPOSURE.get(event_key, 0):.2f}/${_GAME_EXPOSURE_MAX}", "info")
+                        continue
+                    _log_activity(f"SNIPE TRIM: {ticker} — shrunk x{count}→x{new_count} (${cost_usd:.2f}→${new_cost:.2f}) to fit game cap", "info")
+                    count = new_count
+                    cost_usd = new_cost
 
                 # Thread-safe claim — prevents other strategies from betting same game
                 if not _check_and_claim_event(event_key):
@@ -3184,8 +3290,8 @@ def live_game_snipe():
                         conviction += 1
                     elif not _snipe_buying_yes and _snipe_ob_imb < -0.3:
                         conviction += 1
-                    # Re-check conviction after orderbook adjustment
-                    if conviction < 4:
+                    # Re-check conviction after orderbook adjustment (adaptive)
+                    if conviction < _min_conv_snipe:
                         _ms_reasons["low_conviction_ob"] = _ms_reasons.get("low_conviction_ob", 0) + 1
                         continue
 
@@ -3554,10 +3660,12 @@ def moonshark_snipe():
                             espn_implied = 0
                         if espn_implied > 0:
                             espn_edge = espn_implied - implied_prob
-                            # SKIP unless ESPN gives at least 5% edge over Kalshi price
-                            # e.g., ESPN says 30% but Kalshi prices at 20c (20%) = +10% edge = BET
-                            # ESPN says 24% and Kalshi prices at 20c (20%) = +4% edge = SKIP (too thin)
-                            if espn_edge < 0.05:
+                            # SKIP unless ESPN gives at least the adaptive minimum edge
+                            # over Kalshi price. Floor mode relaxes further.
+                            _ms_min_edge = _adaptive_get("min_edge_moonshark", 0.05)
+                            if _floor_mode_active():
+                                _ms_min_edge = max(0.02, _ms_min_edge - 0.02)
+                            if espn_edge < _ms_min_edge:
                                 _ms_reasons["no_edge"] = _ms_reasons.get("no_edge", 0) + 1
                                 continue
                         else:
@@ -3570,7 +3678,7 @@ def moonshark_snipe():
                     continue
 
                 # espn_edge must be confirmed at this point — reject if still None
-                if espn_edge is None or espn_edge < 0.05:
+                if espn_edge is None or espn_edge < _ms_min_edge:
                     _ms_reasons["no_edge"] = _ms_reasons.get("no_edge", 0) + 1
                     continue
 
@@ -3743,8 +3851,12 @@ def moonshark_snipe():
                             "warn"
                         )
 
-                # Require minimum conviction — floor mode=3, normal=4 (volume for learning)
-                _ms_min_conviction = 3 if _ms_below_floor else 4
+                # Require minimum conviction — adaptive + floor relaxation
+                _ms_min_conviction = _adaptive_get("min_conviction_moonshark", 4)
+                if _floor_mode_active():
+                    _ms_min_conviction = max(2, _ms_min_conviction - 1)
+                if _ms_below_floor:
+                    _ms_min_conviction = max(2, _ms_min_conviction - 1)
                 if ms_conviction < _ms_min_conviction:
                     _ms_reasons["low_conviction"] = _ms_reasons.get("low_conviction", 0) + 1
                     continue
@@ -3897,10 +4009,15 @@ def moonshark_snipe():
                     "info"
                 )
 
-                # Per-game exposure cap — $10 max across all strategies
+                # Per-game exposure cap — shrink bet to fit remaining cap instead of skipping
                 if not _check_game_exposure(event_key, cost_usd):
-                    _log_activity(f"MOONSHARK SKIP: {ticker} — game exposure cap ${_GAME_EXPOSURE.get(event_key, 0):.2f}/${_GAME_EXPOSURE_MAX}", "info")
-                    continue
+                    new_count, new_cost = _fit_to_game_cap(event_key, price, count)
+                    if new_count <= 0:
+                        _log_activity(f"MOONSHARK SKIP: {ticker} — game exposure cap full ${_GAME_EXPOSURE.get(event_key, 0):.2f}/${_GAME_EXPOSURE_MAX}", "info")
+                        continue
+                    _log_activity(f"MOONSHARK TRIM: {ticker} — shrunk x{count}→x{new_count} (${cost_usd:.2f}→${new_cost:.2f}) to fit game cap", "info")
+                    count = new_count
+                    cost_usd = new_cost
 
                 # Thread-safe claim — prevents other strategies from betting same game
                 if not _check_and_claim_event(event_key):
@@ -4381,10 +4498,15 @@ def closegame_snipe():
                     "info"
                 )
 
-                # Per-game exposure cap — $10 max across all strategies
+                # Per-game exposure cap — shrink bet to fit remaining cap instead of skipping
                 if not _check_game_exposure(event_key, cost_usd):
-                    _log_activity(f"CLOSEGAME SKIP: {ticker} — game exposure cap ${_GAME_EXPOSURE.get(event_key, 0):.2f}/${_GAME_EXPOSURE_MAX}", "info")
-                    continue
+                    new_count, new_cost = _fit_to_game_cap(event_key, price, count)
+                    if new_count <= 0:
+                        _log_activity(f"CLOSEGAME SKIP: {ticker} — game exposure cap full ${_GAME_EXPOSURE.get(event_key, 0):.2f}/${_GAME_EXPOSURE_MAX}", "info")
+                        continue
+                    _log_activity(f"CLOSEGAME TRIM: {ticker} — shrunk x{count}→x{new_count} (${cost_usd:.2f}→${new_cost:.2f}) to fit game cap", "info")
+                    count = new_count
+                    cost_usd = new_cost
 
                 # Thread-safe claim — prevents other strategies from betting same game
                 if not _check_and_claim_event(event_key):
@@ -4504,6 +4626,341 @@ def closegame_snipe():
         _save_state()
 
     return snipes
+
+
+# ---------------------------------------------------------------------------
+# DAILY FLOOR SNIPER — guarantees minimum 5 bets per day across all strategies
+# ---------------------------------------------------------------------------
+# Runs after all high-conviction strategies. Scans ALL live markets for the
+# best available ESPN-validated edges and places small ($2-4) bets until the
+# daily bet floor is met. This is the "always learning" engine — every bet it
+# places feeds the trade journal, which in turn improves the learning engine's
+# weights for the high-conviction strategies tomorrow.
+
+FLOOR_MAX_DAILY_USD = 30.0  # total cap for the floor strategy per day
+FLOOR_BET_USD = 3.0         # default bet size — small so losses stay small
+FLOOR_MIN_PRICE = 20        # widest allowed range — 20c to 88c
+FLOOR_MAX_PRICE = 88
+FLOOR_MIN_EDGE = 0.02       # 2% ESPN edge minimum (vs 5% for regular sniper)
+FLOOR_MIN_CONVICTION = 2    # much lower than regular strategies (vs 4)
+
+def floor_quota_snipe():
+    """Safety-net strategy. Runs when total bets today < DAILY_BET_FLOOR.
+
+    Uses relaxed filters to guarantee a minimum level of activity. Every bet
+    feeds the trade journal so the learning engine has constant fresh data.
+    """
+    if not BOT_CONFIG.get("enabled"):
+        return []
+    # Only run when we're actually short
+    if not _floor_mode_active():
+        return []
+
+    today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+    if BOT_STATE.get("floor_date") != today:
+        BOT_STATE["floor_date"] = today
+        BOT_STATE["floor_trades_today"] = []
+        BOT_STATE["floor_daily_spent"] = 0.0
+
+    shortfall = _quota_shortfall()
+    if shortfall <= 0:
+        return []
+    if BOT_STATE.get("floor_daily_spent", 0) >= FLOOR_MAX_DAILY_USD:
+        return []
+
+    bal = _get_cached_balance()
+    if bal < BOT_CONFIG.get("min_balance_usd", 200):
+        return []
+
+    _log_activity(f"🎯 FLOOR MODE: {_total_bets_today()}/{DAILY_BET_FLOOR} bets — scanning with relaxed filters", "info")
+
+    # Build dedupe sets from positions + today's trades
+    existing_tickers = set()
+    existing_events = set()
+    try:
+        positions = check_position_prices()
+        for p in positions:
+            existing_tickers.add(p.get("ticker", ""))
+            parts = p.get("ticker", "").split("-")
+            if len(parts) >= 2:
+                existing_events.add("-".join(parts[:2]))
+    except Exception:
+        pass
+    for _tlist in [
+        BOT_STATE.get("snipe_trades_today", []),
+        BOT_STATE.get("moonshark_trades_today", []),
+        BOT_STATE.get("closegame_trades_today", []),
+        BOT_STATE.get("manual_trades_today", []),
+        BOT_STATE.get("floor_trades_today", []),
+    ]:
+        for _t in _tlist:
+            _tk = _t.get("ticker", "")
+            if _tk:
+                existing_tickers.add(_tk)
+                _tp = _tk.split("-")
+                if len(_tp) >= 2:
+                    existing_events.add("-".join(_tp[:2]))
+
+    # Build candidate list — go wide
+    candidates = []
+    _blocked_prefixes = [
+        "KXKHLGAME", "KXVTBGAME", "KXCS2GAME", "KXVALGAME",
+        "KXDOTAGAME", "KXLOLGAME", "KXCOD", "KXCRICKET", "KXKABADDI",
+    ]
+    _allowed_prefixes = [
+        "KXMLBGAME", "KXNBAGAME", "KXNHLGAME", "KXNFLGAME",
+        "KXSOCCERGAME", "KXATPMATCH", "KXWTAMATCH", "KXATPCHALLENGERMATCH",
+        "KXUFCFIGHT", "KXAFLGAME", "KXNCAAMBGAME", "KXNCAAWBGAME", "KXKBLGAME",
+    ]
+
+    # Scan every live sports series
+    scan_sources = [{"series_ticker": s} for s in LIVE_GAME_SERIES]
+    # Plus markets closing within next 24h (broader than live)
+    close_cutoff = (datetime.datetime.utcnow() + datetime.timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    scan_sources.append({"close_time_max": close_cutoff, "status": "open"})
+
+    for source_params in scan_sources:
+        try:
+            mh = signed_headers("GET", "/markets")
+            params = {"limit": 200, "status": "open"}
+            params.update(source_params)
+            resp = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + "/markets",
+                headers=mh, params=params, timeout=8,
+            )
+            if not resp.ok:
+                continue
+            markets = resp.json().get("markets", [])
+        except Exception:
+            continue
+
+        for mkt in markets:
+            ticker = mkt.get("ticker", "") or ""
+            title = mkt.get("title", "") or ""
+            if not ticker or ticker in existing_tickers:
+                continue
+
+            t_upper = ticker.upper()
+            if any(t_upper.startswith(bp) for bp in _blocked_prefixes):
+                continue
+
+            _parts = ticker.split("-")
+            event_key = "-".join(_parts[:2]) if len(_parts) >= 2 else ticker
+            if event_key in existing_events or event_key in _EVENTS_BET_TODAY:
+                continue
+
+            # Category / keyword filters (same junk blocker as real strategies)
+            blocked = BOT_CONFIG.get("blocked_categories", [])
+            mcat = classify_market_category(title, ticker)
+            if mcat in blocked:
+                continue
+            t_lower = title.lower()
+            if any(kw in t_lower for kw in BOT_CONFIG.get("blocked_keywords", [])):
+                continue
+
+            # Require whitelisted prefix when scanning the catch-all time window
+            if "series_ticker" not in source_params:
+                if not any(t_upper.startswith(ap) for ap in _allowed_prefixes):
+                    continue
+                # Must be a binary GAME/MATCH/FIGHT market
+                if not any(kw in t_upper for kw in ["GAME", "MATCH", "FIGHT"]):
+                    continue
+
+            # Liquidity: still require something tradeable
+            _ask_size = float(str(mkt.get("yes_ask_size_fp") or mkt.get("no_ask_size_fp") or 0))
+            if _ask_size < 20:
+                continue
+
+            # Parse prices
+            yes_ask = None
+            no_ask = None
+            try:
+                ya = mkt.get("yes_ask_dollars") or mkt.get("yes_ask")
+                if ya:
+                    yes_ask = int(round(float(str(ya)) * 100))
+                na = mkt.get("no_ask_dollars") or mkt.get("no_ask")
+                if na:
+                    no_ask = int(round(float(str(na)) * 100))
+            except Exception:
+                continue
+
+            # ESPN validation — the whole point is we only bet when ESPN agrees
+            _team = _parts[-1].upper() if len(_parts) >= 2 else ""
+            _game = None
+            if _team:
+                try:
+                    _game = _get_espn_scores().get(_team.lower())
+                except Exception:
+                    pass
+
+            _espn_prob = None
+            if _game and _game.get("event_id"):
+                try:
+                    _is_home = _game.get("home_abbrev", "").upper() == _team
+                    _espn_prob = _get_espn_win_prob(
+                        _game["event_id"],
+                        (_game.get("league") or "").lower(),
+                        home_team=_is_home,
+                    )
+                except Exception:
+                    pass
+            # Fall back to moneyline implied probability
+            if _espn_prob is None and _game and _game.get("odds"):
+                _odds = _game["odds"]
+                if _game.get("home_abbrev", "").upper() == _team:
+                    _espn_prob = _odds.get("home_implied") or None
+                elif _game.get("away_abbrev", "").upper() == _team:
+                    _espn_prob = _odds.get("away_implied") or None
+
+            if _espn_prob is None or _espn_prob <= 0:
+                continue  # no ESPN signal → no bet
+
+            # Pick the side with the best edge
+            best = None
+            for side_name, ask in (("yes", yes_ask), ("no", no_ask)):
+                if ask is None or ask < FLOOR_MIN_PRICE or ask > FLOOR_MAX_PRICE:
+                    continue
+                implied = ask / 100.0
+                # For NO side, our target probability is 1 - _espn_prob
+                our_prob = _espn_prob if side_name == "yes" else (1 - _espn_prob)
+                edge = our_prob - implied
+                if edge < FLOOR_MIN_EDGE:
+                    continue
+                if best is None or edge > best["edge"]:
+                    best = {"side": side_name, "price": ask, "edge": edge, "our_prob": our_prob}
+
+            if not best:
+                continue
+
+            candidates.append({
+                "ticker": ticker,
+                "title": title,
+                "event_key": event_key,
+                "side": best["side"],
+                "price": best["price"],
+                "edge": best["edge"],
+                "our_prob": best["our_prob"],
+                "game": _game,
+                "mcat": mcat,
+            })
+
+    if not candidates:
+        _log_activity("🎯 FLOOR: no edges found this scan", "info")
+        return []
+
+    # Rank by edge, take top N (shortfall)
+    candidates.sort(key=lambda c: c["edge"], reverse=True)
+    placed = []
+
+    for cand in candidates:
+        if len(placed) >= shortfall:
+            break
+        if BOT_STATE.get("floor_daily_spent", 0) >= FLOOR_MAX_DAILY_USD:
+            break
+
+        ticker = cand["ticker"]
+        title = cand["title"]
+        side = cand["side"]
+        price = cand["price"]
+        edge = cand["edge"]
+        event_key = cand["event_key"]
+
+        # Small bet — risk is limited by design
+        bet_usd = min(FLOOR_BET_USD, FLOOR_MAX_DAILY_USD - BOT_STATE.get("floor_daily_spent", 0))
+        if bet_usd < 1.0:
+            break
+        count = max(1, int(bet_usd * 100 / price))
+        cost_usd = (price * count) / 100.0
+
+        # Honor game exposure cap but shrink to fit
+        if not _check_game_exposure(event_key, cost_usd):
+            new_count, new_cost = _fit_to_game_cap(event_key, price, count)
+            if new_count <= 0:
+                continue
+            count = new_count
+            cost_usd = new_cost
+
+        if not _check_and_claim_event(event_key):
+            continue
+
+        _ob = None
+        try:
+            _ob = analyze_orderbook(ticker)
+        except Exception:
+            pass
+
+        _log_activity(
+            f"🎯 FLOOR {side.upper()} {title[:35]} @ {price}c x{count} (${cost_usd:.2f}) edge={edge:+.1%}",
+            "info"
+        )
+        result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob)
+        if "error" in result:
+            err = result.get("error", "")[:80]
+            _log_activity(f"FLOOR failed: {ticker} — {err}", "error")
+            continue
+
+        order_data = result.get("order", {})
+        filled = 0
+        try:
+            filled = int(float(str(order_data.get("filled_count_fp") or order_data.get("filled_count") or 0)))
+        except Exception:
+            pass
+
+        with _BOT_STATE_LOCK:
+            BOT_STATE["fill_attempts"] = BOT_STATE.get("fill_attempts", 0) + 1
+            BOT_STATE["fill_attempts_by_strategy"]["floor"] = BOT_STATE.get("fill_attempts_by_strategy", {}).get("floor", 0) + 1
+            if filled > 0:
+                BOT_STATE["fill_successes"] = BOT_STATE.get("fill_successes", 0) + 1
+                BOT_STATE["fill_successes_by_strategy"]["floor"] = BOT_STATE.get("fill_successes_by_strategy", {}).get("floor", 0) + 1
+
+        if filled <= 0:
+            _log_activity(f"FLOOR missed: {ticker} — 0 filled", "info")
+            continue
+
+        actual_cost = (price * filled) / 100.0
+        potential = (100 - price) * filled / 100.0
+        _record_game_exposure(event_key, actual_cost)
+        with _BOT_STATE_LOCK:
+            BOT_STATE["floor_daily_spent"] = BOT_STATE.get("floor_daily_spent", 0) + actual_cost
+        BOT_STATE.setdefault("floor_trades_today", []).append({
+            "ticker": ticker, "title": title, "side": side, "price": price,
+            "count": filled, "cost": actual_cost, "potential_profit": potential,
+            "time": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "bot_version": BOT_VERSION,
+            "strategy": "floor",
+            "category": cand["mcat"],
+            "espn_edge": round(edge, 4),
+            "edge_reasons": [f"ESPN edge +{edge:.1%}", f"cat={cand['mcat']}"],
+            "conviction": 2,
+            "order_id": order_data.get("order_id", ""),
+        })
+        _order_id = order_data.get("order_id", "")
+        if _order_id:
+            _known_fill_ids.add(_order_id)
+
+        _edge_data = {"espn_implied": cand["our_prob"], "espn_edge": edge}
+        _journal_trade(
+            ticker, title, side, price, filled, actual_cost, "floor",
+            is_live=True, close_time=mkt.get("close_time", "") if isinstance(mkt, dict) else "",
+            game_info=cand.get("game"), espn_edge_data=_edge_data,
+            conviction=2, conviction_reasons=[f"ESPN+{edge:.0%}", "floor_mode"],
+        )
+
+        _log_activity(
+            f"🎯 FLOOR HIT! {side.upper()} {ticker} @ {price}c x{filled} = ${actual_cost:.2f} (edge +{edge:.1%})",
+            "success"
+        )
+        placed.append({"ticker": ticker, "cost": actual_cost, "edge": edge})
+        existing_tickers.add(ticker)
+        existing_events.add(event_key)
+
+    if placed:
+        _log_activity(
+            f"🎯 FLOOR round: {len(placed)} trades to meet daily quota (now {_total_bets_today()}/{DAILY_BET_FLOOR})",
+            "success"
+        )
+        _save_state()
+    return placed
 
 
 # ---------------------------------------------------------------------------
@@ -5886,6 +6343,92 @@ def _learning_engine():
     _save_state()
 
 
+def _auto_tune_thresholds():
+    """Adaptive threshold tuner — adjusts live filter strictness based on
+    recent performance. Runs alongside the learning engine every ~5-10 min.
+
+    Rules (rolling 7-day window):
+      - Win rate > 55%  → LOOSEN filters (lower conviction/edge minimums) to
+                          place more bets and compound faster
+      - Win rate 40-55% → hold steady
+      - Win rate 25-40% → tighten slightly
+      - Win rate < 25%  → tighten hard, demand higher edge + conviction
+      - If total bets in window < 10 → also loosen (need volume to learn)
+    """
+    try:
+        cutoff = (datetime.datetime.utcnow() - datetime.timedelta(days=7)).isoformat() + "Z"
+        recent = [t for t in _TRADE_JOURNAL if t.get("result") and (t.get("settlement_time") or "") >= cutoff]
+        wins = sum(1 for t in recent if t.get("result") == "win")
+        losses = sum(1 for t in recent if t.get("result") == "loss")
+        total = wins + losses
+        adaptive = _LEARNING_STATE.setdefault("adaptive", {})
+
+        if total < 10:
+            # Not enough data — bias toward loosening so we generate more
+            delta = -1  # loosen
+            reason = f"need volume ({total} settled in 7d)"
+        else:
+            wr = wins / total
+            adaptive["last_win_rate_7d"] = round(wr, 4)
+            if wr > 0.55:
+                delta = -1  # loosen (we're winning, compound harder)
+                reason = f"7d win rate {wr:.0%} — loosening"
+            elif wr >= 0.40:
+                delta = 0   # hold
+                reason = f"7d win rate {wr:.0%} — holding"
+            elif wr >= 0.25:
+                delta = 1   # tighten
+                reason = f"7d win rate {wr:.0%} — tightening"
+            else:
+                delta = 2   # tighten hard
+                reason = f"7d win rate {wr:.0%} — tightening hard"
+
+        # Apply conviction deltas with reasonable bounds
+        def _clamp(v, lo, hi):
+            return max(lo, min(hi, v))
+
+        adaptive["min_conviction_sniper"] = _clamp(
+            adaptive.get("min_conviction_sniper", 4) + delta, 3, 7
+        )
+        adaptive["min_conviction_moonshark"] = _clamp(
+            adaptive.get("min_conviction_moonshark", 4) + delta, 3, 7
+        )
+        # Edge thresholds tweak in smaller increments
+        edge_delta = 0.01 * delta
+        adaptive["min_edge_sniper"] = round(_clamp(
+            adaptive.get("min_edge_sniper", 0.02) + edge_delta, 0.01, 0.10
+        ), 3)
+        adaptive["min_edge_moonshark"] = round(_clamp(
+            adaptive.get("min_edge_moonshark", 0.05) + edge_delta, 0.02, 0.12
+        ), 3)
+        adaptive["min_edge_closegame"] = round(_clamp(
+            adaptive.get("min_edge_closegame", 0.03) + edge_delta, 0.01, 0.10
+        ), 3)
+        adaptive["min_edge_floor"] = round(_clamp(
+            adaptive.get("min_edge_floor", 0.02) + edge_delta, 0.01, 0.08
+        ), 3)
+        adaptive["last_tune"] = datetime.datetime.utcnow().isoformat() + "Z"
+        adaptive["total_tunes"] = adaptive.get("total_tunes", 0) + 1
+
+        _log_activity(
+            f"🧠 Auto-tune #{adaptive['total_tunes']}: {reason} — "
+            f"conviction sniper={adaptive['min_conviction_sniper']} "
+            f"moonshark={adaptive['min_conviction_moonshark']} "
+            f"edge_sniper={adaptive['min_edge_sniper']}",
+            "info"
+        )
+    except Exception as e:
+        print(f"[AUTO_TUNE] Error: {e}")
+
+
+def _adaptive_get(key, default):
+    """Safe getter for adaptive threshold values."""
+    try:
+        return _LEARNING_STATE.get("adaptive", {}).get(key, default)
+    except Exception:
+        return default
+
+
 def _learning_multiplier(ticker, title, price_cents=None, game_info=None, espn_edge=None):
     """Compute composite bet sizing multiplier from all learned dimensions.
 
@@ -7011,6 +7554,15 @@ def _background_loop():
                 except Exception:
                     pass
 
+            # === DAILY FLOOR QUOTA — guarantees minimum 5 bets per day ===
+            # Runs AFTER the high-quality strategies so they get first crack
+            # at today's markets. Only kicks in when below DAILY_BET_FLOOR.
+            try:
+                if _quota_shortfall() > 0:
+                    floor_quota_snipe()
+            except Exception as _fe:
+                print(f"[FLOOR] Error: {_fe}")
+
             # Sync external Kalshi fills
             try:
                 _sync_kalshi_fills()
@@ -7035,10 +7587,13 @@ def _background_loop():
                 except Exception as _mle:
                     print(f"[MONITOR] Error: {_mle}")
 
-            # Learning engine — every 120 cycles (~1 hour)
-            if cycle % 120 == 0:
+            # Learning engine — every 20 cycles (~5-10 min)
+            # Much more aggressive than before (was 120 = 1 hour) so the bot
+            # continuously adapts to fresh fills and settlement outcomes.
+            if cycle % 20 == 0:
                 try:
                     _learning_engine()
+                    _auto_tune_thresholds()
                 except Exception as _le:
                     print(f"[LEARNING] Error: {_le}")
 
@@ -9500,12 +10055,19 @@ def status():
         "last_scan_markets": markets,
         "last_scan_mispriced": mispriced,
         "trades_today": _count_trades_today(),
-        "daily_spent_usd": BOT_STATE.get("daily_spent_usd", 0) + BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0) + BOT_STATE.get("closegame_daily_spent", 0),
+        "total_bets_today": _total_bets_today(),
+        "daily_bet_floor": DAILY_BET_FLOOR,
+        "quota_shortfall": _quota_shortfall(),
+        "floor_mode_active": _floor_mode_active(),
+        "daily_spent_usd": BOT_STATE.get("daily_spent_usd", 0) + BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0) + BOT_STATE.get("closegame_daily_spent", 0) + BOT_STATE.get("floor_daily_spent", 0),
         "total_trades_all_time": len(BOT_STATE["all_trades"]),
         "recent_errors": BOT_STATE["errors"][-5:],
         "scheduler_running": scheduler.running,
         "sniper_trades_today": len(BOT_STATE.get("snipe_trades_today", [])),
         "sniper_daily_spent": BOT_STATE.get("snipe_daily_spent", 0),
+        "floor_trades_today": len(BOT_STATE.get("floor_trades_today", [])),
+        "floor_daily_spent": BOT_STATE.get("floor_daily_spent", 0),
+        "adaptive_thresholds": _LEARNING_STATE.get("adaptive", {}),
         "fill_rate": round(BOT_STATE.get("fill_successes", 0) / max(1, BOT_STATE.get("fill_attempts", 0)) * 100, 1),
         "fill_attempts": BOT_STATE.get("fill_attempts", 0),
         "fill_successes": BOT_STATE.get("fill_successes", 0),
