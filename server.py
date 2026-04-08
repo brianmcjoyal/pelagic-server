@@ -10065,15 +10065,68 @@ def _generate_trends():
 
 @app.route("/analytics/learning")
 def analytics_learning():
-    """Return current learning state and parameter adjustments."""
+    """Return current learning state + all new telemetry (supervisor, CLV, MTM,
+    loss post-mortems, consensus divergence, auto-tune history, per-strategy
+    stats). Used by the dashboard "Bot Brain" panel."""
     settled_count = sum(1 for t in _TRADE_JOURNAL if t.get("result"))
+    with _LEARNING_STATE_LOCK:
+        _adaptive = dict(_LEARNING_STATE.get("adaptive", {}))
+        _tune_history = list(_LEARNING_STATE.get("tune_history", []))
+        _skip_reasons = dict(_LEARNING_STATE.get("skip_reasons", {}))
+        _clv_strat = dict(_LEARNING_STATE.get("clv_by_strategy", {}))
+        _mtm_strat = dict(_LEARNING_STATE.get("mtm_by_strategy", {}))
+        _loss_cats = dict(_LEARNING_STATE.get("loss_categories", {}))
+        _divergence = dict(_LEARNING_STATE.get("consensus_divergence", {}))
+        _version = _LEARNING_STATE.get("version", 0)
+        _last_run = _LEARNING_STATE.get("last_run")
+        _insights = list(_LEARNING_STATE.get("insights", []))
+        _params = dict(_LEARNING_STATE.get("parameters", {}))
+        _skip_updated = _LEARNING_STATE.get("skip_reasons_last_update")
+
+    # Per-strategy rollup (win rate + CLV + sample) for the last 7 days
+    try:
+        _per_strat_rollup = _per_strategy_stats(days=7)
+    except Exception:
+        _per_strat_rollup = {}
+
+    # Most recent 10 tune adjustments (newest first)
+    _recent_tunes = list(reversed(_tune_history[-10:]))
+
+    # Position peaks (smart exit tracker) — convert to list for JSON
+    _peaks_snapshot = []
+    try:
+        for _tk, _p in list(_POSITION_PEAKS.items())[:30]:
+            _peaks_snapshot.append({
+                "ticker": _tk,
+                "entry": _p.get("entry"),
+                "peak": _p.get("peak"),
+                "first_seen": _p.get("first_seen"),
+            })
+    except Exception:
+        pass
+
     return jsonify({
-        "version": _LEARNING_STATE.get("version", 0),
-        "last_run": _LEARNING_STATE.get("last_run"),
-        "parameters": _LEARNING_STATE.get("parameters", {}),
-        "insights": _LEARNING_STATE.get("insights", []),
+        "version": _version,
+        "last_run": _last_run,
+        "insights": _insights,
+        "parameters": _params,
         "trade_journal_size": len(_TRADE_JOURNAL),
         "settled_count": settled_count,
+        # New telemetry surfaces
+        "adaptive": _adaptive,
+        "per_strategy_7d": _per_strat_rollup,
+        "skip_reasons": _skip_reasons,
+        "skip_reasons_last_update": _skip_updated,
+        "clv_by_strategy": _clv_strat,
+        "mtm_by_strategy": _mtm_strat,
+        "loss_categories": _loss_cats,
+        "consensus_divergence": _divergence,
+        "recent_tunes": _recent_tunes,
+        "position_peaks": _peaks_snapshot,
+        "config": {
+            "sport_exposure_cap_pct": BOT_CONFIG.get("sport_exposure_cap_pct"),
+            "smart_exit_enabled": BOT_CONFIG.get("smart_exit_enabled"),
+        },
     })
 
 
@@ -16016,6 +16069,7 @@ a:hover { color: #7da5f5; }
 <div class="tabs">
   <button class="tab active" onclick="switchTab('positions')">Dashboard</button>
   <button class="tab" onclick="switchTab('performance')">Performance</button>
+  <button class="tab" onclick="switchTab('brain')" style="color:#00d4ff">&#129504; Brain</button>
   <button class="tab" onclick="switchTab('trends')" style="color:#e040fb">Trends</button>
   <!-- MoonShark tab removed -->
 </div>
@@ -16288,6 +16342,96 @@ a:hover { color: #7da5f5; }
 <!-- Analytics Tab -->
 <!-- Analytics tab removed — merged into Performance tab -->
 
+<!-- Brain Tab — real-time view into the learning engine -->
+<div class="tab-content" id="tab-brain">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+    <div>
+      <div style="color:#00d4ff;font-size:18px;font-weight:800;letter-spacing:0.5px">&#129504; Bot Brain</div>
+      <div style="color:#666;font-size:10px;margin-top:2px">Live view of the learning engine, supervisor, and smart exit system</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px">
+      <span id="brain-updated" style="color:#555;font-size:10px"></span>
+      <button class="refresh-btn" onclick="loadBrain(true)">Refresh</button>
+    </div>
+  </div>
+
+  <!-- Header stats -->
+  <div id="brain-header" style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px">
+    <div style="background:#0a1a22;border:1px solid #1a3a4a;border-radius:10px;padding:12px">
+      <div style="color:#666;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">Learning Version</div>
+      <div id="brain-version" style="color:#00d4ff;font-size:22px;font-weight:800;margin-top:4px">--</div>
+    </div>
+    <div style="background:#0a1a22;border:1px solid #1a3a4a;border-radius:10px;padding:12px">
+      <div style="color:#666;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">Settled Trades</div>
+      <div id="brain-settled" style="color:#ccc;font-size:22px;font-weight:800;margin-top:4px">--</div>
+    </div>
+    <div style="background:#0a1a22;border:1px solid #1a3a4a;border-radius:10px;padding:12px">
+      <div style="color:#666;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">Last Tune</div>
+      <div id="brain-lasttune" style="color:#e040fb;font-size:13px;font-weight:700;margin-top:6px">--</div>
+    </div>
+    <div style="background:#0a1a22;border:1px solid #1a3a4a;border-radius:10px;padding:12px">
+      <div style="color:#666;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">Total Tunes</div>
+      <div id="brain-totaltunes" style="color:#00dc5a;font-size:22px;font-weight:800;margin-top:4px">--</div>
+    </div>
+  </div>
+
+  <!-- Insights + Per-strategy knobs -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
+    <div class="section">
+      <div class="section-title">&#127919; Latest Insights</div>
+      <div id="brain-insights" style="display:flex;flex-direction:column;gap:6px;max-height:320px;overflow-y:auto">
+        <div style="color:#555;font-size:11px">Loading...</div>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">&#9881;&#65039; Per-Strategy Knobs (auto-tuned)</div>
+      <div id="brain-adaptive" style="display:flex;flex-direction:column;gap:6px;max-height:320px;overflow-y:auto">
+        <div style="color:#555;font-size:11px">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Per-strategy performance + CLV + MTM -->
+  <div class="section" style="margin-bottom:16px">
+    <div class="section-title">&#128200; Per-Strategy Scorecard (last 7d)</div>
+    <div id="brain-strategies" style="overflow-x:auto">
+      <div style="color:#555;font-size:11px;padding:8px">Loading...</div>
+    </div>
+  </div>
+
+  <!-- Skip reasons + Loss post-mortem -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
+    <div class="section">
+      <div class="section-title">&#128065;&#65039; Skip Reasons (why trades didn't fire today)</div>
+      <div id="brain-skips" style="display:flex;flex-direction:column;gap:6px;max-height:280px;overflow-y:auto">
+        <div style="color:#555;font-size:11px">Loading...</div>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">&#129657; Loss Post-Mortem</div>
+      <div id="brain-losses" style="display:flex;flex-direction:column;gap:6px;max-height:280px;overflow-y:auto">
+        <div style="color:#555;font-size:11px">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tune history + Smart exit peaks -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+    <div class="section">
+      <div class="section-title">&#128200; Recent Tune History</div>
+      <div id="brain-tunes" style="display:flex;flex-direction:column;gap:6px;max-height:300px;overflow-y:auto">
+        <div style="color:#555;font-size:11px">Loading...</div>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-title">&#128737;&#65039; Smart Exit Tracker (live peaks)</div>
+      <div id="brain-peaks" style="display:flex;flex-direction:column;gap:6px;max-height:300px;overflow-y:auto">
+        <div style="color:#555;font-size:11px">Loading...</div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- News Feed Tab (was Trends) -->
 <div class="tab-content" id="tab-trends">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
@@ -16380,6 +16524,7 @@ function switchTab(name) {
   if (name === 'history') { loadPerformance(); }  // legacy redirect
   if (name === 'analytics') { loadPerformance(); }  // legacy redirect
   if (name === 'trends') { loadNewsFeed(); }
+  if (name === 'brain') { loadBrain(); }
   // Legacy support for hidden tabs
   if (name === 'activity') { loadActivity(); loadBetsFeed(); loadAllBets(); }
 }
@@ -19730,6 +19875,223 @@ async function loadTrends() {
     }
   } catch(e) {
     _setHTML('trends-list', '<div style="color:#ff5000;font-size:11px">Error: ' + e.message + '</div>');
+  }
+}
+
+// --- Brain Tab (learning engine / supervisor / smart exit view) ---
+var _brainLoadedAt = 0;
+async function loadBrain(force) {
+  if (!force && Date.now() - _brainLoadedAt < 5000) return;  // 5s debounce
+  _brainLoadedAt = Date.now();
+  try {
+    var data = await fetch(API + '/analytics/learning').then(function(r){ return r.json(); });
+    if (data.error) throw new Error(data.error);
+
+    _setText('brain-version', 'v' + (data.version || 0));
+    _setText('brain-settled', data.settled_count || 0);
+    var adaptive = data.adaptive || {};
+    _setText('brain-totaltunes', adaptive.total_tunes || 0);
+    _setText('brain-lasttune', adaptive.last_tune ? fmtTime(adaptive.last_tune) : 'never');
+    _setText('brain-updated', 'Last run: ' + (data.last_run ? fmtTime(data.last_run) : '--'));
+
+    // Insights
+    var insightsEl = _el('brain-insights');
+    if (insightsEl) {
+      var insights = data.insights || [];
+      if (insights.length === 0) {
+        insightsEl.innerHTML = '<div style="color:#555;font-size:11px;padding:10px">No insights yet — need 10+ settled trades</div>';
+      } else {
+        var h = '';
+        insights.slice().reverse().forEach(function(ins) {
+          var color = '#888';
+          if (ins.indexOf('🎯') >= 0 || ins.indexOf('✅') >= 0) color = '#00dc5a';
+          else if (ins.indexOf('⚠️') >= 0 || ins.indexOf('🚫') >= 0) color = '#ff5000';
+          else if (ins.indexOf('🩹') >= 0 || ins.indexOf('⏰') >= 0) color = '#ffb400';
+          h += '<div style="background:#141414;border-left:3px solid ' + color + ';padding:8px 12px;border-radius:4px;color:' + color + ';font-size:11px;line-height:1.4">' + ins + '</div>';
+        });
+        insightsEl.innerHTML = h;
+      }
+    }
+
+    // Per-strategy knobs (adaptive)
+    var adaptiveEl = _el('brain-adaptive');
+    if (adaptiveEl) {
+      var strats = [
+        {name:'live_sniper', conv:'min_conviction_sniper', edge:'min_edge_sniper'},
+        {name:'moonshark',   conv:'min_conviction_moonshark', edge:'min_edge_moonshark'},
+        {name:'closegame',   conv:null, edge:'min_edge_closegame'},
+        {name:'floor',       conv:null, edge:'min_edge_floor'},
+        {name:'momentum_swing', conv:null, edge:'min_edge_swing'},
+        {name:'goalie_pulled',  conv:null, edge:'min_edge_goalie'},
+      ];
+      var h = '';
+      strats.forEach(function(s) {
+        var conv = s.conv ? adaptive[s.conv] : null;
+        var edge = adaptive[s.edge];
+        if (edge == null) return;
+        h += '<div style="background:#0a1a22;border:1px solid #1a3a4a;border-radius:6px;padding:8px 12px;display:flex;justify-content:space-between;align-items:center;font-size:11px">';
+        h += '<span style="color:#00d4ff;font-weight:700;text-transform:uppercase;letter-spacing:0.3px">' + s.name + '</span>';
+        h += '<span style="color:#888">';
+        if (conv != null) h += 'conv&ge;<span style="color:#fff">' + conv + '</span> &nbsp; ';
+        h += 'edge&ge;<span style="color:#fff">' + (edge*100).toFixed(1) + '%</span>';
+        h += '</span></div>';
+      });
+      adaptiveEl.innerHTML = h || '<div style="color:#555;font-size:11px">No adaptive state yet</div>';
+    }
+
+    // Per-strategy scorecard (7d)
+    var stratsEl = _el('brain-strategies');
+    if (stratsEl) {
+      var per = data.per_strategy_7d || {};
+      var clv = data.clv_by_strategy || {};
+      var mtm = data.mtm_by_strategy || {};
+      var keys = Object.keys(per);
+      if (keys.length === 0) {
+        stratsEl.innerHTML = '<div style="color:#555;font-size:11px;padding:10px">No settled trades in the last 7 days</div>';
+      } else {
+        var h = '<table style="width:100%;font-size:11px;border-collapse:collapse">';
+        h += '<tr style="color:#666;text-transform:uppercase;letter-spacing:0.5px;font-size:9px">';
+        h += '<th style="text-align:left;padding:8px 4px">Strategy</th>';
+        h += '<th style="text-align:center;padding:8px 4px">W-L</th>';
+        h += '<th style="text-align:center;padding:8px 4px">Win %</th>';
+        h += '<th style="text-align:center;padding:8px 4px">P&amp;L</th>';
+        h += '<th style="text-align:center;padding:8px 4px">CLV</th>';
+        h += '<th style="text-align:center;padding:8px 4px">MTM Worst</th>';
+        h += '</tr>';
+        keys.sort().forEach(function(k) {
+          var p = per[k];
+          var wr = p.win_rate != null ? (p.win_rate * 100).toFixed(0) + '%' : '--';
+          var wrColor = p.win_rate >= 0.55 ? '#00dc5a' : (p.win_rate >= 0.45 ? '#ccc' : '#ff5000');
+          var pnl = p.pnl != null ? '$' + p.pnl.toFixed(2) : '--';
+          var pnlColor = (p.pnl || 0) >= 0 ? '#00dc5a' : '#ff5000';
+          var clvVal = clv[k] ? clv[k].avg_cents.toFixed(1) + 'c' : '--';
+          var clvColor = clv[k] && clv[k].avg_cents >= 0 ? '#00dc5a' : '#ff5000';
+          var mtmVal = mtm[k] ? mtm[k].avg_worst_pct.toFixed(0) + '%' : '--';
+          h += '<tr style="border-top:1px solid #1a1a1a">';
+          h += '<td style="padding:8px 4px;color:#ccc;font-weight:600">' + k + '</td>';
+          h += '<td style="text-align:center;padding:8px 4px;color:#888">' + p.wins + '-' + p.losses + '</td>';
+          h += '<td style="text-align:center;padding:8px 4px;color:' + wrColor + ';font-weight:700">' + wr + '</td>';
+          h += '<td style="text-align:center;padding:8px 4px;color:' + pnlColor + '">' + pnl + '</td>';
+          h += '<td style="text-align:center;padding:8px 4px;color:' + clvColor + '">' + clvVal + '</td>';
+          h += '<td style="text-align:center;padding:8px 4px;color:#888">' + mtmVal + '</td>';
+          h += '</tr>';
+        });
+        h += '</table>';
+        stratsEl.innerHTML = h;
+      }
+    }
+
+    // Skip reasons (supervisor output)
+    var skipsEl = _el('brain-skips');
+    if (skipsEl) {
+      var skips = data.skip_reasons || {};
+      var stratKeys = Object.keys(skips);
+      if (stratKeys.length === 0) {
+        skipsEl.innerHTML = '<div style="color:#555;font-size:11px;padding:10px">No skip data today yet</div>';
+      } else {
+        var h = '';
+        stratKeys.forEach(function(strat) {
+          var reasons = skips[strat] || {};
+          var rKeys = Object.keys(reasons).sort(function(a, b) { return reasons[b] - reasons[a]; }).slice(0, 5);
+          if (rKeys.length === 0) return;
+          h += '<div style="background:#141414;border:1px solid #1f1f1f;border-radius:6px;padding:8px 10px">';
+          h += '<div style="color:#00d4ff;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.3px;margin-bottom:4px">' + strat + '</div>';
+          rKeys.forEach(function(r) {
+            h += '<div style="display:flex;justify-content:space-between;font-size:10px;color:#888;padding:2px 0"><span>' + r + '</span><span style="color:#ccc;font-weight:600">' + reasons[r] + '</span></div>';
+          });
+          h += '</div>';
+        });
+        skipsEl.innerHTML = h || '<div style="color:#555;font-size:11px;padding:10px">No skips recorded today</div>';
+      }
+    }
+
+    // Loss post-mortem
+    var lossesEl = _el('brain-losses');
+    if (lossesEl) {
+      var lc = data.loss_categories || {};
+      var lcKeys = Object.keys(lc).sort(function(a, b) { return lc[b] - lc[a]; });
+      if (lcKeys.length === 0) {
+        lossesEl.innerHTML = '<div style="color:#555;font-size:11px;padding:10px">No tagged losses yet</div>';
+      } else {
+        var total = 0;
+        lcKeys.forEach(function(k) { total += lc[k]; });
+        var labels = {
+          'late_fade':    {color:'#ffb400', emoji:'&#128075;', desc:'Was winning, lost it'},
+          'blowout':      {color:'#ff5000', emoji:'&#128165;', desc:'Collapsed fast'},
+          'ob_deceptive': {color:'#e040fb', emoji:'&#128270;', desc:'Orderbook lied'},
+          'stale_edge':   {color:'#ff8800', emoji:'&#9203;',   desc:'Model edge was stale'},
+          'coinflip':     {color:'#888',    emoji:'&#127922;', desc:'True variance'},
+          'unknown':      {color:'#666',    emoji:'&#10067;',  desc:'Uncategorized'},
+          'untagged':     {color:'#444',    emoji:'&#9898;',   desc:'Legacy / no data'},
+        };
+        var h = '';
+        lcKeys.forEach(function(k) {
+          var l = labels[k] || {color:'#666', emoji:'', desc:k};
+          var pct = ((lc[k] / total) * 100).toFixed(0);
+          h += '<div style="background:#141414;border-left:3px solid ' + l.color + ';padding:8px 12px;border-radius:4px">';
+          h += '<div style="display:flex;justify-content:space-between;align-items:center">';
+          h += '<span style="color:' + l.color + ';font-size:11px;font-weight:700">' + l.emoji + ' ' + k + '</span>';
+          h += '<span style="color:#ccc;font-size:12px;font-weight:700">' + lc[k] + ' <span style="color:#666;font-size:10px">(' + pct + '%)</span></span>';
+          h += '</div>';
+          h += '<div style="color:#666;font-size:9px;margin-top:2px">' + l.desc + '</div>';
+          h += '</div>';
+        });
+        lossesEl.innerHTML = h;
+      }
+    }
+
+    // Tune history (fields: strategy, key, old, new, wr, ts, reverted, post_wr)
+    var tunesEl = _el('brain-tunes');
+    if (tunesEl) {
+      var tunes = data.recent_tunes || [];
+      if (tunes.length === 0) {
+        tunesEl.innerHTML = '<div style="color:#555;font-size:11px;padding:10px">No tune history yet</div>';
+      } else {
+        var h = '';
+        tunes.forEach(function(t) {
+          var reverted = t.reverted;
+          var color = reverted ? '#ff5000' : '#00d4ff';
+          var oldV = t.old;
+          var newV = t.new;
+          var arrow = (newV > oldV) ? '&uarr;' : '&darr;';
+          var wrStr = t.wr != null ? (t.wr*100).toFixed(0) + '%' : '--';
+          var postStr = t.post_wr != null ? (t.post_wr*100).toFixed(0) + '%' : '';
+          h += '<div style="background:#141414;border-left:3px solid ' + color + ';padding:8px 12px;border-radius:4px;font-size:10px">';
+          h += '<div style="display:flex;justify-content:space-between;align-items:center">';
+          h += '<span style="color:#ccc;font-weight:600">' + (t.strategy || '?') + ' &middot; ' + (t.key || '?') + '</span>';
+          h += '<span style="color:' + color + ';font-weight:700">' + arrow + ' ' + oldV + '&rarr;' + newV + '</span>';
+          h += '</div>';
+          h += '<div style="color:#666;font-size:9px;margin-top:2px">at-tune wr ' + wrStr + (postStr ? ' &rarr; post ' + postStr : '') + (reverted ? ' &middot; <span style="color:#ff5000">REVERTED</span>' : '') + ' &middot; ' + (t.ts ? fmtTime(t.ts) : '') + '</div>';
+          h += '</div>';
+        });
+        tunesEl.innerHTML = h;
+      }
+    }
+
+    // Smart exit position peaks
+    var peaksEl = _el('brain-peaks');
+    if (peaksEl) {
+      var peaks = data.position_peaks || [];
+      if (peaks.length === 0) {
+        peaksEl.innerHTML = '<div style="color:#555;font-size:11px;padding:10px">No active positions being tracked</div>';
+      } else {
+        var h = '';
+        peaks.forEach(function(p) {
+          var entry = p.entry || 0;
+          var peak = p.peak || 0;
+          var run = peak - entry;
+          var runColor = run >= 10 ? '#00dc5a' : (run >= 0 ? '#ccc' : '#ff5000');
+          h += '<div style="background:#141414;border:1px solid #1f1f1f;border-radius:6px;padding:8px 10px;font-size:10px">';
+          h += '<div style="display:flex;justify-content:space-between;align-items:center">';
+          h += '<span style="color:#ccc;font-weight:600;font-family:monospace">' + p.ticker + '</span>';
+          h += '<span style="color:' + runColor + ';font-weight:700">' + entry + 'c &rarr; ' + peak + 'c (' + (run >= 0 ? '+' : '') + run + ')</span>';
+          h += '</div></div>';
+        });
+        peaksEl.innerHTML = h;
+      }
+    }
+  } catch(e) {
+    _setHTML('brain-insights', '<div style="color:#ff5000;font-size:11px">Error loading brain: ' + (e.message || e) + '</div>');
   }
 }
 
