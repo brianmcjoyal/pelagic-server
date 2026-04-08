@@ -10067,67 +10067,100 @@ def _generate_trends():
 def analytics_learning():
     """Return current learning state + all new telemetry (supervisor, CLV, MTM,
     loss post-mortems, consensus divergence, auto-tune history, per-strategy
-    stats). Used by the dashboard "Bot Brain" panel."""
-    settled_count = sum(1 for t in _TRADE_JOURNAL if t.get("result"))
-    with _LEARNING_STATE_LOCK:
-        _adaptive = dict(_LEARNING_STATE.get("adaptive", {}))
-        _tune_history = list(_LEARNING_STATE.get("tune_history", []))
-        _skip_reasons = dict(_LEARNING_STATE.get("skip_reasons", {}))
-        _clv_strat = dict(_LEARNING_STATE.get("clv_by_strategy", {}))
-        _mtm_strat = dict(_LEARNING_STATE.get("mtm_by_strategy", {}))
-        _loss_cats = dict(_LEARNING_STATE.get("loss_categories", {}))
-        _divergence = dict(_LEARNING_STATE.get("consensus_divergence", {}))
-        _version = _LEARNING_STATE.get("version", 0)
-        _last_run = _LEARNING_STATE.get("last_run")
-        _insights = list(_LEARNING_STATE.get("insights", []))
-        _params = dict(_LEARNING_STATE.get("parameters", {}))
-        _skip_updated = _LEARNING_STATE.get("skip_reasons_last_update")
+    stats). Used by the dashboard "Bot Brain" panel.
 
-    # Per-strategy rollup (win rate + CLV + sample) for the last 7 days
-    try:
-        _per_strat_rollup = _per_strategy_stats(days=7)
-    except Exception:
-        _per_strat_rollup = {}
+    Defensive against missing/old saved-state shapes — every section is its own
+    try/except so a single bad field can't 500 the whole panel.
+    """
+    def _safe_dict(v):
+        try:
+            return dict(v) if v else {}
+        except Exception:
+            return {}
 
-    # Most recent 10 tune adjustments (newest first)
-    _recent_tunes = list(reversed(_tune_history[-10:]))
+    def _safe_list(v):
+        try:
+            return list(v) if v else []
+        except Exception:
+            return []
 
-    # Position peaks (smart exit tracker) — convert to list for JSON
-    _peaks_snapshot = []
-    try:
-        for _tk, _p in list(_POSITION_PEAKS.items())[:30]:
-            _peaks_snapshot.append({
-                "ticker": _tk,
-                "entry": _p.get("entry"),
-                "peak": _p.get("peak"),
-                "first_seen": _p.get("first_seen"),
-            })
-    except Exception:
-        pass
-
-    return jsonify({
-        "version": _version,
-        "last_run": _last_run,
-        "insights": _insights,
-        "parameters": _params,
-        "trade_journal_size": len(_TRADE_JOURNAL),
-        "settled_count": settled_count,
-        # New telemetry surfaces
-        "adaptive": _adaptive,
-        "per_strategy_7d": _per_strat_rollup,
-        "skip_reasons": _skip_reasons,
-        "skip_reasons_last_update": _skip_updated,
-        "clv_by_strategy": _clv_strat,
-        "mtm_by_strategy": _mtm_strat,
-        "loss_categories": _loss_cats,
-        "consensus_divergence": _divergence,
-        "recent_tunes": _recent_tunes,
-        "position_peaks": _peaks_snapshot,
+    payload = {
+        "version": 0, "last_run": None, "insights": [], "parameters": {},
+        "trade_journal_size": 0, "settled_count": 0,
+        "adaptive": {}, "per_strategy_7d": {}, "skip_reasons": {},
+        "skip_reasons_last_update": None, "clv_by_strategy": {},
+        "mtm_by_strategy": {}, "loss_categories": {}, "consensus_divergence": {},
+        "recent_tunes": [], "position_peaks": [],
         "config": {
             "sport_exposure_cap_pct": BOT_CONFIG.get("sport_exposure_cap_pct"),
             "smart_exit_enabled": BOT_CONFIG.get("smart_exit_enabled"),
         },
-    })
+        "errors": [],
+    }
+
+    # Settled count + journal size
+    try:
+        payload["settled_count"] = sum(1 for t in _TRADE_JOURNAL if t.get("result"))
+        payload["trade_journal_size"] = len(_TRADE_JOURNAL)
+    except Exception as _e:
+        payload["errors"].append(f"journal: {_e}")
+
+    # Snapshot _LEARNING_STATE under the lock (if the lock exists)
+    try:
+        _lock = globals().get("_LEARNING_STATE_LOCK")
+        if _lock is not None:
+            with _lock:
+                _ls = dict(_LEARNING_STATE)
+        else:
+            _ls = dict(_LEARNING_STATE)
+    except Exception as _e:
+        _ls = {}
+        payload["errors"].append(f"snapshot: {_e}")
+
+    payload["version"]                 = _ls.get("version", 0) or 0
+    payload["last_run"]                = _ls.get("last_run")
+    payload["insights"]                = _safe_list(_ls.get("insights"))
+    payload["parameters"]              = _safe_dict(_ls.get("parameters"))
+    payload["adaptive"]                = _safe_dict(_ls.get("adaptive"))
+    payload["skip_reasons"]            = _safe_dict(_ls.get("skip_reasons"))
+    payload["skip_reasons_last_update"]= _ls.get("skip_reasons_last_update")
+    payload["clv_by_strategy"]         = _safe_dict(_ls.get("clv_by_strategy"))
+    payload["mtm_by_strategy"]         = _safe_dict(_ls.get("mtm_by_strategy"))
+    payload["loss_categories"]         = _safe_dict(_ls.get("loss_categories"))
+    payload["consensus_divergence"]    = _safe_dict(_ls.get("consensus_divergence"))
+
+    # Per-strategy rollup (last 7 days)
+    try:
+        payload["per_strategy_7d"] = _per_strategy_stats(days=7)
+    except Exception as _e:
+        payload["errors"].append(f"per_strategy: {_e}")
+
+    # Most recent 10 tune adjustments (newest first)
+    try:
+        _hist = _safe_list(_ls.get("tune_history"))
+        payload["recent_tunes"] = list(reversed(_hist[-10:]))
+    except Exception as _e:
+        payload["errors"].append(f"tune_history: {_e}")
+
+    # Position peaks (smart exit tracker)
+    try:
+        _peaks_snap = []
+        _peaks = globals().get("_POSITION_PEAKS") or {}
+        for _tk, _p in list(_peaks.items())[:30]:
+            try:
+                _peaks_snap.append({
+                    "ticker": _tk,
+                    "entry": _p.get("entry"),
+                    "peak":  _p.get("peak"),
+                    "first_seen": _p.get("first_seen"),
+                })
+            except Exception:
+                continue
+        payload["position_peaks"] = _peaks_snap
+    except Exception as _e:
+        payload["errors"].append(f"peaks: {_e}")
+
+    return jsonify(payload)
 
 
 @app.route("/analytics")
