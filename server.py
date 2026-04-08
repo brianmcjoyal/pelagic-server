@@ -79,6 +79,8 @@ BOT_CONFIG = {
     "blocked_categories": ["weather", "golf", "politics", "economics", "nfl"],  # block proven losers: golf 0/18, politics 0/4, economics 0/2, NFL offseason
     "blocked_keywords": ["title holder", "title on dec", "prime minister", "next president", "ipo first", "gas price", "billboard", "netflix", "spotify", "golf", "pga", "lpga", "masters", "election", "congress", "senate", "governor"],  # block long-dated + losing categories
     "moonshark_enabled": True,  # MoonShark longshot sniper toggle
+    "sport_exposure_cap_pct": 0.40, # max 40% of daily budget on any single sport (NBA correlation, MLB night, etc.)
+    "smart_exit_enabled": True,     # take-profit / trailing-stop / stop-loss on live game positions
 }
 
 BOT_STATE = {
@@ -2892,6 +2894,69 @@ def _quota_shortfall():
     return max(0, DAILY_BET_FLOOR - _total_bets_today())
 
 
+# ─── Sport-level exposure cap ───
+# Correlated bets within a single sport (e.g. 6 NBA games on a given night)
+# can wipe out a week if the model is wrong on a systemic edge. Cap exposure
+# per sport to SPORT_EXPOSURE_CAP_PCT of max_daily_usd.
+_SPORT_PREFIX_MAP = {
+    "KXNBA":   "nba",   "KXWNBA":  "wnba",
+    "KXNHL":   "nhl",
+    "KXMLB":   "mlb",
+    "KXNFL":   "nfl",
+    "KXNCAA":  "ncaa",
+    "KXEPL":   "soccer","KXMLS":  "soccer","KXSOCCER":"soccer",
+    "KXUFC":   "combat","KXMMA":   "combat","KXBOX":  "combat",
+    "KXATP":   "tennis","KXWTA":  "tennis",
+    "KXPGA":   "golf",
+    "KXKBL":   "kbo",
+}
+
+def _sport_from_ticker(ticker):
+    """Map a Kalshi ticker to a high-level sport bucket (or None)."""
+    if not ticker:
+        return None
+    t = ticker.upper()
+    for prefix, sport in _SPORT_PREFIX_MAP.items():
+        if t.startswith(prefix):
+            return sport
+    return None
+
+
+def _current_sport_exposure():
+    """Return {sport: usd_spent_today} across all strategies using today's trades."""
+    exposure = {}
+    trade_buckets = [
+        "trades_today", "snipe_trades_today", "moonshark_trades_today",
+        "closegame_trades_today", "floor_trades_today",
+        "swing_trades_today", "goalie_trades_today",
+    ]
+    for bucket in trade_buckets:
+        for t in BOT_STATE.get(bucket, []) or []:
+            sport = _sport_from_ticker(t.get("ticker") or "")
+            if not sport:
+                continue
+            cost = float(t.get("cost_usd") or t.get("cost") or 0.0)
+            exposure[sport] = exposure.get(sport, 0.0) + cost
+    return exposure
+
+
+def _sport_cap_ok(ticker, proposed_cost_usd):
+    """Return (ok, current_sport_exposure, cap_usd).
+
+    ok is False when proposed_cost would push that sport past its cap.
+    Caller should _record_skip("<strategy>", "sport_cap") on False.
+    """
+    sport = _sport_from_ticker(ticker)
+    if not sport:
+        return True, 0.0, 0.0
+    cap_pct = float(BOT_CONFIG.get("sport_exposure_cap_pct", 0.40) or 0.40)
+    cap_usd = float(BOT_CONFIG.get("max_daily_usd", 125.0) or 125.0) * cap_pct
+    current = _current_sport_exposure().get(sport, 0.0)
+    if current + float(proposed_cost_usd or 0) > cap_usd:
+        return False, current, cap_usd
+    return True, current, cap_usd
+
+
 def _floor_mode_active():
     """True if we should relax filters because we're behind the daily floor.
 
@@ -3346,6 +3411,19 @@ def live_game_snipe():
                     if conviction < _min_conv_snipe:
                         _ms_reasons["low_conviction_ob"] = _ms_reasons.get("low_conviction_ob", 0) + 1
                         continue
+
+                # Sport-level exposure cap — block correlated over-exposure
+                try:
+                    _cap_ok, _cap_cur, _cap_max = _sport_cap_ok(ticker, (price * count) / 100.0)
+                    if not _cap_ok:
+                        _ms_reasons["sport_cap"] = _ms_reasons.get("sport_cap", 0) + 1
+                        _log_activity(
+                            f"SNIPE SKIP: {ticker} — sport cap hit (${_cap_cur:.2f}/${_cap_max:.2f})",
+                            "info"
+                        )
+                        continue
+                except Exception:
+                    pass
 
                 result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_snipe_ob_pre)
                 success = "error" not in result
@@ -4084,6 +4162,19 @@ def moonshark_snipe():
                 if not _check_and_claim_event(event_key):
                     _log_activity(f"MOONSHARK SKIP: {ticker} — already bet this event", "info")
                     continue
+
+                # Sport-level exposure cap — block correlated over-exposure
+                try:
+                    _cap_ok, _cap_cur, _cap_max = _sport_cap_ok(ticker, cost_usd)
+                    if not _cap_ok:
+                        _ms_reasons["sport_cap"] = _ms_reasons.get("sport_cap", 0) + 1
+                        _log_activity(
+                            f"MOONSHARK SKIP: {ticker} — sport cap hit (${_cap_cur:.2f}/${_cap_max:.2f})",
+                            "info"
+                        )
+                        continue
+                except Exception:
+                    pass
 
                 result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob)
                 success = "error" not in result
@@ -7050,10 +7141,81 @@ def _learning_engine():
                 insights.append(f"⚠️  CLV- strategy: {strat} avg {avg:.1f}c over {b['count']} trades")
     _LEARNING_STATE["clv_by_strategy"] = clv_summary
 
+    # 10. Mark-to-market entry timing skill (per strategy)
+    # Positions that draw down immediately after entry signal bad timing even
+    # if a few eventually bounce back and settle as wins. Lower avg mtm_worst_pct
+    # = better entry timing.
+    mtm_by_strat = {}
+    for t in settled:
+        strat = t.get("strategy") or "unknown"
+        worst = t.get("mtm_worst_pct")
+        best = t.get("mtm_best_pct")
+        if worst is None or best is None:
+            continue
+        b = mtm_by_strat.setdefault(strat, {"worst_sum": 0, "best_sum": 0, "n": 0})
+        b["worst_sum"] += worst
+        b["best_sum"] += best
+        b["n"] += 1
+    mtm_summary = {}
+    for strat, b in mtm_by_strat.items():
+        if b["n"] < 5:
+            continue
+        avg_worst = round(b["worst_sum"] / b["n"], 1)
+        avg_best = round(b["best_sum"] / b["n"], 1)
+        mtm_summary[strat] = {
+            "avg_worst_pct": avg_worst,
+            "avg_best_pct": avg_best,
+            "sample_size": b["n"],
+        }
+        if avg_worst <= -25 and b["n"] >= 10:
+            insights.append(f"⏰ Bad entry timing: {strat} avg -{abs(avg_worst)}% drawdown on entry")
+    _LEARNING_STATE["mtm_by_strategy"] = mtm_summary
+
+    # 11. Loss post-mortem breakdown
+    loss_tags = {}
+    for t in settled:
+        if t.get("result") != "loss":
+            continue
+        tag = t.get("loss_category") or "untagged"
+        loss_tags[tag] = loss_tags.get(tag, 0) + 1
+    _LEARNING_STATE["loss_categories"] = loss_tags
+    if loss_tags:
+        top_loss = max(loss_tags.items(), key=lambda x: x[1])
+        if top_loss[1] >= 5:
+            insights.append(f"🩹 Top loss reason: {top_loss[0]} ({top_loss[1]}x)")
+
+    # 12. Consensus divergence detection — do trades with big model-vs-market
+    # gap actually win more? If yes, boost; if no, model is overfitting.
+    consensus_buckets = {"tight": [], "medium": [], "wide": []}
+    for t in settled:
+        espn = t.get("espn_edge")
+        if espn is None:
+            continue
+        bucket = "tight" if abs(espn) < 0.05 else ("medium" if abs(espn) < 0.12 else "wide")
+        consensus_buckets[bucket].append(t)
+    divergence_stats = {}
+    for name, trades in consensus_buckets.items():
+        if len(trades) < 5:
+            continue
+        w = sum(1 for t in trades if t["result"] == "win")
+        divergence_stats[name] = {
+            "win_rate": round(w / len(trades), 3),
+            "sample_size": len(trades),
+        }
+    _LEARNING_STATE["consensus_divergence"] = divergence_stats
+    # If "wide" divergence wins MORE than "tight" -> model is alpha; else overfitting
+    if "wide" in divergence_stats and "tight" in divergence_stats:
+        _wr_wide = divergence_stats["wide"]["win_rate"]
+        _wr_tight = divergence_stats["tight"]["win_rate"]
+        if _wr_wide >= _wr_tight + 0.05:
+            insights.append(f"🎯 Wide divergence edge real: {_wr_wide:.0%} vs tight {_wr_tight:.0%}")
+        elif _wr_wide <= _wr_tight - 0.05:
+            insights.append(f"⚠️  Model overfitting: wide divergence LOSES ({_wr_wide:.0%} vs {_wr_tight:.0%})")
+
     # Update state
     _LEARNING_STATE["version"] = _LEARNING_STATE.get("version", 0) + 1
     _LEARNING_STATE["last_run"] = datetime.datetime.utcnow().isoformat() + "Z"
-    _LEARNING_STATE["insights"] = insights[-20:]  # keep last 20
+    _LEARNING_STATE["insights"] = insights[-25:]  # keep last 25 (grew from 20)
 
     _log_activity(
         f"🧠 Learning v{_LEARNING_STATE['version']}: {len(settled)} trades analyzed, "
@@ -7618,6 +7780,13 @@ def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, stra
         "clv_entry_price": price_cents,       # price we paid at entry
         "clv_closing_price": None,            # filled on settlement: last traded price before close
         "clv_cents": None,                    # closing_price - entry_price (positive = good entry)
+        # --- Mark-to-market tracking (filled by _smart_position_management) ---
+        "mtm_best_price": price_cents,        # highest mid-hold price seen
+        "mtm_worst_price": price_cents,       # lowest mid-hold price seen
+        "mtm_best_pct": 0,                    # best pct gain during hold
+        "mtm_worst_pct": 0,                   # worst pct drawdown during hold
+        # --- Loss post-mortem (filled on settlement for losses only) ---
+        "loss_category": None,                # one of: ob_deceptive / stale_edge / late_fade / blowout / coinflip
     }
 
 
@@ -7672,6 +7841,34 @@ def _journal_settle(ticker, won, pnl_usd, closing_price_cents=None):
                         rec["clv_cents"] = entry_price - closing_price_cents
                     else:
                         rec["clv_cents"] = closing_price_cents - entry_price
+
+            # Loss post-mortem tagging — categorize the *reason* the trade lost
+            # so the learning engine can spot systemic model failures.
+            try:
+                if not won and pnl_usd < -0.005:
+                    _mtm_best = rec.get("mtm_best_pct") or 0
+                    _mtm_worst = rec.get("mtm_worst_pct") or 0
+                    _entry = rec.get("price_cents") or 0
+                    _ob_imb = rec.get("ob_imbalance")
+                    _espn = rec.get("espn_edge")
+
+                    if _mtm_best >= 20 and _mtm_worst >= -15:
+                        rec["loss_category"] = "late_fade"         # was winning, lost it
+                    elif _mtm_worst <= -40 and (rec.get("hold_duration_mins") or 999) <= 15:
+                        rec["loss_category"] = "blowout"           # collapsed fast
+                    elif _ob_imb is not None and _entry and (
+                        (rec.get("side") == "yes" and _ob_imb > 0.3) or
+                        (rec.get("side") == "no" and _ob_imb < -0.3)
+                    ):
+                        rec["loss_category"] = "ob_deceptive"      # book said buy, lost anyway
+                    elif _espn and abs(_espn) >= 0.10:
+                        rec["loss_category"] = "stale_edge"        # model had edge, outcome disagreed
+                    elif abs(_mtm_best) < 10 and abs(_mtm_worst) < 10:
+                        rec["loss_category"] = "coinflip"          # tiny variance outcome
+                    else:
+                        rec["loss_category"] = "unknown"
+            except Exception:
+                pass
             break
 
 
@@ -8748,6 +8945,12 @@ def _ensure_bg_thread():
                 # Blowout exit every 30s (every 3rd cycle)
                 if _cg_cycle % 3 == 0:
                     _blowout_exit()
+                # Smart position management every 30s (take profit / trailing / stop-loss)
+                if _cg_cycle % 3 == 0:
+                    try:
+                        _smart_position_management()
+                    except Exception as _sme:
+                        print(f"[SMART_EXIT] Error: {_sme}")
                 # Game monitor every 60s (every 6th cycle)
                 if _cg_cycle % 6 == 0:
                     _monitor_live_games()
@@ -12499,6 +12702,162 @@ def _check_arbitrage():
                     print(f"[ARB] Order error: {e}")
 
     return arbs
+
+
+# ─── Smart position management (take-profit / trailing stop / stop-loss) ──
+# Runs alongside _blowout_exit on live game positions. Calibrated for
+# prediction-market dynamics (NOT stocks) — only fires when price action
+# gives us a clear signal independent of game score.
+_POSITION_PEAKS = {}  # ticker -> {"peak": int_cents, "first_seen": iso, "entry": int_cents}
+_PARTIAL_SOLD = set()  # tickers where a partial take-profit already fired
+
+def _smart_position_management():
+    """Apply take-profit / trailing-stop / stop-loss to LIVE game positions.
+
+    Rules (all on bot-placed game positions only):
+      1. TAKE PROFIT: price >= 85c -> sell 100% (above 85c has terrible R/R)
+                      price >= 75c + entry <= 60c -> sell 50% once
+      2. TRAILING STOP: peak >= 65c + price drops 15c+ from peak -> sell 50%
+      3. STOP LOSS: entry >= 40c + price drops to entry * 0.35 -> salvage 100%
+
+    Never sells positions that are already resting for arbitrage reasons,
+    and skips anything closing within 5 min (let settlement do its work).
+    """
+    if not BOT_CONFIG.get("enabled"):
+        return
+    if not BOT_CONFIG.get("smart_exit_enabled", True):
+        return
+
+    try:
+        positions = check_position_prices()
+    except Exception:
+        return
+
+    _game_prefixes = ("KXNBA", "KXNHL", "KXMLB", "KXNFL", "KXNCAA", "KXWNBA",
+                      "KXEPL", "KXMLS", "KXUFC", "KXMMA", "KXATP", "KXWTA",
+                      "KXPGA", "KXKBL", "KXSOCCER")
+
+    now_iso = datetime.datetime.utcnow().isoformat() + "Z"
+
+    for pos in positions:
+        ticker = (pos.get("ticker") or "").upper()
+        title = pos.get("title") or ticker
+        side = pos.get("side", "yes")
+        count = int(pos.get("count", 0) or 0)
+        current = pos.get("current_price")
+        entry = pos.get("entry_price")
+        placed_by = pos.get("placed_by")
+
+        if count <= 0 or not current or not entry:
+            continue
+        if placed_by == "you":
+            continue  # never auto-exit manual trades
+        if not any(ticker.startswith(p) for p in _game_prefixes):
+            continue
+
+        # Skip if settling very soon — let the natural outcome win
+        _close = pos.get("close_time") or ""
+        if _close:
+            try:
+                _ct = datetime.datetime.fromisoformat(_close.replace("Z", "+00:00")).replace(tzinfo=None)
+                _secs = (_ct - datetime.datetime.utcnow()).total_seconds()
+                if 0 < _secs < 300:
+                    continue
+            except Exception:
+                pass
+
+        # Update peak tracker
+        peak_entry = _POSITION_PEAKS.setdefault(ticker, {
+            "peak": current, "first_seen": now_iso, "entry": entry,
+        })
+        if current > peak_entry["peak"]:
+            peak_entry["peak"] = current
+        peak = peak_entry["peak"]
+
+        # Update mark-to-market tracking on the journal record so the learning
+        # engine can see intra-hold drawdowns/rallies even for positions that
+        # eventually settled back to flat.
+        try:
+            with _TRADE_JOURNAL_LOCK:
+                for _rec in reversed(_TRADE_JOURNAL):
+                    if _rec.get("ticker") == ticker and _rec.get("result") is None:
+                        _entry_p = _rec.get("price_cents") or entry or current
+                        if _entry_p:
+                            _pct = int(round((current - _entry_p) / max(1, _entry_p) * 100))
+                            if current > (_rec.get("mtm_best_price") or 0):
+                                _rec["mtm_best_price"] = current
+                                _rec["mtm_best_pct"] = max(_rec.get("mtm_best_pct", 0), _pct)
+                            if current < (_rec.get("mtm_worst_price") or 99999):
+                                _rec["mtm_worst_price"] = current
+                                _rec["mtm_worst_pct"] = min(_rec.get("mtm_worst_pct", 0), _pct)
+                        break
+        except Exception:
+            pass
+
+        action = None
+        reason = None
+        sell_count = count
+        sell_price = current
+
+        # 1. TAKE PROFIT ladder
+        if current >= 85:
+            action = "take_profit_full"
+            reason = f"ceiling @ {current}c (entry {entry}c)"
+            sell_price = max(1, current - 2)
+        elif current >= 75 and entry <= 60 and ticker not in _PARTIAL_SOLD:
+            action = "take_profit_partial"
+            reason = f"+{current - entry}c from entry"
+            sell_count = max(1, count // 2)
+            sell_price = max(1, current - 2)
+
+        # 2. TRAILING STOP (only if we had a real run up)
+        elif peak >= 65 and current <= peak - 15 and current > entry:
+            action = "trailing_stop"
+            reason = f"peak {peak}c -> {current}c (entry {entry}c)"
+            sell_count = max(1, count // 2)
+            sell_price = max(1, current - 2)
+
+        # 3. STOP LOSS (only for positions with room to fall)
+        elif entry >= 40 and current <= max(3, int(entry * 0.35)):
+            action = "stop_loss"
+            reason = f"{entry}c -> {current}c ({int((current - entry) / max(1, entry) * 100)}%)"
+            sell_price = max(1, current - 1)
+
+        if not action:
+            continue
+
+        _log_activity(
+            f"🛡️  {action.upper()}: {ticker} x{sell_count} @ {sell_price}c — {reason} | {title[:40]}",
+            "info"
+        )
+
+        try:
+            result = sell_kalshi_position(ticker, side, sell_price, count=sell_count, resting=True)
+            if result and "error" not in result:
+                if action == "take_profit_partial":
+                    _PARTIAL_SOLD.add(ticker)
+                # Journal as an exit signal for learning
+                try:
+                    _pnl_cents = (sell_price - entry) * sell_count
+                    _log_activity(
+                        f"🛡️  EXIT PLACED: {ticker} {sell_count}x @ {sell_price}c = ${_pnl_cents/100:+.2f} pnl (resting)",
+                        "success" if _pnl_cents >= 0 else "warning"
+                    )
+                except Exception:
+                    pass
+                _save_state()
+        except Exception as e:
+            print(f"[SMART_EXIT] Error on {ticker}: {e}")
+
+    # Cleanup: drop peak entries for closed positions
+    try:
+        active_tickers = {(p.get("ticker") or "").upper() for p in positions if int(p.get("count", 0) or 0) > 0}
+        for _stale in list(_POSITION_PEAKS.keys()):
+            if _stale not in active_tickers:
+                _POSITION_PEAKS.pop(_stale, None)
+                _PARTIAL_SOLD.discard(_stale)
+    except Exception:
+        pass
 
 
 def _blowout_exit():
