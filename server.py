@@ -181,6 +181,8 @@ _LEARNING_STATE = {
     # Adaptive thresholds — updated by _auto_tune_thresholds() based on rolling
     # performance. All strategies read these at decision time so the bot
     # tightens up after bad days and loosens up after good ones.
+    # Each strategy now tunes INDEPENDENTLY based on its own 7-day win rate so
+    # a hot moonshark doesn't pull the sniper along and vice versa.
     "adaptive": {
         "min_conviction_sniper": 4,
         "min_conviction_moonshark": 4,
@@ -188,11 +190,33 @@ _LEARNING_STATE = {
         "min_edge_moonshark": 0.05,
         "min_edge_closegame": 0.03,
         "min_edge_floor": 0.02,
+        "min_edge_swing": 0.06,
+        "min_edge_goalie": 0.05,
         "last_tune": None,
         "last_win_rate_7d": None,
         "total_tunes": 0,
     },
+    # Per-strategy rolling performance snapshots (updated by _auto_tune_thresholds).
+    # Keyed by strategy name (sniper, moonshark, closegame, swing, goalie, floor).
+    "per_strategy": {},
+    # History of tune decisions so we can roll back a bad change. Each entry:
+    # {ts, strategy, key, old, new, wr_at_tune}. Latest entry can be reverted if
+    # the NEXT window shows a regression.
+    "tune_history": [],
+    # Supervisor telemetry — aggregated skip-reason counters per strategy.
+    # Updated by each strategy through _record_skips(). Reset daily.
+    "skip_reasons": {},
+    "skip_reasons_date": None,
+    # CLV (Closing Line Value) rollup per strategy. Positive = we consistently
+    # get better prices than the market closes at = our strategy has real edge.
+    "clv_by_strategy": {},
 }
+
+# Skip-reason counters live outside _LEARNING_STATE so the strategies can
+# increment them with minimal ceremony. They get folded into the learning
+# state every time the supervisor runs.
+_SKIP_REASONS_TODAY = {}  # {strategy: {reason: count}}
+_SKIP_REASONS_LOCK = None  # lazy-init (threading not imported yet at this point)
 
 def _save_state():
     """Persist trade data to disk.
@@ -2768,6 +2792,8 @@ import threading as _threading
 _EVENT_LOCK = _threading.Lock()
 _BOT_STATE_LOCK = _threading.Lock()
 _TRADE_JOURNAL_LOCK = _threading.Lock()  # protects _TRADE_JOURNAL append/iterate from cross-thread RuntimeError
+_SKIP_REASONS_LOCK = _threading.Lock()   # protects _SKIP_REASONS_TODAY from background + learning thread races
+_LEARNING_STATE_LOCK = _threading.Lock() # protects _LEARNING_STATE updates from the dedicated learning thread
 _EVENTS_BET_TODAY = set()  # shared across all strategies
 _similarity_local = _threading.local()
 
@@ -3402,6 +3428,15 @@ def live_game_snipe():
         _log_activity(f"🎯 Sniper round: {len(snipes)} trades, ${total_cost:.2f} invested, potential +${total_potential:.2f}", "success")
         # Persist updated journal & snipe counters after snipe round
         _save_state()
+
+    # Fold local rejection counters into global skip-reason telemetry so the
+    # supervisor engine can see why live_sniper passed (even on non-dry rounds).
+    try:
+        for _reason, _count in _ms_reasons.items():
+            for _ in range(int(_count)):
+                _record_skip("live_sniper", _reason)
+    except Exception:
+        pass
 
     return snipes
 
@@ -4130,6 +4165,12 @@ def moonshark_snipe():
         except Exception as e:
             print(f"[MOONSHARK] Error scanning source: {e}")
             continue
+
+    # Fold local rejection counters into the global skip-reason telemetry
+    # so the supervisor engine sees them every cycle, not just on dry rounds.
+    for _reason, _count in _ms_reasons.items():
+        for _ in range(int(_count)):
+            _record_skip("moonshark", _reason)
 
     if snipes:
         total_cost = sum(s["cost"] for s in snipes)
@@ -6978,6 +7019,37 @@ def _learning_engine():
     mtype_weights = _compute_bucket_stats(settled, lambda t: t.get("market_type", "unknown"))
     _LEARNING_STATE["parameters"]["market_type_weights"] = mtype_weights
 
+    # 9. CLV (closing line value) by strategy — strategies with positive CLV
+    # are genuinely skilled even if variance hides it. Use this as a secondary
+    # signal when win rate sample is small.
+    clv_by_strat = {}
+    for t in settled:
+        clv = t.get("clv_cents")
+        if clv is None:
+            continue
+        strat = t.get("strategy") or "unknown"
+        bucket = clv_by_strat.setdefault(strat, {"sum": 0.0, "count": 0, "positive": 0})
+        bucket["sum"] += clv
+        bucket["count"] += 1
+        if clv > 0:
+            bucket["positive"] += 1
+    clv_summary = {}
+    for strat, b in clv_by_strat.items():
+        if b["count"] == 0:
+            continue
+        avg = b["sum"] / b["count"]
+        clv_summary[strat] = {
+            "avg_cents": round(avg, 2),
+            "sample_size": b["count"],
+            "positive_pct": round(b["positive"] / b["count"] * 100, 1),
+        }
+        if b["count"] >= 10:
+            if avg >= 1.0:
+                insights.append(f"🎯 CLV+ strategy: {strat} avg {avg:.1f}c over {b['count']} trades")
+            elif avg <= -1.0:
+                insights.append(f"⚠️  CLV- strategy: {strat} avg {avg:.1f}c over {b['count']} trades")
+    _LEARNING_STATE["clv_by_strategy"] = clv_summary
+
     # Update state
     _LEARNING_STATE["version"] = _LEARNING_STATE.get("version", 0) + 1
     _LEARNING_STATE["last_run"] = datetime.datetime.utcnow().isoformat() + "Z"
@@ -6986,88 +7058,292 @@ def _learning_engine():
     _log_activity(
         f"🧠 Learning v{_LEARNING_STATE['version']}: {len(settled)} trades analyzed, "
         f"{len([i for i in insights if '✅' in i])} boosted, "
-        f"{len([i for i in insights if '🚫' in i])} blocked",
+        f"{len([i for i in insights if '🚫' in i])} blocked, "
+        f"{len([i for i in insights if '🎯' in i])} CLV+",
         "info"
     )
     _save_state()
 
 
-def _auto_tune_thresholds():
-    """Adaptive threshold tuner — adjusts live filter strictness based on
-    recent performance. Runs alongside the learning engine every ~5-10 min.
-
-    Rules (rolling 7-day window):
-      - Win rate > 55%  → LOOSEN filters (lower conviction/edge minimums) to
-                          place more bets and compound faster
-      - Win rate 40-55% → hold steady
-      - Win rate 25-40% → tighten slightly
-      - Win rate < 25%  → tighten hard, demand higher edge + conviction
-      - If total bets in window < 10 → also loosen (need volume to learn)
+def _supervisor_engine():
+    """Runs alongside the learning engine. Rolls the latest skip-reason counters
+    into _LEARNING_STATE so the dashboard can show *why* strategies aren't
+    firing, not just whether they are. Also logs a concise summary each run.
     """
     try:
-        cutoff = (datetime.datetime.utcnow() - datetime.timedelta(days=7)).isoformat() + "Z"
-        recent = [t for t in _TRADE_JOURNAL if t.get("result") and (t.get("settlement_time") or "") >= cutoff]
-        wins = sum(1 for t in recent if t.get("result") == "win")
-        losses = sum(1 for t in recent if t.get("result") == "loss")
-        total = wins + losses
+        _reset_skip_reasons_if_new_day()
+        snap = _snapshot_skip_reasons()
+        with _LEARNING_STATE_LOCK:
+            _LEARNING_STATE["skip_reasons"] = snap
+            _LEARNING_STATE["skip_reasons_last_update"] = datetime.datetime.utcnow().isoformat() + "Z"
+
+        # Log the top 3 reasons per strategy (only if anything changed today)
+        for strat, reasons in snap.items():
+            if not reasons:
+                continue
+            top = sorted(reasons.items(), key=lambda x: -x[1])[:3]
+            _summary = ", ".join(f"{k}:{v}" for k, v in top)
+            _log_activity(f"👁️  SUPERVISOR [{strat}] top skips: {_summary}", "info")
+    except Exception as e:
+        print(f"[SUPERVISOR] Error: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Skip-reason telemetry — lets the supervisor engine see WHY strategies aren't
+# trading, not just their hit count. Populated by each *_snipe() function via
+# _record_skip(). Reset daily inside _supervisor_engine().
+# ---------------------------------------------------------------------------
+
+def _record_skip(strategy, reason):
+    """Thread-safe counter bump for 'strategy skipped a candidate because ...'.
+
+    Call this instead of the scattered `_ms_reasons[...] += 1` pattern so the
+    supervisor engine can aggregate across strategies and render the picture
+    in /status.
+    """
+    try:
+        with _SKIP_REASONS_LOCK:
+            bucket = _SKIP_REASONS_TODAY.setdefault(strategy, {})
+            bucket[reason] = bucket.get(reason, 0) + 1
+    except Exception:
+        pass
+
+
+def _snapshot_skip_reasons():
+    """Return a copy of today's skip counters under the lock."""
+    with _SKIP_REASONS_LOCK:
+        return {s: dict(r) for s, r in _SKIP_REASONS_TODAY.items()}
+
+
+def _reset_skip_reasons_if_new_day():
+    """Called by the supervisor engine on every run. Clears counters at 00:00 PT."""
+    today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+    with _LEARNING_STATE_LOCK:
+        last_day = _LEARNING_STATE.get("skip_reasons_date")
+    if last_day == today:
+        return
+    with _SKIP_REASONS_LOCK:
+        _SKIP_REASONS_TODAY.clear()
+    with _LEARNING_STATE_LOCK:
+        _LEARNING_STATE["skip_reasons_date"] = today
+        _LEARNING_STATE["skip_reasons"] = {}
+
+
+# ---------------------------------------------------------------------------
+# Per-strategy performance helper — used by BOTH the learning engine and the
+# auto-tuner. Returns {strategy: {wins, losses, win_rate, clv_avg, sample}}
+# ---------------------------------------------------------------------------
+
+def _per_strategy_stats(days=7):
+    """Compute rolling stats by strategy over the last N days.
+
+    Each strategy bucket contains win_rate, clv_avg, sample_size, pnl. Used
+    by the auto-tuner to tighten/loosen each strategy's thresholds INDEPENDENTLY
+    and by the learning engine to surface CLV-positive strategies.
+    """
+    cutoff = (datetime.datetime.utcnow() - datetime.timedelta(days=days)).isoformat() + "Z"
+    with _TRADE_JOURNAL_LOCK:
+        journal_snap = list(_TRADE_JOURNAL)
+    stats = {}
+    for t in journal_snap:
+        if not t.get("result"):
+            continue
+        if (t.get("settlement_time") or "") < cutoff:
+            continue
+        strat = t.get("strategy") or "unknown"
+        s = stats.setdefault(strat, {
+            "wins": 0, "losses": 0, "pnl": 0.0, "clv_sum": 0, "clv_count": 0,
+        })
+        if t["result"] == "win":
+            s["wins"] += 1
+        elif t["result"] == "loss":
+            s["losses"] += 1
+        s["pnl"] += float(t.get("pnl_usd") or 0)
+        _clv = t.get("clv_cents")
+        if _clv is not None:
+            s["clv_sum"] += _clv
+            s["clv_count"] += 1
+    out = {}
+    for strat, s in stats.items():
+        total = s["wins"] + s["losses"]
+        out[strat] = {
+            "wins": s["wins"],
+            "losses": s["losses"],
+            "sample_size": total,
+            "win_rate": round(s["wins"] / total, 4) if total else None,
+            "pnl": round(s["pnl"], 2),
+            "clv_avg": round(s["clv_sum"] / s["clv_count"], 2) if s["clv_count"] else None,
+            "clv_count": s["clv_count"],
+        }
+    return out
+
+
+def _auto_tune_thresholds():
+    """Per-strategy adaptive threshold tuner.
+
+    Unlike the old version (which applied the same delta to every strategy),
+    this now looks at each strategy's OWN 7-day win rate and CLV, and adjusts
+    only that strategy's knobs. A hot moonshark no longer drags sniper along
+    and vice versa. Every change is recorded in tune_history so a subsequent
+    run can roll it back if it made things worse.
+
+    Rules (per strategy, rolling 7 days):
+      - wr > 55% OR CLV_avg >= +1c     → LOOSEN (-1 conviction, -0.01 edge)
+      - 40% <= wr <= 55%               → HOLD
+      - 25% <= wr < 40%                → TIGHTEN (+1 conviction, +0.01 edge)
+      - wr < 25%                       → TIGHTEN HARD (+2 conviction, +0.02 edge)
+      - sample < 10                    → LOOSEN (need volume)
+    """
+    try:
         adaptive = _LEARNING_STATE.setdefault("adaptive", {})
+        stats = _per_strategy_stats(days=7)
+        _LEARNING_STATE["per_strategy"] = stats
 
-        if total < 10:
-            # Not enough data — bias toward loosening so we generate more
-            delta = -1  # loosen
-            reason = f"need volume ({total} settled in 7d)"
-        else:
-            wr = wins / total
-            adaptive["last_win_rate_7d"] = round(wr, 4)
-            if wr > 0.55:
-                delta = -1  # loosen (we're winning, compound harder)
-                reason = f"7d win rate {wr:.0%} — loosening"
-            elif wr >= 0.40:
-                delta = 0   # hold
-                reason = f"7d win rate {wr:.0%} — holding"
-            elif wr >= 0.25:
-                delta = 1   # tighten
-                reason = f"7d win rate {wr:.0%} — tightening"
-            else:
-                delta = 2   # tighten hard
-                reason = f"7d win rate {wr:.0%} — tightening hard"
+        # Rollback check: if the most recent tune made a strategy WORSE, undo it.
+        _check_tune_rollback(stats)
 
-        # Apply conviction deltas with reasonable bounds
+        # Map strategy name -> (conviction_key, edge_key, conviction_bounds, edge_bounds, default_edge)
+        _knobs = {
+            "live_sniper": ("min_conviction_sniper", "min_edge_sniper", (3, 7), (0.01, 0.10), 0.02),
+            "moonshark":   ("min_conviction_moonshark", "min_edge_moonshark", (3, 7), (0.02, 0.12), 0.05),
+            "closegame":   (None,                     "min_edge_closegame",   None,   (0.01, 0.10), 0.03),
+            "floor":       (None,                     "min_edge_floor",       None,   (0.01, 0.08), 0.02),
+            "momentum_swing": (None,                  "min_edge_swing",       None,   (0.03, 0.15), 0.06),
+            "goalie_pulled":  (None,                  "min_edge_goalie",      None,   (0.03, 0.15), 0.05),
+        }
+
         def _clamp(v, lo, hi):
             return max(lo, min(hi, v))
 
-        adaptive["min_conviction_sniper"] = _clamp(
-            adaptive.get("min_conviction_sniper", 4) + delta, 3, 7
-        )
-        adaptive["min_conviction_moonshark"] = _clamp(
-            adaptive.get("min_conviction_moonshark", 4) + delta, 3, 7
-        )
-        # Edge thresholds tweak in smaller increments
-        edge_delta = 0.01 * delta
-        adaptive["min_edge_sniper"] = round(_clamp(
-            adaptive.get("min_edge_sniper", 0.02) + edge_delta, 0.01, 0.10
-        ), 3)
-        adaptive["min_edge_moonshark"] = round(_clamp(
-            adaptive.get("min_edge_moonshark", 0.05) + edge_delta, 0.02, 0.12
-        ), 3)
-        adaptive["min_edge_closegame"] = round(_clamp(
-            adaptive.get("min_edge_closegame", 0.03) + edge_delta, 0.01, 0.10
-        ), 3)
-        adaptive["min_edge_floor"] = round(_clamp(
-            adaptive.get("min_edge_floor", 0.02) + edge_delta, 0.01, 0.08
-        ), 3)
+        changes = []
+        for strat, (conv_key, edge_key, conv_bounds, edge_bounds, default_edge) in _knobs.items():
+            s = stats.get(strat, {})
+            sample = s.get("sample_size") or 0
+            wr = s.get("win_rate")
+            clv = s.get("clv_avg")
+
+            if sample < 10:
+                delta = -1
+                reason = f"{strat} needs volume ({sample} settled in 7d)"
+            elif wr is None:
+                continue
+            else:
+                # CLV overrides win rate on small samples — positive CLV means
+                # we're getting good prices even if variance is masking it.
+                clv_loose = (clv is not None and clv >= 1.0)
+                if wr > 0.55 or clv_loose:
+                    delta = -1
+                    reason = f"{strat} wr={wr:.0%} clv={clv}c → loosen"
+                elif wr >= 0.40:
+                    delta = 0
+                    reason = f"{strat} wr={wr:.0%} → hold"
+                elif wr >= 0.25:
+                    delta = 1
+                    reason = f"{strat} wr={wr:.0%} → tighten"
+                else:
+                    delta = 2
+                    reason = f"{strat} wr={wr:.0%} → tighten hard"
+
+            if delta == 0:
+                continue
+
+            # Conviction knob
+            if conv_key and conv_bounds:
+                old_c = adaptive.get(conv_key, 4)
+                new_c = _clamp(old_c + delta, conv_bounds[0], conv_bounds[1])
+                if new_c != old_c:
+                    adaptive[conv_key] = new_c
+                    changes.append({"strategy": strat, "key": conv_key, "old": old_c, "new": new_c, "wr": wr})
+
+            # Edge knob
+            old_e = adaptive.get(edge_key, default_edge)
+            new_e = round(_clamp(old_e + 0.01 * delta, edge_bounds[0], edge_bounds[1]), 3)
+            if new_e != old_e:
+                adaptive[edge_key] = new_e
+                changes.append({"strategy": strat, "key": edge_key, "old": old_e, "new": new_e, "wr": wr})
+
+            if reason:
+                _log_activity(f"🧠 AUTO-TUNE: {reason}", "info")
+
+        # Overall snapshot (legacy compat)
+        total_recent = sum(s.get("sample_size", 0) for s in stats.values())
+        total_wins = sum(s.get("wins", 0) for s in stats.values())
+        if total_recent:
+            adaptive["last_win_rate_7d"] = round(total_wins / total_recent, 4)
         adaptive["last_tune"] = datetime.datetime.utcnow().isoformat() + "Z"
         adaptive["total_tunes"] = adaptive.get("total_tunes", 0) + 1
 
-        _log_activity(
-            f"🧠 Auto-tune #{adaptive['total_tunes']}: {reason} — "
-            f"conviction sniper={adaptive['min_conviction_sniper']} "
-            f"moonshark={adaptive['min_conviction_moonshark']} "
-            f"edge_sniper={adaptive['min_edge_sniper']}",
-            "info"
-        )
+        # Append change log with the at-tune wr so rollback can compare
+        if changes:
+            hist = _LEARNING_STATE.setdefault("tune_history", [])
+            for c in changes:
+                hist.append({
+                    "ts": datetime.datetime.utcnow().isoformat() + "Z",
+                    **c,
+                })
+            # Keep last 200 entries max
+            if len(hist) > 200:
+                _LEARNING_STATE["tune_history"] = hist[-200:]
     except Exception as e:
         print(f"[AUTO_TUNE] Error: {e}")
+
+
+def _check_tune_rollback(current_stats):
+    """If the most recent tune for a strategy made it WORSE than the pre-tune
+    window, revert that specific change.
+
+    A 'tune' is bad if:
+      - the strategy has at least 5 NEW settled trades since the tune AND
+      - its win rate in those 5+ new trades is lower than the wr we recorded
+        at tune time AND at least 10% absolute lower (noise guard).
+    """
+    hist = _LEARNING_STATE.get("tune_history") or []
+    if not hist:
+        return
+    adaptive = _LEARNING_STATE.setdefault("adaptive", {})
+    now = datetime.datetime.utcnow()
+    # Look at the last 10 tune entries — rollback candidates must be recent
+    for entry in list(hist[-10:]):
+        if entry.get("reverted"):
+            continue
+        strat = entry.get("strategy")
+        key = entry.get("key")
+        old = entry.get("old")
+        new = entry.get("new")
+        wr_at_tune = entry.get("wr")
+        ts_str = entry.get("ts") or ""
+        if not (strat and key and wr_at_tune is not None):
+            continue
+        try:
+            tune_dt = datetime.datetime.fromisoformat(ts_str.replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            continue
+        # Must have at least 30 minutes of data since tune
+        if (now - tune_dt).total_seconds() < 1800:
+            continue
+        # Trades settled AFTER the tune — use _TRADE_JOURNAL snapshot
+        with _TRADE_JOURNAL_LOCK:
+            post = [
+                t for t in _TRADE_JOURNAL
+                if t.get("strategy") == strat
+                and t.get("result") in ("win", "loss")
+                and (t.get("settlement_time") or "") > ts_str
+            ]
+        if len(post) < 5:
+            continue
+        post_wins = sum(1 for t in post if t["result"] == "win")
+        post_wr = post_wins / len(post)
+        if post_wr + 0.10 < wr_at_tune:
+            # Rollback
+            adaptive[key] = old
+            entry["reverted"] = True
+            entry["post_wr"] = round(post_wr, 4)
+            entry["rolled_back_at"] = now.isoformat() + "Z"
+            _log_activity(
+                f"↩️  TUNE ROLLBACK: {strat}.{key} {new}→{old} "
+                f"(post-tune wr {post_wr:.0%} vs at-tune {wr_at_tune:.0%})",
+                "warn"
+            )
 
 
 def _adaptive_get(key, default):
@@ -8277,13 +8553,24 @@ def _background_loop():
                 except Exception as _mle:
                     print(f"[MONITOR] Error: {_mle}")
 
+            # Supervisor engine — every cycle (cheap)
+            # Folds skip-reason telemetry into _LEARNING_STATE so the dashboard
+            # and dedicated learning thread can see why strategies didn't fire.
+            try:
+                _supervisor_engine()
+            except Exception as _se:
+                print(f"[SUPERVISOR] Error: {_se}")
+
             # Learning engine — every 20 cycles (~5-10 min)
             # Much more aggressive than before (was 120 = 1 hour) so the bot
             # continuously adapts to fresh fills and settlement outcomes.
+            # NOTE: also runs independently in _learning_thread for safety —
+            # if the trading loop hangs on an API call, learning still advances.
             if cycle % 20 == 0:
                 try:
                     _learning_engine()
                     _auto_tune_thresholds()
+                    _check_tune_rollback(_per_strategy_stats(days=2))
                 except Exception as _le:
                     print(f"[LEARNING] Error: {_le}")
 
@@ -8477,6 +8764,37 @@ def _ensure_bg_thread():
     _cg_thread = threading.Thread(target=_closegame_loop, daemon=True)
     _cg_thread.start()
     print("[STARTUP] Close-Game Sniper thread started (10s)")
+
+    # Dedicated learning thread — runs independently so a stuck trading loop
+    # (e.g. hung Kalshi API call) cannot block parameter adaptation.
+    def _learning_loop():
+        _time.sleep(120)  # let main loop settle before first tune
+        print("[LEARNING] Dedicated learning thread started (3 min interval)")
+        _learn_cycle = 0
+        while True:
+            try:
+                _learn_cycle += 1
+                _learning_engine()
+                _auto_tune_thresholds()
+                # rollback check gets fresher stats (2d window) so it can
+                # react quickly when a bad tune tanks a strategy.
+                try:
+                    _check_tune_rollback(_per_strategy_stats(days=2))
+                except Exception as _rbe:
+                    print(f"[LEARNING] Rollback check error: {_rbe}")
+                # Heartbeat log every 20 cycles (~1 hr)
+                if _learn_cycle % 20 == 0:
+                    with _LEARNING_STATE_LOCK:
+                        _v = _LEARNING_STATE.get("version", 0)
+                        _tunes = _LEARNING_STATE.get("adaptive", {}).get("total_tunes", 0)
+                    print(f"[LEARNING] Heartbeat cycle={_learn_cycle} version={_v} total_tunes={_tunes}")
+            except Exception as _le:
+                print(f"[LEARNING] Error: {_le}")
+            _time.sleep(180)  # 3 minutes
+
+    _learn_thread = threading.Thread(target=_learning_loop, daemon=True)
+    _learn_thread.start()
+    print("[STARTUP] Dedicated learning thread started (3 min)")
 
     # Start keep-alive watchdog (only once)
     global _keepalive_thread
