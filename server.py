@@ -231,6 +231,14 @@ def _save_state():
             "floor_daily_spent": BOT_STATE.get("floor_daily_spent", 0.0),
             "floor_trades_today": BOT_STATE.get("floor_trades_today", []),
             "floor_date": BOT_STATE.get("floor_date"),
+            # Persist Momentum Swing fader counters
+            "swing_daily_spent": BOT_STATE.get("swing_daily_spent", 0.0),
+            "swing_trades_today": BOT_STATE.get("swing_trades_today", []),
+            "swing_date": BOT_STATE.get("swing_date"),
+            # Persist Goalie Pulled snipe counters
+            "goalie_daily_spent": BOT_STATE.get("goalie_daily_spent", 0.0),
+            "goalie_trades_today": BOT_STATE.get("goalie_trades_today", []),
+            "goalie_date": BOT_STATE.get("goalie_date"),
             # Learning engine state
             "learning_state": _LEARNING_STATE,
             # Per-game exposure tracking
@@ -282,6 +290,14 @@ def _load_state():
             BOT_STATE["floor_daily_spent"] = data.get("floor_daily_spent", 0.0)
             BOT_STATE["floor_trades_today"] = data.get("floor_trades_today", [])
             BOT_STATE["floor_date"] = today_str
+            # Restore Swing fader counters for same-day
+            BOT_STATE["swing_daily_spent"] = data.get("swing_daily_spent", 0.0)
+            BOT_STATE["swing_trades_today"] = data.get("swing_trades_today", [])
+            BOT_STATE["swing_date"] = today_str
+            # Restore Goalie pulled counters for same-day
+            BOT_STATE["goalie_daily_spent"] = data.get("goalie_daily_spent", 0.0)
+            BOT_STATE["goalie_trades_today"] = data.get("goalie_trades_today", [])
+            BOT_STATE["goalie_date"] = today_str
             # Restore manual trades for same-day
             BOT_STATE["manual_trades_today"] = data.get("manual_trades_today", [])
             # Restore per-game exposure for same-day
@@ -307,6 +323,12 @@ def _load_state():
             BOT_STATE["floor_daily_spent"] = 0.0
             BOT_STATE["floor_trades_today"] = []
             BOT_STATE["floor_date"] = today_str
+            BOT_STATE["swing_daily_spent"] = 0.0
+            BOT_STATE["swing_trades_today"] = []
+            BOT_STATE["swing_date"] = today_str
+            BOT_STATE["goalie_daily_spent"] = 0.0
+            BOT_STATE["goalie_trades_today"] = []
+            BOT_STATE["goalie_date"] = today_str
             BOT_STATE["manual_trades_today"] = []
 
         # --- Cumulative data: always restore regardless of day ---
@@ -837,7 +859,8 @@ def _rebuild_journal_from_kalshi():
                 "bot_version": bot_version,
                 "source": "kalshi_rebuild",
             }
-            _TRADE_JOURNAL.append(journal_entry)
+            with _TRADE_JOURNAL_LOCK:
+                _TRADE_JOURNAL.append(journal_entry)
             new_count += 1
 
         _save_state()
@@ -2744,6 +2767,7 @@ BOT_STATE["moonshark_date"] = None
 import threading as _threading
 _EVENT_LOCK = _threading.Lock()
 _BOT_STATE_LOCK = _threading.Lock()
+_TRADE_JOURNAL_LOCK = _threading.Lock()  # protects _TRADE_JOURNAL append/iterate from cross-thread RuntimeError
 _EVENTS_BET_TODAY = set()  # shared across all strategies
 _similarity_local = _threading.local()
 
@@ -2832,6 +2856,8 @@ def _total_bets_today():
         + len(BOT_STATE.get("closegame_trades_today", []))
         + len(BOT_STATE.get("manual_trades_today", []))
         + len(BOT_STATE.get("floor_trades_today", []))
+        + len(BOT_STATE.get("swing_trades_today", []))
+        + len(BOT_STATE.get("goalie_trades_today", []))
     )
 
 
@@ -4964,6 +4990,618 @@ def floor_quota_snipe():
 
 
 # ---------------------------------------------------------------------------
+# MOMENTUM SWING FADER — bet against overreactions in NBA/NCAAB/NHL
+# ---------------------------------------------------------------------------
+# Thesis: When one team goes on a run in a live game, Kalshi prices overreact
+# vs. ESPN's live win-probability model. Mean reversion in these sports is
+# strong — buying the comeback side at a discount produces a positive edge.
+# Unlike the regular live sniper (which requires 4+ conviction signals), this
+# strategy fires on a single strong signal: ESPN live win prob > Kalshi
+# implied by SWING_MIN_EDGE while the team is still in recovery range.
+# ---------------------------------------------------------------------------
+
+SWING_MAX_DAILY_USD = 40.0
+SWING_MAX_TRADES = 8
+SWING_BET_USD = 6.0          # slightly larger than floor — this is higher conviction
+SWING_MIN_EDGE = 0.06        # 6% — must be a real overreaction, not noise
+SWING_MIN_PRICE = 18
+SWING_MAX_PRICE = 62         # only buy the trailing side at a discount
+BOT_STATE["swing_trades_today"] = []
+BOT_STATE["swing_daily_spent"] = 0.0
+BOT_STATE["swing_date"] = None
+
+
+def momentum_swing_snipe():
+    """Fade momentum overreactions in NBA, NCAAB, NCAAWB, NHL live games.
+
+    We detect mispricing indirectly: ESPN's live win-probability model is
+    our ground truth. When Kalshi has the trailing team priced well below
+    what ESPN thinks, that's an overreaction we can buy.
+    """
+    if not BOT_CONFIG.get("enabled"):
+        return []
+    if not BOT_CONFIG.get("swing_enabled", True):
+        return []
+
+    today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+    if BOT_STATE.get("swing_date") != today:
+        BOT_STATE["swing_date"] = today
+        BOT_STATE["swing_trades_today"] = []
+        BOT_STATE["swing_daily_spent"] = 0.0
+
+    if BOT_STATE.get("swing_daily_spent", 0) >= SWING_MAX_DAILY_USD:
+        return []
+    if len(BOT_STATE.get("swing_trades_today", [])) >= SWING_MAX_TRADES:
+        return []
+
+    bal = _get_cached_balance()
+    if bal < BOT_CONFIG.get("min_balance_usd", 200):
+        return []
+
+    try:
+        scores = _get_espn_scores()
+    except Exception:
+        return []
+    if not scores:
+        return []
+
+    # Build unique in-progress game list — only sports with strong mean-reversion
+    _allowed_leagues = {"nba", "ncaab", "ncaawb", "nhl"}
+    _seen = set()
+    _unique_games = []
+    for _g in scores.values():
+        _league = (_g.get("league") or "").lower()
+        if _league not in _allowed_leagues:
+            continue
+        if _g.get("state") != "in":
+            continue
+        _mk = f"{_g.get('home_abbrev', '')}_{_g.get('away_abbrev', '')}"
+        if _mk in _seen:
+            continue
+        _seen.add(_mk)
+        _unique_games.append(_g)
+
+    # For each live game, figure out the trailing team and check if ESPN
+    # disagrees with Kalshi about its chances.
+    existing_tickers = set()
+    existing_events = set()
+    try:
+        for p in check_position_prices():
+            existing_tickers.add(p.get("ticker", ""))
+            _parts = p.get("ticker", "").split("-")
+            if len(_parts) >= 2:
+                existing_events.add("-".join(_parts[:2]))
+    except Exception:
+        pass
+
+    snipes = []
+    for game in _unique_games:
+        if BOT_STATE.get("swing_daily_spent", 0) >= SWING_MAX_DAILY_USD:
+            break
+        if len(BOT_STATE.get("swing_trades_today", [])) >= SWING_MAX_TRADES:
+            break
+
+        try:
+            home_score = int(game.get("home_score", 0))
+            away_score = int(game.get("away_score", 0))
+        except Exception:
+            continue
+        if home_score == away_score:
+            continue  # tied — no fade signal
+
+        league = (game.get("league") or "").lower()
+        event_id = game.get("event_id")
+        if not event_id:
+            continue
+
+        # Work out the trailing team (the comeback candidate)
+        if home_score < away_score:
+            trailing = game.get("home_abbrev", "").upper()
+            trailing_is_home = True
+            margin = away_score - home_score
+        else:
+            trailing = game.get("away_abbrev", "").upper()
+            trailing_is_home = False
+            margin = home_score - away_score
+
+        if not trailing:
+            continue
+
+        # Filter out hopeless deficits — we need them still in the game
+        # so the Kalshi overreaction is fadable, not rational.
+        period = game.get("clock", "") or ""
+        if league in ("nba",) and any(p in period for p in ["Q4", "OT"]) and margin > 12:
+            continue
+        if league == "ncaab" and "2H" in period and margin > 15:
+            continue
+        if league == "ncaawb" and any(p in period for p in ["Q4", "OT"]) and margin > 12:
+            continue
+        if league == "nhl" and margin > 3:
+            continue
+
+        # Ground truth: ESPN live win probability for the trailing team
+        try:
+            live_prob = _get_espn_win_prob(event_id, league, home_team=trailing_is_home)
+        except Exception:
+            live_prob = None
+        if live_prob is None or live_prob <= 0 or live_prob >= 0.60:
+            # If trailing team already > 60% it's not really a momentum fade
+            continue
+
+        # Find the Kalshi market
+        try:
+            mh = signed_headers("GET", "/markets")
+            _prefix_map = {
+                "nba": "KXNBAGAME", "ncaab": "KXNCAAMBGAME",
+                "ncaawb": "KXNCAAWBGAME", "nhl": "KXNHLGAME",
+            }
+            _prefix = _prefix_map.get(league)
+            if not _prefix:
+                continue
+            resp = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + "/markets",
+                headers=mh,
+                params={"limit": 50, "status": "open", "ticker_contains": _prefix},
+                timeout=8,
+            )
+            if not resp.ok:
+                continue
+            markets = resp.json().get("markets", [])
+        except Exception:
+            continue
+
+        for mkt in markets:
+            ticker = mkt.get("ticker", "") or ""
+            title = mkt.get("title", "") or ""
+            if trailing not in ticker.upper():
+                continue
+            if ticker in existing_tickers:
+                continue
+            event_key = "-".join(ticker.split("-")[:2]) if ticker else ""
+            if event_key in existing_events or event_key in _EVENTS_BET_TODAY:
+                continue
+
+            # Parse asks
+            yes_ask = no_ask = None
+            try:
+                ya = mkt.get("yes_ask_dollars") or mkt.get("yes_ask")
+                if ya:
+                    yes_ask = int(round(float(str(ya)) * 100))
+                na = mkt.get("no_ask_dollars") or mkt.get("no_ask")
+                if na:
+                    no_ask = int(round(float(str(na)) * 100))
+            except Exception:
+                continue
+
+            # We want to buy the trailing side cheap — the YES contract for
+            # the trailing team (ticker matches trailing abbrev).
+            side = None
+            price = None
+            if yes_ask and SWING_MIN_PRICE <= yes_ask <= SWING_MAX_PRICE:
+                side = "yes"
+                price = yes_ask
+            if side is None:
+                continue
+
+            implied = price / 100.0
+            edge = live_prob - implied
+            if edge < SWING_MIN_EDGE:
+                continue
+
+            # Must still have at least 4% of clock left for real recovery
+            # (we infer from period; close-game sniper handles final minutes)
+            if league == "nba" and "Q4" in period:
+                # In Q4 with huge clock left this is fine; Q4 last minute = too late
+                try:
+                    _clk_sec = _parse_clock_to_seconds(period, sport="nba")
+                    if _clk_sec is not None and _clk_sec < 120:
+                        continue  # < 2 min left — close-game territory
+                except Exception:
+                    pass
+
+            # Size — half Kelly against our edge, capped by strategy budget
+            remaining_daily = SWING_MAX_DAILY_USD - BOT_STATE.get("swing_daily_spent", 0)
+            profit_if_win = (100 - price) / 100.0
+            odds_decimal = profit_if_win / implied
+            kelly_usd = kelly_bet_size(bal, live_prob, odds_decimal)
+            bet_usd = min(max(SWING_BET_USD, kelly_usd), remaining_daily, BOT_CONFIG["max_bet_usd"])
+            if bet_usd < 1.0:
+                continue
+            count = max(1, int(bet_usd * 100 / price))
+            cost_usd = (price * count) / 100.0
+
+            # Honor per-game exposure cap
+            if not _check_game_exposure(event_key, cost_usd):
+                new_count, new_cost = _fit_to_game_cap(event_key, price, count)
+                if new_count <= 0:
+                    continue
+                count = new_count
+                cost_usd = new_cost
+
+            if not _check_and_claim_event(event_key):
+                continue
+
+            _ob = None
+            try:
+                _ob = analyze_orderbook(ticker)
+            except Exception:
+                pass
+
+            _log_activity(
+                f"🔄 SWING FADE: {side.upper()} {ticker} @ {price}c x{count} "
+                f"(${cost_usd:.2f}) | down {margin} in {period} | ESPN={live_prob:.0%} vs Kalshi={implied:.0%} edge=+{edge:.1%}",
+                "info"
+            )
+
+            result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob)
+            if "error" in result:
+                _log_activity(f"SWING failed: {ticker} — {result.get('error', '')[:60]}", "error")
+                continue
+
+            order_data = result.get("order", {})
+            filled = 0
+            try:
+                filled = int(float(str(order_data.get("filled_count_fp") or order_data.get("filled_count") or 0)))
+            except Exception:
+                pass
+
+            with _BOT_STATE_LOCK:
+                BOT_STATE["fill_attempts"] = BOT_STATE.get("fill_attempts", 0) + 1
+                BOT_STATE.setdefault("fill_attempts_by_strategy", {})["swing"] = \
+                    BOT_STATE.get("fill_attempts_by_strategy", {}).get("swing", 0) + 1
+                if filled > 0:
+                    BOT_STATE["fill_successes"] = BOT_STATE.get("fill_successes", 0) + 1
+                    BOT_STATE.setdefault("fill_successes_by_strategy", {})["swing"] = \
+                        BOT_STATE.get("fill_successes_by_strategy", {}).get("swing", 0) + 1
+
+            if filled <= 0:
+                _log_activity(f"SWING missed: {ticker} — 0 filled at {price}c", "info")
+                continue
+
+            actual_cost = (price * filled) / 100.0
+            potential = (100 - price) * filled / 100.0
+            _record_game_exposure(event_key, actual_cost)
+            with _BOT_STATE_LOCK:
+                BOT_STATE["swing_daily_spent"] = BOT_STATE.get("swing_daily_spent", 0) + actual_cost
+            _score_str = f"{game.get('away_abbrev','')} {away_score}-{home_score} {game.get('home_abbrev','')} {period}"
+            _reasons = [f"Fade {margin}pt deficit", f"ESPN +{edge:.0%}", f"live prob {live_prob:.0%}"]
+            BOT_STATE.setdefault("swing_trades_today", []).append({
+                "ticker": ticker, "title": title, "side": side,
+                "price": price, "count": filled, "cost": actual_cost,
+                "potential_profit": potential,
+                "time": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "strategy": "momentum_swing",
+                "score": _score_str,
+                "margin": margin,
+                "period": period,
+                "edge_reasons": _reasons,
+                "espn_edge": round(edge, 4),
+                "order_id": order_data.get("order_id", ""),
+            })
+            _oid = order_data.get("order_id", "")
+            if _oid:
+                _known_fill_ids.add(_oid)
+
+            _journal_trade(
+                ticker, title, side, price, filled, actual_cost, "momentum_swing",
+                is_live=True,
+                game_info={"home_score": home_score, "away_score": away_score,
+                           "clock": period, "state": "in", "league": league},
+                espn_edge_data={"espn_implied": live_prob, "espn_edge": edge},
+                conviction=4,
+                conviction_reasons=_reasons,
+            )
+            _log_activity(
+                f"🔄 SWING HIT! {side.upper()} {trailing} @ {price}c x{filled} = ${actual_cost:.2f} (potential +${potential:.2f})",
+                "success"
+            )
+            snipes.append({"ticker": ticker, "cost": actual_cost, "edge": edge})
+            existing_tickers.add(ticker)
+            existing_events.add(event_key)
+            break  # one bet per game
+
+    if snipes:
+        _save_state()
+    return snipes
+
+
+# ---------------------------------------------------------------------------
+# GOALIE PULLED MISPRICING — NHL only, last 2-3 min of P3
+# ---------------------------------------------------------------------------
+# Thesis: When a trailing team pulls their goalie in the last 2-3 minutes of
+# P3 with a 1-2 goal deficit, the real distribution of outcomes changes hard:
+#   - trailing team has ~10-14% chance to tie + go to OT (then ~50% to win)
+#   - leading team has ~50-60% chance to score an empty-net goal
+# Kalshi often lags both directions. We look at ESPN's live win probability
+# after the pull and buy whichever side Kalshi has most wrong.
+# ---------------------------------------------------------------------------
+
+GOALIE_MAX_DAILY_USD = 20.0
+GOALIE_MAX_TRADES = 5
+GOALIE_BET_USD = 4.0
+GOALIE_MIN_EDGE = 0.05  # 5% — this is a fast-moving microstructure bet
+GOALIE_MIN_PRICE = 8
+GOALIE_MAX_PRICE = 92
+BOT_STATE["goalie_trades_today"] = []
+BOT_STATE["goalie_daily_spent"] = 0.0
+BOT_STATE["goalie_date"] = None
+
+
+def goalie_pulled_snipe():
+    """Fade Kalshi mispricing in NHL endgame when a goalie is (likely) pulled.
+
+    We can't directly read play-by-play for every game cheaply, so we use a
+    proxy: NHL P3 games with margin ≤ 2 and < 3 minutes remaining are in
+    goalie-pull territory. When ESPN's live win model diverges from Kalshi
+    by GOALIE_MIN_EDGE we buy the mispriced side.
+    """
+    if not BOT_CONFIG.get("enabled"):
+        return []
+    if not BOT_CONFIG.get("goalie_enabled", True):
+        return []
+
+    today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+    if BOT_STATE.get("goalie_date") != today:
+        BOT_STATE["goalie_date"] = today
+        BOT_STATE["goalie_trades_today"] = []
+        BOT_STATE["goalie_daily_spent"] = 0.0
+
+    if BOT_STATE.get("goalie_daily_spent", 0) >= GOALIE_MAX_DAILY_USD:
+        return []
+    if len(BOT_STATE.get("goalie_trades_today", [])) >= GOALIE_MAX_TRADES:
+        return []
+
+    bal = _get_cached_balance()
+    if bal < BOT_CONFIG.get("min_balance_usd", 200):
+        return []
+
+    try:
+        scores = _get_espn_scores()
+    except Exception:
+        return []
+    if not scores:
+        return []
+
+    # Unique NHL in-progress games
+    _seen = set()
+    _games = []
+    for _g in scores.values():
+        if (_g.get("league") or "").lower() != "nhl":
+            continue
+        if _g.get("state") != "in":
+            continue
+        _mk = f"{_g.get('home_abbrev','')}_{_g.get('away_abbrev','')}"
+        if _mk in _seen:
+            continue
+        _seen.add(_mk)
+        _games.append(_g)
+
+    if not _games:
+        return []
+
+    existing_tickers = set()
+    existing_events = set()
+    try:
+        for p in check_position_prices():
+            existing_tickers.add(p.get("ticker", ""))
+            _parts = p.get("ticker", "").split("-")
+            if len(_parts) >= 2:
+                existing_events.add("-".join(_parts[:2]))
+    except Exception:
+        pass
+
+    snipes = []
+    for game in _games:
+        if BOT_STATE.get("goalie_daily_spent", 0) >= GOALIE_MAX_DAILY_USD:
+            break
+        if len(BOT_STATE.get("goalie_trades_today", [])) >= GOALIE_MAX_TRADES:
+            break
+
+        period = game.get("clock", "") or ""
+        # Must be in P3 (or OT, which also has late-game goalie situations)
+        if not any(p in period for p in ["P3", "3rd", "OT"]):
+            continue
+
+        # Parse seconds left on the clock — use the shared helper
+        try:
+            secs_left = _parse_clock_to_seconds(period, sport="nhl")
+        except Exception:
+            secs_left = None
+        # If we don't know the clock, skip — bad signal
+        if secs_left is None or secs_left > 180 or secs_left < 5:
+            continue
+
+        try:
+            home_score = int(game.get("home_score", 0))
+            away_score = int(game.get("away_score", 0))
+        except Exception:
+            continue
+        margin = abs(home_score - away_score)
+        if margin == 0 or margin > 2:
+            continue  # tied or blowout — no pulled goalie edge
+
+        event_id = game.get("event_id")
+        if not event_id:
+            continue
+
+        # Compute ESPN live win prob for BOTH teams
+        try:
+            home_live = _get_espn_win_prob(event_id, "nhl", home_team=True)
+        except Exception:
+            home_live = None
+        try:
+            away_live = _get_espn_win_prob(event_id, "nhl", home_team=False)
+        except Exception:
+            away_live = None
+        if home_live is None and away_live is None:
+            continue
+        # Fill in the missing one if only one arrived
+        if home_live is None and away_live is not None:
+            home_live = 1.0 - away_live
+        if away_live is None and home_live is not None:
+            away_live = 1.0 - home_live
+
+        # Find Kalshi markets for this game
+        try:
+            mh = signed_headers("GET", "/markets")
+            resp = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + "/markets",
+                headers=mh,
+                params={"limit": 50, "status": "open", "ticker_contains": "KXNHLGAME"},
+                timeout=8,
+            )
+            if not resp.ok:
+                continue
+            markets = resp.json().get("markets", [])
+        except Exception:
+            continue
+
+        home_abbrev = game.get("home_abbrev", "").upper()
+        away_abbrev = game.get("away_abbrev", "").upper()
+
+        best = None  # best edge across both sides
+        best_mkt = None
+        for mkt in markets:
+            ticker = (mkt.get("ticker", "") or "").upper()
+            if not (home_abbrev in ticker or away_abbrev in ticker):
+                continue
+            event_key = "-".join(ticker.split("-")[:2]) if ticker else ""
+            if ticker in existing_tickers or event_key in existing_events or event_key in _EVENTS_BET_TODAY:
+                continue
+            try:
+                ya = mkt.get("yes_ask_dollars") or mkt.get("yes_ask")
+                yes_ask = int(round(float(str(ya)) * 100)) if ya else None
+            except Exception:
+                yes_ask = None
+            if yes_ask is None or yes_ask < GOALIE_MIN_PRICE or yes_ask > GOALIE_MAX_PRICE:
+                continue
+            implied = yes_ask / 100.0
+            # The ticker YES = that team winning
+            is_home_ticker = home_abbrev in ticker and (away_abbrev not in ticker or ticker.endswith(home_abbrev))
+            our_prob = home_live if is_home_ticker else away_live
+            edge = our_prob - implied
+            if edge >= GOALIE_MIN_EDGE and (best is None or edge > best["edge"]):
+                best = {
+                    "edge": edge, "price": yes_ask, "implied": implied,
+                    "our_prob": our_prob, "ticker": mkt.get("ticker", ""),
+                    "title": mkt.get("title", ""), "event_key": event_key,
+                    "is_home": is_home_ticker,
+                }
+                best_mkt = mkt
+
+        if not best:
+            continue
+
+        ticker = best["ticker"]
+        title = best["title"]
+        price = best["price"]
+        edge = best["edge"]
+        event_key = best["event_key"]
+        side = "yes"
+
+        remaining = GOALIE_MAX_DAILY_USD - BOT_STATE.get("goalie_daily_spent", 0)
+        profit_if_win = (100 - price) / 100.0
+        odds_decimal = profit_if_win / best["implied"]
+        kelly_usd = kelly_bet_size(bal, best["our_prob"], odds_decimal)
+        bet_usd = min(max(GOALIE_BET_USD, kelly_usd), remaining, BOT_CONFIG["max_bet_usd"])
+        if bet_usd < 1.0:
+            continue
+        count = max(1, int(bet_usd * 100 / price))
+        cost_usd = (price * count) / 100.0
+
+        if not _check_game_exposure(event_key, cost_usd):
+            new_count, new_cost = _fit_to_game_cap(event_key, price, count)
+            if new_count <= 0:
+                continue
+            count = new_count
+            cost_usd = new_cost
+
+        if not _check_and_claim_event(event_key):
+            continue
+
+        _ob = None
+        try:
+            _ob = analyze_orderbook(ticker)
+        except Exception:
+            pass
+
+        _log_activity(
+            f"🥅 GOALIE FADE: {side.upper()} {ticker} @ {price}c x{count} "
+            f"(${cost_usd:.2f}) | {away_abbrev} {away_score}-{home_score} {home_abbrev} {period} ({secs_left}s) | edge=+{edge:.1%}",
+            "info"
+        )
+        result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob)
+        if "error" in result:
+            _log_activity(f"GOALIE failed: {ticker} — {result.get('error', '')[:60]}", "error")
+            continue
+
+        order_data = result.get("order", {})
+        filled = 0
+        try:
+            filled = int(float(str(order_data.get("filled_count_fp") or order_data.get("filled_count") or 0)))
+        except Exception:
+            pass
+
+        with _BOT_STATE_LOCK:
+            BOT_STATE["fill_attempts"] = BOT_STATE.get("fill_attempts", 0) + 1
+            BOT_STATE.setdefault("fill_attempts_by_strategy", {})["goalie"] = \
+                BOT_STATE.get("fill_attempts_by_strategy", {}).get("goalie", 0) + 1
+            if filled > 0:
+                BOT_STATE["fill_successes"] = BOT_STATE.get("fill_successes", 0) + 1
+                BOT_STATE.setdefault("fill_successes_by_strategy", {})["goalie"] = \
+                    BOT_STATE.get("fill_successes_by_strategy", {}).get("goalie", 0) + 1
+
+        if filled <= 0:
+            _log_activity(f"GOALIE missed: {ticker} — 0 filled at {price}c", "info")
+            continue
+
+        actual_cost = (price * filled) / 100.0
+        potential = (100 - price) * filled / 100.0
+        _record_game_exposure(event_key, actual_cost)
+        with _BOT_STATE_LOCK:
+            BOT_STATE["goalie_daily_spent"] = BOT_STATE.get("goalie_daily_spent", 0) + actual_cost
+        _score_str = f"{away_abbrev} {away_score}-{home_score} {home_abbrev} {period}"
+        _reasons = [f"Late P3 {secs_left}s left", f"margin {margin}", f"ESPN +{edge:.0%}"]
+        BOT_STATE.setdefault("goalie_trades_today", []).append({
+            "ticker": ticker, "title": title, "side": side,
+            "price": price, "count": filled, "cost": actual_cost,
+            "potential_profit": potential,
+            "time": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "strategy": "goalie_pulled",
+            "score": _score_str,
+            "margin": margin,
+            "period": period,
+            "edge_reasons": _reasons,
+            "espn_edge": round(edge, 4),
+            "order_id": order_data.get("order_id", ""),
+        })
+        _oid = order_data.get("order_id", "")
+        if _oid:
+            _known_fill_ids.add(_oid)
+
+        _journal_trade(
+            ticker, title, side, price, filled, actual_cost, "goalie_pulled",
+            is_live=True,
+            game_info={"home_score": home_score, "away_score": away_score,
+                       "clock": period, "state": "in", "league": "nhl"},
+            espn_edge_data={"espn_implied": best["our_prob"], "espn_edge": edge},
+            conviction=4,
+            conviction_reasons=_reasons,
+        )
+        _log_activity(
+            f"🥅 GOALIE HIT! {side.upper()} {ticker} @ {price}c x{filled} = ${actual_cost:.2f} (potential +${potential:.2f})",
+            "success"
+        )
+        snipes.append({"ticker": ticker, "cost": actual_cost, "edge": edge})
+        existing_tickers.add(ticker)
+        existing_events.add(event_key)
+
+    if snipes:
+        _save_state()
+    return snipes
+
+
+# ---------------------------------------------------------------------------
 # Scheduler
 # ---------------------------------------------------------------------------
 
@@ -5035,22 +5673,31 @@ def kelly_bet_size(bankroll, win_prob, odds_decimal):
     return min(bet, BOT_CONFIG["max_bet_usd"])
 
 
-def kelly_count(bankroll, price_cents, consensus_price):
+def kelly_count(bankroll, price_cents, consensus_price, min_edge=0.02):
     """Calculate contract count using Kelly Criterion.
 
     Args:
         bankroll: cash in dollars
         price_cents: what we'd pay per contract
         consensus_price: what we think true probability is (0-1)
+        min_edge: minimum edge required to place any bet (default 2%).
+                  Below this we return 0 instead of forcing a 1-contract bet.
     """
     if price_cents <= 0 or price_cents >= 100:
-        return 1
+        return 0
     our_cost = price_cents / 100.0  # what we pay
     win_prob = consensus_price       # estimated true probability
+    # Enforce minimum edge — protects against overconfident consensus inputs
+    # and stops us from burning slippage on razor-thin trades.
+    edge = win_prob - our_cost
+    if edge < min_edge:
+        return 0
     # If buying YES at 60c, payout is 100c, so profit = 40c, odds = 40/60
     profit_if_win = (100 - price_cents) / 100.0
     odds = profit_if_win / our_cost
     bet_usd = kelly_bet_size(bankroll, win_prob, odds)
+    if bet_usd <= 0:
+        return 0
     count = max(1, int(bet_usd * 100 / price_cents))
     # Cap at 50 contracts for any single trade
     return min(count, 50)
@@ -5719,6 +6366,8 @@ def run_quant_strategies(all_markets):
         # Kelly sizing
         confidence = sig.get("confidence", 0.5)
         count = kelly_count(bankroll, price_cents, confidence)
+        if count <= 0:
+            continue  # Kelly says edge too thin — skip, don't force a bet
         cost_usd = (price_cents * count) / 100.0
 
         # Cap cost to remaining daily budget
@@ -6446,8 +7095,12 @@ def _learning_multiplier(ticker, title, price_cents=None, game_info=None, espn_e
     cat = classify_market_category(title or "", ticker or "")
     cat_w = params.get("category_weights", {}).get(cat, {})
     if cat_w.get("confidence", 0) >= 0.5:
-        # Hard-block 0% win rate categories — stop burning money on proven losers
+        # Hard-block 0% win rate categories — stop burning money on proven losers.
+        # Return 0.0 immediately so the caller skips the bet entirely (the
+        # geometric-mean floor below would otherwise mask this signal).
         w = cat_w["weight"]
+        if w == 0.0:
+            return 0.0
         multipliers.append(w)
 
     # Sport type weight
@@ -6490,10 +7143,13 @@ def _learning_multiplier(ticker, title, price_cents=None, game_info=None, espn_e
     if not multipliers:
         return 1.0  # no data for any dimension
 
-    # Geometric mean — prevents one dimension from dominating
+    # Geometric mean — prevents one dimension from dominating.
+    # Use 0.05 floor (instead of 0.01) so a single zero-weight non-blocking
+    # dimension drops the composite to ~0.2, but doesn't completely silence it.
+    # True 0% categories are handled above with an early return.
     product = 1.0
     for m in multipliers:
-        product *= max(0.01, m)  # floor at 0.01 to avoid zeroing out
+        product *= max(0.05, m)
     result = product ** (1.0 / len(multipliers))
     return max(0.0, min(3.0, round(result, 3)))
 
@@ -6692,14 +7348,19 @@ def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, stra
 def _journal_trade(ticker, title, side, price_cents, count, cost_usd, strategy, is_live=False, close_time=None, game_info=None, espn_edge_data=None, orderbook_data=None, conviction=0, conviction_reasons=None):
     """Add a trade to the journal with full enrichment."""
     rec = _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, strategy, is_live, close_time=close_time, game_info=game_info, espn_edge_data=espn_edge_data, orderbook_data=orderbook_data, conviction=conviction, conviction_reasons=conviction_reasons)
-    _TRADE_JOURNAL.append(rec)
+    with _TRADE_JOURNAL_LOCK:
+        _TRADE_JOURNAL.append(rec)
     return rec
 
 
 def _journal_settle(ticker, won, pnl_usd, closing_price_cents=None):
     """Update journal entry with settlement result and CLV data."""
     now = datetime.datetime.utcnow()
-    for rec in reversed(_TRADE_JOURNAL):
+    # Snapshot under lock to avoid iterating while a background thread appends.
+    # Field mutations below are GIL-safe (single attribute write each).
+    with _TRADE_JOURNAL_LOCK:
+        _journal_snapshot = list(_TRADE_JOURNAL)
+    for rec in reversed(_journal_snapshot):
         if rec["ticker"] == ticker and rec["result"] is None:
             rec["result"] = "win" if won else ("loss" if pnl_usd < -0.005 else "even")
             rec["pnl_usd"] = round(pnl_usd, 2)
@@ -7340,6 +8001,23 @@ def _sync_kalshi_fills():
             }
             BOT_STATE["all_trades"].append(trade_rec)
 
+            # Also journal the external fill so the learning engine sees it.
+            # Without this, manual / Kalshi-direct bets never influence the
+            # category / sport / edge weights and we lose free signal.
+            try:
+                _journal_trade(
+                    ticker=ticker,
+                    title=title,
+                    side=side,
+                    price_cents=price_cents,
+                    count=count,
+                    cost_usd=cost_usd,
+                    strategy="manual",
+                    is_live=False,
+                )
+            except Exception as _je:
+                print(f"[SYNC] journal external fill failed: {_je}")
+
             new_external += 1
             _log_activity(
                 f"External bet detected: {side.upper()} {ticker} @ {price_cents}c x{count} (${cost_usd:.2f}) | {title[:40]}",
@@ -7545,6 +8223,18 @@ def _background_loop():
             # These are the money-makers — run them FIRST and FAST
             _snipe_results = live_game_snipe()
             _ms_results = moonshark_snipe()
+
+            # === NEW EDGE STRATEGIES ===
+            # Momentum swing fader — NBA/NCAAB/NHL overreactions
+            try:
+                momentum_swing_snipe()
+            except Exception as _swe:
+                print(f"[SWING] Error: {_swe}")
+            # Goalie-pulled mispricing — NHL last 3 min of P3
+            try:
+                goalie_pulled_snipe()
+            except Exception as _ge:
+                print(f"[GOALIE] Error: {_ge}")
 
             # Check for new settlements
             settlements = check_settlements_and_reinvest()
@@ -10059,7 +10749,7 @@ def status():
         "daily_bet_floor": DAILY_BET_FLOOR,
         "quota_shortfall": _quota_shortfall(),
         "floor_mode_active": _floor_mode_active(),
-        "daily_spent_usd": BOT_STATE.get("daily_spent_usd", 0) + BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0) + BOT_STATE.get("closegame_daily_spent", 0) + BOT_STATE.get("floor_daily_spent", 0),
+        "daily_spent_usd": BOT_STATE.get("daily_spent_usd", 0) + BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0) + BOT_STATE.get("closegame_daily_spent", 0) + BOT_STATE.get("floor_daily_spent", 0) + BOT_STATE.get("swing_daily_spent", 0) + BOT_STATE.get("goalie_daily_spent", 0),
         "total_trades_all_time": len(BOT_STATE["all_trades"]),
         "recent_errors": BOT_STATE["errors"][-5:],
         "scheduler_running": scheduler.running,
@@ -10067,6 +10757,10 @@ def status():
         "sniper_daily_spent": BOT_STATE.get("snipe_daily_spent", 0),
         "floor_trades_today": len(BOT_STATE.get("floor_trades_today", [])),
         "floor_daily_spent": BOT_STATE.get("floor_daily_spent", 0),
+        "swing_trades_today": len(BOT_STATE.get("swing_trades_today", [])),
+        "swing_daily_spent": BOT_STATE.get("swing_daily_spent", 0),
+        "goalie_trades_today": len(BOT_STATE.get("goalie_trades_today", [])),
+        "goalie_daily_spent": BOT_STATE.get("goalie_daily_spent", 0),
         "adaptive_thresholds": _LEARNING_STATE.get("adaptive", {}),
         "fill_rate": round(BOT_STATE.get("fill_successes", 0) / max(1, BOT_STATE.get("fill_attempts", 0)) * 100, 1),
         "fill_attempts": BOT_STATE.get("fill_attempts", 0),
