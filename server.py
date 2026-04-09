@@ -9125,6 +9125,173 @@ def _ensure_bg_on_request():
     _ensure_bg_thread()
 
 # ---------------------------------------------------------------------------
+# TradeShark home-screen icon (PWA apple-touch-icon)
+# ---------------------------------------------------------------------------
+# Generates a 180x180 PNG shark silhouette in golden-brown gradient on a
+# dark background, matching the header logo. Pure stdlib (zlib+struct) so we
+# don't need Pillow. Rendered once at import, then cached in-memory and
+# served by the /apple-touch-icon.png route.
+
+_APPLE_TOUCH_ICON_PNG = None
+_APPLE_TOUCH_ICON_192 = None
+_APPLE_TOUCH_ICON_512 = None
+
+def _build_tradeshark_icon_png(size=180):
+    """Build a PNG byte string of a golden shark logo on dark background."""
+    import struct, zlib
+    W = H = size
+    CX, CY = W / 2.0, H / 2.0
+    R = W / 2.0  # for normalized coords
+
+    # Golden color palette (matches header SVG gradient stops)
+    _GOLD = [
+        (90, 60, 26),    # #5a3a1a dark brown
+        (201, 150, 58),  # #c9963a gold
+        (168, 117, 48),  # #a87530 medium gold
+        (218, 176, 96),  # #dab060 light gold
+        (139, 94, 40),   # #8b5e28 bronze
+        (74, 46, 20),    # #4a2e14 darkest
+    ]
+
+    def _golden(t):
+        t = max(0.0, min(1.0, t))
+        seg = t * (len(_GOLD) - 1)
+        i = int(seg)
+        f = seg - i
+        if i >= len(_GOLD) - 1:
+            return _GOLD[-1]
+        c1, c2 = _GOLD[i], _GOLD[i + 1]
+        return (
+            int(c1[0] * (1 - f) + c2[0] * f),
+            int(c1[1] * (1 - f) + c2[1] * f),
+            int(c1[2] * (1 - f) + c2[2] * f),
+        )
+
+    # Shark silhouette in normalized coords nx,ny ∈ [-1, 1].
+    # Composed of: elongated body (ellipse), dorsal fin (triangle),
+    # tail fin (two triangles), pectoral fin (small triangle), eye.
+    def _in_body(nx, ny):
+        # Body: ellipse shifted right so tail has room on the left.
+        bx = nx - 0.08
+        by = ny + 0.02
+        return (bx / 0.58) ** 2 + (by / 0.22) ** 2 <= 1.0
+
+    def _in_dorsal(nx, ny):
+        # Triangle fin on top of body.
+        # Base from (-0.05, -0.18) to (0.20, -0.18), peak at (0.02, -0.46).
+        if ny > -0.18 or ny < -0.46:
+            return False
+        # Left edge: line from (-0.05,-0.18) to (0.02,-0.46)
+        t = (ny + 0.18) / (-0.46 + 0.18)  # 0..1 top to bottom? invert
+        # param p: 0 at base, 1 at peak
+        p = (-0.18 - ny) / 0.28
+        left = -0.05 + p * (0.02 - (-0.05))
+        right = 0.20 + p * (0.02 - 0.20)
+        return left <= nx <= right
+
+    def _in_tail(nx, ny):
+        # Tail fin: two overlapping triangles forming a crescent on the left.
+        # Upper lobe: triangle (-0.38,-0.02), (-0.82,-0.30), (-0.50,-0.02)
+        # Lower lobe: triangle (-0.38, 0.04), (-0.82, 0.32), (-0.50, 0.04)
+        def _tri(x1, y1, x2, y2, x3, y3):
+            d1 = (nx - x2) * (y1 - y2) - (x1 - x2) * (ny - y2)
+            d2 = (nx - x3) * (y2 - y3) - (x2 - x3) * (ny - y3)
+            d3 = (nx - x1) * (y3 - y1) - (x3 - x1) * (ny - y1)
+            has_neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
+            has_pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
+            return not (has_neg and has_pos)
+        return (
+            _tri(-0.38, -0.02, -0.82, -0.34, -0.48, -0.04)
+            or _tri(-0.38, 0.06, -0.82, 0.34, -0.48, 0.08)
+            or _tri(-0.50, -0.05, -0.50, 0.09, -0.30, 0.02)
+        )
+
+    def _in_pectoral(nx, ny):
+        # Small pec fin below body
+        def _tri(x1, y1, x2, y2, x3, y3):
+            d1 = (nx - x2) * (y1 - y2) - (x1 - x2) * (ny - y2)
+            d2 = (nx - x3) * (y2 - y3) - (x2 - x3) * (ny - y3)
+            d3 = (nx - x1) * (y3 - y1) - (x3 - x1) * (ny - y1)
+            has_neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
+            has_pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
+            return not (has_neg and has_pos)
+        return _tri(-0.05, 0.16, 0.22, 0.18, 0.00, 0.36)
+
+    def _in_shark(nx, ny):
+        return _in_body(nx, ny) or _in_dorsal(nx, ny) or _in_tail(nx, ny) or _in_pectoral(nx, ny)
+
+    def _in_eye(nx, ny):
+        # Eye near front of head
+        bx = nx - 0.08
+        by = ny + 0.02
+        return (bx - 0.35) ** 2 + (by + 0.03) ** 2 < 0.018 ** 2
+
+    def _in_eye_highlight(nx, ny):
+        bx = nx - 0.08
+        by = ny + 0.02
+        return (bx - 0.355) ** 2 + (by + 0.035) ** 2 < 0.008 ** 2
+
+    # 2x supersampling for smoother edges
+    SS = 2
+    rows = []
+    for y in range(H):
+        row = bytearray([0])  # PNG filter byte (0 = None)
+        for x in range(W):
+            # Sample SS*SS sub-pixels
+            acc_r = acc_g = acc_b = 0
+            for sy in range(SS):
+                for sx in range(SS):
+                    fx = x + (sx + 0.5) / SS
+                    fy = y + (sy + 0.5) / SS
+                    nx = (fx - CX) / R
+                    ny = (fy - CY) / R
+
+                    if _in_eye_highlight(nx, ny):
+                        pr, pg, pb = 230, 190, 110
+                    elif _in_eye(nx, ny):
+                        pr, pg, pb = 18, 10, 4
+                    elif _in_shark(nx, ny):
+                        # Gradient based on position (diagonal, matches header)
+                        t = (nx + 1.0) * 0.4 + (ny + 1.0) * 0.6
+                        pr, pg, pb = _golden(t * 0.9)
+                    else:
+                        # Dark background (#0d0d0d to #1a1a1a radial)
+                        d = (nx * nx + ny * ny) ** 0.5
+                        bg = max(10, int(26 - d * 16))
+                        pr, pg, pb = bg, bg, bg
+
+                    acc_r += pr
+                    acc_g += pg
+                    acc_b += pb
+            n = SS * SS
+            row.extend([acc_r // n, acc_g // n, acc_b // n, 255])
+        rows.append(bytes(row))
+
+    raw = b"".join(rows)
+
+    def _chunk(tag, data):
+        return (
+            struct.pack(">I", len(data))
+            + tag
+            + data
+            + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        )
+
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", W, H, 8, 6, 0, 0, 0)  # 8-bit RGBA
+    idat = zlib.compress(raw, 9)
+    return sig + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", idat) + _chunk(b"IEND", b"")
+
+try:
+    _APPLE_TOUCH_ICON_PNG = _build_tradeshark_icon_png(180)
+    _APPLE_TOUCH_ICON_192 = _build_tradeshark_icon_png(192)
+    # 512x512 is slow to rasterize pixel-by-pixel; skip unless needed.
+    _APPLE_TOUCH_ICON_512 = None
+except Exception as _e:
+    print(f"[icon] failed to build TradeShark PNG icon: {_e}")
+    _APPLE_TOUCH_ICON_PNG = None
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
@@ -9149,6 +9316,56 @@ def health():
         "trading_thread": "alive" if _bg_alive else "dead",
         "auto_trade": BOT_CONFIG.get("enabled", False),
         "uptime_cycles": BOT_STATE.get("cycle", 0),
+    })
+
+
+# ---- PWA icon & manifest (iPhone Add-to-Home-Screen) ---------------------
+
+def _icon_response(png_bytes):
+    if not png_bytes:
+        return ("icon unavailable", 503)
+    return app.response_class(
+        response=png_bytes,
+        mimetype="image/png",
+        headers={"Cache-Control": "public, max-age=604800"},
+    )
+
+@app.route("/apple-touch-icon.png")
+def apple_touch_icon():
+    return _icon_response(_APPLE_TOUCH_ICON_PNG)
+
+@app.route("/apple-touch-icon-precomposed.png")
+def apple_touch_icon_precomposed():
+    return _icon_response(_APPLE_TOUCH_ICON_PNG)
+
+@app.route("/apple-touch-icon-180x180.png")
+def apple_touch_icon_180():
+    return _icon_response(_APPLE_TOUCH_ICON_PNG)
+
+@app.route("/icon-192.png")
+def icon_192():
+    return _icon_response(_APPLE_TOUCH_ICON_192 or _APPLE_TOUCH_ICON_PNG)
+
+@app.route("/favicon.ico")
+def favicon_ico():
+    # Browsers accept a PNG under favicon.ico; saves having to hand-craft an ICO.
+    return _icon_response(_APPLE_TOUCH_ICON_PNG)
+
+@app.route("/manifest.json")
+def tradeshark_manifest():
+    return jsonify({
+        "name": "TradeShark",
+        "short_name": "TradeShark",
+        "description": "Kalshi prediction-market trading dashboard",
+        "start_url": "/",
+        "display": "standalone",
+        "orientation": "portrait",
+        "background_color": "#0d0d0d",
+        "theme_color": "#c9963a",
+        "icons": [
+            {"src": "/apple-touch-icon.png", "sizes": "180x180", "type": "image/png", "purpose": "any"},
+            {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+        ],
     })
 
 
@@ -15890,9 +16107,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>TradeShark</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦈</text></svg>">
+<!-- PWA / iOS Add-to-Home-Screen -->
+<link rel="icon" type="image/png" href="/favicon.ico">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png">
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="TradeShark">
+<meta name="theme-color" content="#0d0d0d">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 * { margin: 0; padding: 0; box-sizing: border-box; }
