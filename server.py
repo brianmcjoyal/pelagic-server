@@ -2428,9 +2428,12 @@ def check_position_prices():
             close_time = mkt.get("expected_expiration_time") or mkt.get("close_time")
             current_yes_price = None
             current_no_price = None
-            # Mark-to-market uses BID (what you could sell for) — not ask.
-            # Using ask inflates position values and is the wrong side for
-            # liquidation math. Fall back to ask only if bid is missing.
+            # Mark-to-market using the MIDPOINT of bid/ask (what Kalshi's UI
+            # uses for "Market value"). Pure bid is too conservative because
+            # illiquid longshots show bid=0 even though their last trade and
+            # fair value is 1c. Pure ask inflates. Mid matches Kalshi exactly.
+            # Floor at 1c for held positions (a held contract is worth at
+            # least 1c — the minimum tick).
             def _to_cents(v):
                 if v is None:
                     return None
@@ -2443,28 +2446,36 @@ def check_position_prices():
                     except (ValueError, TypeError):
                         return None
                 return None
-            # Cache format: *_bid_cents / *_ask_cents (ints); API format: yes_bid / yes_bid_dollars
-            if mkt.get("yes_bid_cents") is not None:
-                current_yes_price = int(mkt["yes_bid_cents"])
-            else:
-                current_yes_price = _to_cents(mkt.get("yes_bid_dollars") or mkt.get("yes_bid"))
-            if current_yes_price is None and mkt.get("yes_ask_cents") is not None:
-                current_yes_price = int(mkt["yes_ask_cents"])
-            elif current_yes_price is None:
-                current_yes_price = _to_cents(mkt.get("yes_ask_dollars") or mkt.get("yes_ask"))
-            if mkt.get("no_bid_cents") is not None:
-                current_no_price = int(mkt["no_bid_cents"])
-            else:
-                current_no_price = _to_cents(mkt.get("no_bid_dollars") or mkt.get("no_bid"))
-            if current_no_price is None and mkt.get("no_ask_cents") is not None:
-                current_no_price = int(mkt["no_ask_cents"])
-            elif current_no_price is None:
-                current_no_price = _to_cents(mkt.get("no_ask_dollars") or mkt.get("no_ask"))
+            def _pick_price(bid_v, ask_v):
+                """Return midpoint of bid/ask, or whichever exists, floored at 1c."""
+                if bid_v is not None and ask_v is not None:
+                    return max(1, int(round((bid_v + ask_v) / 2.0)))
+                if bid_v is not None:
+                    return max(1, int(bid_v))
+                if ask_v is not None:
+                    return max(1, int(ask_v))
+                return None
+            # YES side
+            _yes_bid = mkt.get("yes_bid_cents")
+            if _yes_bid is None:
+                _yes_bid = _to_cents(mkt.get("yes_bid_dollars") or mkt.get("yes_bid"))
+            _yes_ask = mkt.get("yes_ask_cents")
+            if _yes_ask is None:
+                _yes_ask = _to_cents(mkt.get("yes_ask_dollars") or mkt.get("yes_ask"))
+            current_yes_price = _pick_price(_yes_bid, _yes_ask)
+            # NO side
+            _no_bid = mkt.get("no_bid_cents")
+            if _no_bid is None:
+                _no_bid = _to_cents(mkt.get("no_bid_dollars") or mkt.get("no_bid"))
+            _no_ask = mkt.get("no_ask_cents")
+            if _no_ask is None:
+                _no_ask = _to_cents(mkt.get("no_ask_dollars") or mkt.get("no_ask"))
+            current_no_price = _pick_price(_no_bid, _no_ask)
             # Derive the missing side from 100-x if only one side is known
             if current_yes_price is None and current_no_price is not None:
-                current_yes_price = max(0, 100 - current_no_price)
+                current_yes_price = max(1, 100 - current_no_price)
             if current_no_price is None and current_yes_price is not None:
-                current_no_price = max(0, 100 - current_yes_price)
+                current_no_price = max(1, 100 - current_yes_price)
 
             # Find our entry price from trade history
             entry_price = None
