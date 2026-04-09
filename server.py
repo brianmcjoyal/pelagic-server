@@ -9418,7 +9418,7 @@ def _build_tradeshark_icon_png(size=180):
     shadow_mask = _box_blur(_box_blur(shadow_src, size, size, shadow_r), size, size, shadow_r)
 
     SHADOW_RGB = (180, 130, 60)
-    SHADOW_STRENGTH = 0.55
+    SHADOW_STRENGTH = 0.0  # halo disabled — match the header look exactly
     BG = (0x0d, 0x0d, 0x0d)
     EYE_RGB = (0x1a, 0x0e, 0x05)
     EYE_HL_RGB = (0xda, 0xb0, 0x60)
