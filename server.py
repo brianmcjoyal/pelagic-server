@@ -2228,15 +2228,22 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
             json=payload,
             timeout=TIMEOUT,
         )
-        if resp.status_code == 409:
-            # Retry with _dollars format and IOC
-            print(f"[ORDER] 409 with cents format, retrying with dollars format...")
+        if resp.status_code in (400, 409):
+            # Retry with _dollars format and IOC. Kalshi has been returning
+            # 400 Bad Request when given integer-cents price fields; the
+            # dollars-format payload is the currently accepted shape.
+            print(f"[ORDER] {resp.status_code} with cents format, retrying with dollars format...")
+            try:
+                _first_body = resp.text[:200]
+                print(f"[ORDER] first-try body: {_first_body}")
+            except Exception:
+                pass
             payload2 = {
                 "ticker": ticker,
                 "action": action,
                 "side": side,
                 "type": "limit",
-                "count_fp": f"{count_int}.00",
+                "count": count_int,
                 "client_order_id": str(uuid.uuid4()),
                 "time_in_force": "immediate_or_cancel",
             }
@@ -2244,9 +2251,11 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
                 payload2["yes_price_dollars"] = price_dollars
             else:
                 payload2["no_price_dollars"] = price_dollars
+            # Re-sign because POST path is the same but body changed
+            headers2 = signed_headers("POST", path) or headers
             resp = requests.post(
                 KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
-                headers=headers,
+                headers=headers2,
                 json=payload2,
                 timeout=TIMEOUT,
             )
@@ -5049,8 +5058,12 @@ def floor_quota_snipe():
         )
         result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob)
         if "error" in result:
-            err = result.get("error", "")[:80]
-            _log_activity(f"FLOOR failed: {ticker} — {err}", "error")
+            # Surface Kalshi's response body (not just our exception str) so
+            # we can actually diagnose what the API is rejecting.
+            _err_str = (result.get("error", "") or "")[:80]
+            _body_str = (result.get("response_body", "") or "")[:120]
+            _combined = (_err_str + " | " + _body_str).strip(" |")[:200]
+            _log_activity(f"FLOOR failed: {ticker} — {_combined}", "error")
             continue
 
         order_data = result.get("order", {})
