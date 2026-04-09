@@ -10169,7 +10169,28 @@ def analytics_learning():
     except Exception as _e:
         payload["errors"].append(f"peaks: {_e}")
 
-    return jsonify(payload)
+    # Defensive return — fall back to json.dumps(default=str) if any nested
+    # value (datetime, set, Decimal, custom object) trips jsonify.
+    try:
+        return jsonify(payload)
+    except (TypeError, ValueError) as _je:
+        try:
+            import json as _json
+            _safe = _json.dumps(payload, default=str)
+            return app.response_class(response=_safe, mimetype="application/json")
+        except Exception as _je2:
+            return jsonify({
+                "error": "serialization_failed",
+                "message": str(_je2)[:200],
+                "version": payload.get("version", 0) or 0,
+                "errors": (payload.get("errors") or []) + [f"jsonify: {_je}"],
+                "insights": [],
+                "parameters": {},
+                "per_strategy_7d": {},
+                "skip_reasons": {},
+                "recent_tunes": [],
+                "position_peaks": [],
+            })
 
 
 @app.route("/analytics")
