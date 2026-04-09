@@ -11869,8 +11869,42 @@ def _fetch_all_espn_scores():
                     _odds_list = competition.get("odds", [])
                     if _odds_list:
                         _odds = _odds_list[0]  # First provider (usually consensus)
-                        _home_ml = _odds.get("homeTeamOdds", {}).get("moneyLine")
-                        _away_ml = _odds.get("awayTeamOdds", {}).get("moneyLine")
+                        # Helper: parse ESPN moneyline from multiple schema shapes
+                        def _parse_ml_value(v):
+                            if v is None:
+                                return None
+                            if isinstance(v, (int, float)):
+                                return int(v)
+                            if isinstance(v, str):
+                                s = v.strip().replace("+", "")
+                                if not s or s.lower() in ("even", "pk"):
+                                    return 100
+                                try:
+                                    return int(float(s))
+                                except (ValueError, TypeError):
+                                    return None
+                            return None
+                        # Try OLD schema first: homeTeamOdds.moneyLine
+                        _home_ml = _parse_ml_value(_odds.get("homeTeamOdds", {}).get("moneyLine"))
+                        _away_ml = _parse_ml_value(_odds.get("awayTeamOdds", {}).get("moneyLine"))
+                        # Fallback to NEW schema: moneyline.home.close.odds (string like "+210")
+                        if _home_ml is None or _away_ml is None:
+                            _ml_block = _odds.get("moneyline") or {}
+                            _home_block = _ml_block.get("home", {}) if isinstance(_ml_block, dict) else {}
+                            _away_block = _ml_block.get("away", {}) if isinstance(_ml_block, dict) else {}
+                            # Try close first, then open, then current
+                            for _k in ("close", "current", "open"):
+                                if _home_ml is None:
+                                    _home_ml = _parse_ml_value((_home_block.get(_k) or {}).get("odds") if isinstance(_home_block.get(_k), dict) else _home_block.get(_k))
+                                if _away_ml is None:
+                                    _away_ml = _parse_ml_value((_away_block.get(_k) or {}).get("odds") if isinstance(_away_block.get(_k), dict) else _away_block.get(_k))
+                                if _home_ml is not None and _away_ml is not None:
+                                    break
+                            # Also try moneyLineOdds (some feeds) and flat keys
+                            if _home_ml is None:
+                                _home_ml = _parse_ml_value(_odds.get("homeTeamOdds", {}).get("moneyLineOdds"))
+                            if _away_ml is None:
+                                _away_ml = _parse_ml_value(_odds.get("awayTeamOdds", {}).get("moneyLineOdds"))
                         if _home_ml is not None and _away_ml is not None:
                             # Convert moneyline to implied probability
                             def _ml_to_prob(ml):
