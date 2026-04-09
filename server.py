@@ -9127,144 +9127,389 @@ def _ensure_bg_on_request():
 # ---------------------------------------------------------------------------
 # TradeShark home-screen icon (PWA apple-touch-icon)
 # ---------------------------------------------------------------------------
-# Generates a 180x180 PNG shark silhouette in golden-brown gradient on a
-# dark background, matching the header logo. Pure stdlib (zlib+struct) so we
-# don't need Pillow. Rendered once at import, then cached in-memory and
-# served by the /apple-touch-icon.png route.
+# Renders the EXACT header <svg class="logo"> shark shape to a PNG using a
+# minimal pure-stdlib SVG path parser + scanline rasterizer. This way the
+# iPhone home-screen icon is pixel-identical to the logo in the dashboard
+# header (same silhouette, same sharkG/sharkFin/sharkHL gradients, same
+# eye circles, same gold drop-shadow halo). No Pillow / cairo required.
 
 _APPLE_TOUCH_ICON_PNG = None
 _APPLE_TOUCH_ICON_192 = None
 _APPLE_TOUCH_ICON_512 = None
 
+# Paths copied verbatim from the header <svg class="logo"> (viewBox 0 0 64 64)
+_SHARK_BODY_PATH = (
+    "M8 38c0 0 4-18 20-22c2-6 8-12 14-14c-2 6-1 10 0 14"
+    "c6 3 12 8 14 16c1 4 0 8-2 11l-6 3l2-6l-4 5l-8 2l3-4l-6 3"
+    "c-4 1-10 1-14-1l4-3l-7 1c-4-1-7-3-9-6"
+)
+_SHARK_HL_PATH = (
+    "M8 38c0 0 4-18 20-22c2-6 8-12 14-14c-2 6-1 10 0 14"
+    "c6 3 12 8 14 16"
+)
+_SHARK_FIN_PATH = "M28 40l-4 10l6-8l5 12l4-11l6 8l-2-11"
+
+# Gradient stops (RGB 0-255), matching the SVG's linearGradients
+_SHARK_G_STOPS = [
+    (0.00, (0x5a, 0x3a, 0x1a)),
+    (0.18, (0xc9, 0x96, 0x3a)),
+    (0.35, (0xa8, 0x75, 0x30)),
+    (0.50, (0xda, 0xb0, 0x60)),
+    (0.65, (0x8b, 0x5e, 0x28)),
+    (0.80, (0xc9, 0x96, 0x3a)),
+    (1.00, (0x4a, 0x2e, 0x14)),
+]
+_SHARK_FIN_STOPS = [
+    (0.00, (0x8b, 0x5e, 0x28)),
+    (0.50, (0xc9, 0x96, 0x3a)),
+    (1.00, (0x5a, 0x3a, 0x1a)),
+]
+# Highlight layer gradient: gold → transparent (uses RGBA)
+_SHARK_HL_STOPS = [
+    (0.00, (0xda, 0xb0, 0x60, 0.60)),
+    (1.00, (0x8b, 0x5e, 0x28, 0.00)),
+]
+
+def _parse_svg_path(path_str, bezier_steps=28):
+    """Minimal SVG path → flat list of (x,y) polygon points.
+    Supports M/m, L/l, C/c, Z/z with cubic-bezier flattening."""
+    import re
+    tokens = re.findall(
+        r'[MmLlCcZz]|-?\d*\.?\d+(?:[eE][-+]?\d+)?', path_str
+    )
+    i = 0
+    x = y = 0.0
+    start_x = start_y = 0.0
+    last_cmd = ''
+    points = []
+
+    def _flatten_cubic(x1, y1, c1x, c1y, c2x, c2y, x2, y2, n):
+        out = []
+        for k in range(1, n + 1):
+            t = k / n
+            mt = 1.0 - t
+            mt2 = mt * mt
+            t2 = t * t
+            px = (mt2 * mt) * x1 + 3 * mt2 * t * c1x + 3 * mt * t2 * c2x + (t2 * t) * x2
+            py = (mt2 * mt) * y1 + 3 * mt2 * t * c1y + 3 * mt * t2 * c2y + (t2 * t) * y2
+            out.append((px, py))
+        return out
+
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok and tok[0] in 'MmLlCcZz':
+            cmd = tok
+            i += 1
+        else:
+            if last_cmd == 'M':
+                cmd = 'L'
+            elif last_cmd == 'm':
+                cmd = 'l'
+            else:
+                cmd = last_cmd
+
+        if cmd == 'M':
+            x = float(tokens[i]); i += 1
+            y = float(tokens[i]); i += 1
+            start_x, start_y = x, y
+            points.append((x, y))
+        elif cmd == 'm':
+            x += float(tokens[i]); i += 1
+            y += float(tokens[i]); i += 1
+            start_x, start_y = x, y
+            points.append((x, y))
+        elif cmd == 'L':
+            x = float(tokens[i]); i += 1
+            y = float(tokens[i]); i += 1
+            points.append((x, y))
+        elif cmd == 'l':
+            x += float(tokens[i]); i += 1
+            y += float(tokens[i]); i += 1
+            points.append((x, y))
+        elif cmd == 'C':
+            c1x = float(tokens[i]); i += 1
+            c1y = float(tokens[i]); i += 1
+            c2x = float(tokens[i]); i += 1
+            c2y = float(tokens[i]); i += 1
+            x2  = float(tokens[i]); i += 1
+            y2  = float(tokens[i]); i += 1
+            points.extend(_flatten_cubic(x, y, c1x, c1y, c2x, c2y, x2, y2, bezier_steps))
+            x, y = x2, y2
+        elif cmd == 'c':
+            c1x = x + float(tokens[i]); i += 1
+            c1y = y + float(tokens[i]); i += 1
+            c2x = x + float(tokens[i]); i += 1
+            c2y = y + float(tokens[i]); i += 1
+            x2  = x + float(tokens[i]); i += 1
+            y2  = y + float(tokens[i]); i += 1
+            points.extend(_flatten_cubic(x, y, c1x, c1y, c2x, c2y, x2, y2, bezier_steps))
+            x, y = x2, y2
+        elif cmd in 'Zz':
+            if (x, y) != (start_x, start_y):
+                points.append((start_x, start_y))
+            x, y = start_x, start_y
+        last_cmd = cmd
+
+    if points and points[0] != points[-1]:
+        points.append(points[0])
+    return points
+
+
+def _rasterize_polygon(poly, W, H, ox, oy, sx, sy, ss=4):
+    """Scanline polygon rasterizer with Y-supersampled AA.
+    Returns flat list of W*H alpha values in [0,1]."""
+    import math as _m
+    pts = [((p[0] - ox) * sx, (p[1] - oy) * sy) for p in poly]
+    n = len(pts)
+    edges = []
+    for i in range(n - 1):
+        x1, y1 = pts[i]
+        x2, y2 = pts[i + 1]
+        if y1 == y2:
+            continue
+        if y1 < y2:
+            edges.append((x1, y1, x2, y2))
+        else:
+            edges.append((x2, y2, x1, y1))
+
+    mask = [0.0] * (W * H)
+    inv_ss = 1.0 / ss
+    for y_sub in range(H * ss):
+        y_sample = (y_sub + 0.5) / ss
+        y_pixel = y_sub // ss
+        if y_pixel >= H:
+            continue
+        xs = []
+        for (x1, y1, x2, y2) in edges:
+            if y_sample < y1 or y_sample >= y2:
+                continue
+            t = (y_sample - y1) / (y2 - y1)
+            xs.append(x1 + t * (x2 - x1))
+        xs.sort()
+        base = y_pixel * W
+        for k in range(0, len(xs) - 1, 2):
+            xa = xs[k]
+            xb = xs[k + 1]
+            px0 = int(_m.floor(xa))
+            px1 = int(_m.ceil(xb))
+            if px1 < 0 or px0 >= W:
+                continue
+            if px0 < 0:
+                px0 = 0
+            if px1 > W:
+                px1 = W
+            for px in range(px0, px1):
+                left = xa if xa > px else px
+                right = xb if xb < (px + 1) else (px + 1)
+                cov = right - left
+                if cov > 0:
+                    v = mask[base + px] + cov * inv_ss
+                    if v > 1.0:
+                        v = 1.0
+                    mask[base + px] = v
+    return mask
+
+
+def _sample_gradient(stops, t):
+    if t <= stops[0][0]:
+        return stops[0][1]
+    if t >= stops[-1][0]:
+        return stops[-1][1]
+    for i in range(len(stops) - 1):
+        t0, c0 = stops[i]
+        t1, c1 = stops[i + 1]
+        if t0 <= t <= t1:
+            f = (t - t0) / (t1 - t0)
+            if len(c0) == 4:
+                return (
+                    c0[0] * (1 - f) + c1[0] * f,
+                    c0[1] * (1 - f) + c1[1] * f,
+                    c0[2] * (1 - f) + c1[2] * f,
+                    c0[3] * (1 - f) + c1[3] * f,
+                )
+            return (
+                c0[0] * (1 - f) + c1[0] * f,
+                c0[1] * (1 - f) + c1[1] * f,
+                c0[2] * (1 - f) + c1[2] * f,
+            )
+    return stops[-1][1]
+
+
 def _build_tradeshark_icon_png(size=180):
-    """Build a PNG byte string of a golden shark logo on dark background."""
-    import struct, zlib
-    W = H = size
-    CX, CY = W / 2.0, H / 2.0
-    R = W / 2.0  # for normalized coords
+    """Render the TradeShark header SVG logo to a PNG at `size`×`size`."""
+    import struct, zlib, math
 
-    # Golden color palette (matches header SVG gradient stops)
-    _GOLD = [
-        (90, 60, 26),    # #5a3a1a dark brown
-        (201, 150, 58),  # #c9963a gold
-        (168, 117, 48),  # #a87530 medium gold
-        (218, 176, 96),  # #dab060 light gold
-        (139, 94, 40),   # #8b5e28 bronze
-        (74, 46, 20),    # #4a2e14 darkest
-    ]
+    body_poly = _parse_svg_path(_SHARK_BODY_PATH)
+    hl_poly   = _parse_svg_path(_SHARK_HL_PATH)
+    fin_poly  = _parse_svg_path(_SHARK_FIN_PATH)
 
-    def _golden(t):
-        t = max(0.0, min(1.0, t))
-        seg = t * (len(_GOLD) - 1)
-        i = int(seg)
-        f = seg - i
-        if i >= len(_GOLD) - 1:
-            return _GOLD[-1]
-        c1, c2 = _GOLD[i], _GOLD[i + 1]
-        return (
-            int(c1[0] * (1 - f) + c2[0] * f),
-            int(c1[1] * (1 - f) + c2[1] * f),
-            int(c1[2] * (1 - f) + c2[2] * f),
-        )
+    def _bbox(poly):
+        xs = [p[0] for p in poly]
+        ys = [p[1] for p in poly]
+        return min(xs), min(ys), max(xs), max(ys)
 
-    # Shark silhouette in normalized coords nx,ny ∈ [-1, 1].
-    # Composed of: elongated body (ellipse), dorsal fin (triangle),
-    # tail fin (two triangles), pectoral fin (small triangle), eye.
-    def _in_body(nx, ny):
-        # Body: ellipse shifted right so tail has room on the left.
-        bx = nx - 0.08
-        by = ny + 0.02
-        return (bx / 0.58) ** 2 + (by / 0.22) ** 2 <= 1.0
+    bx0, by0, bx1, by1 = _bbox(body_poly)
+    fx0, fy0, fx1, fy1 = _bbox(fin_poly)
+    ex0, ey0, ex1, ey1 = 42, 26, 46, 30  # eye bbox
+    vx0 = min(bx0, fx0, ex0)
+    vy0 = min(by0, fy0, ey0)
+    vx1 = max(bx1, fx1, ex1)
+    vy1 = max(by1, fy1, ey1)
 
-    def _in_dorsal(nx, ny):
-        # Triangle fin on top of body.
-        # Base from (-0.05, -0.18) to (0.20, -0.18), peak at (0.02, -0.46).
-        if ny > -0.18 or ny < -0.46:
-            return False
-        # Left edge: line from (-0.05,-0.18) to (0.02,-0.46)
-        t = (ny + 0.18) / (-0.46 + 0.18)  # 0..1 top to bottom? invert
-        # param p: 0 at base, 1 at peak
-        p = (-0.18 - ny) / 0.28
-        left = -0.05 + p * (0.02 - (-0.05))
-        right = 0.20 + p * (0.02 - 0.20)
-        return left <= nx <= right
+    shape_w = vx1 - vx0
+    shape_h = vy1 - vy0
+    pad_frac = 0.08
+    usable = size * (1 - 2 * pad_frac)
+    scale = usable / max(shape_w, shape_h)
+    draw_w = shape_w * scale
+    draw_h = shape_h * scale
+    ox = vx0 - (size - draw_w) / 2 / scale
+    oy = vy0 - (size - draw_h) / 2 / scale
 
-    def _in_tail(nx, ny):
-        # Tail fin: two overlapping triangles forming a crescent on the left.
-        # Upper lobe: triangle (-0.38,-0.02), (-0.82,-0.30), (-0.50,-0.02)
-        # Lower lobe: triangle (-0.38, 0.04), (-0.82, 0.32), (-0.50, 0.04)
-        def _tri(x1, y1, x2, y2, x3, y3):
-            d1 = (nx - x2) * (y1 - y2) - (x1 - x2) * (ny - y2)
-            d2 = (nx - x3) * (y2 - y3) - (x2 - x3) * (ny - y3)
-            d3 = (nx - x1) * (y3 - y1) - (x3 - x1) * (ny - y1)
-            has_neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
-            has_pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
-            return not (has_neg and has_pos)
-        return (
-            _tri(-0.38, -0.02, -0.82, -0.34, -0.48, -0.04)
-            or _tri(-0.38, 0.06, -0.82, 0.34, -0.48, 0.08)
-            or _tri(-0.50, -0.05, -0.50, 0.09, -0.30, 0.02)
-        )
+    body_mask = _rasterize_polygon(body_poly, size, size, ox, oy, scale, scale, ss=4)
+    hl_mask   = _rasterize_polygon(hl_poly,   size, size, ox, oy, scale, scale, ss=4)
+    fin_mask  = _rasterize_polygon(fin_poly,  size, size, ox, oy, scale, scale, ss=4)
 
-    def _in_pectoral(nx, ny):
-        # Small pec fin below body
-        def _tri(x1, y1, x2, y2, x3, y3):
-            d1 = (nx - x2) * (y1 - y2) - (x1 - x2) * (ny - y2)
-            d2 = (nx - x3) * (y2 - y3) - (x2 - x3) * (ny - y3)
-            d3 = (nx - x1) * (y3 - y1) - (x3 - x1) * (ny - y1)
-            has_neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
-            has_pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
-            return not (has_neg and has_pos)
-        return _tri(-0.05, 0.16, 0.22, 0.18, 0.00, 0.36)
+    # Gold drop-shadow halo: blur of body_mask offset down a couple of pixels,
+    # blended with warm gold color — matches the SVG's drop-shadow filter.
+    def _box_blur(src, W, H, radius):
+        if radius <= 0:
+            return list(src)
+        out = [0.0] * (W * H)
+        denom = 2 * radius + 1
+        # Horizontal pass
+        for y in range(H):
+            base = y * W
+            acc = 0.0
+            for x in range(-radius, W):
+                ax = x + radius
+                sx_ = x - radius - 1
+                if 0 <= ax < W:
+                    acc += src[base + ax]
+                if 0 <= sx_ < W:
+                    acc -= src[base + sx_]
+                if 0 <= x < W:
+                    out[base + x] = acc / denom
+        # Vertical pass
+        out2 = [0.0] * (W * H)
+        for xcol in range(W):
+            acc = 0.0
+            for y in range(-radius, H):
+                ay = y + radius
+                sy_ = y - radius - 1
+                if 0 <= ay < H:
+                    acc += out[ay * W + xcol]
+                if 0 <= sy_ < H:
+                    acc -= out[sy_ * W + xcol]
+                if 0 <= y < H:
+                    out2[y * W + xcol] = acc / denom
+        return out2
 
-    def _in_shark(nx, ny):
-        return _in_body(nx, ny) or _in_dorsal(nx, ny) or _in_tail(nx, ny) or _in_pectoral(nx, ny)
+    shadow_r = max(3, size // 30)
+    shadow_offset = max(1, size // 90)
+    shadow_src = [0.0] * (size * size)
+    for py in range(size):
+        src_y = py - shadow_offset
+        if 0 <= src_y < size:
+            base_dst = py * size
+            base_src = src_y * size
+            for px in range(size):
+                shadow_src[base_dst + px] = body_mask[base_src + px]
+    shadow_mask = _box_blur(_box_blur(shadow_src, size, size, shadow_r), size, size, shadow_r)
 
-    def _in_eye(nx, ny):
-        # Eye near front of head
-        bx = nx - 0.08
-        by = ny + 0.02
-        return (bx - 0.35) ** 2 + (by + 0.03) ** 2 < 0.018 ** 2
+    SHADOW_RGB = (180, 130, 60)
+    SHADOW_STRENGTH = 0.55
+    BG = (0x0d, 0x0d, 0x0d)
+    EYE_RGB = (0x1a, 0x0e, 0x05)
+    EYE_HL_RGB = (0xda, 0xb0, 0x60)
 
-    def _in_eye_highlight(nx, ny):
-        bx = nx - 0.08
-        by = ny + 0.02
-        return (bx - 0.355) ** 2 + (by + 0.035) ** 2 < 0.008 ** 2
+    body_bbox = (bx0, by0, bx1, by1)
+    fin_bbox  = (fx0, fy0, fx1, fy1)
+    body_dw = max(1e-9, bx1 - bx0)
+    body_dh = max(1e-9, by1 - by0)
+    fin_dw  = max(1e-9, fx1 - fx0)
+    fin_dh  = max(1e-9, fy1 - fy0)
+    # HL gradient is (0%,0%) → (50%,100%) of body bbox
+    hl_dw = max(1e-9, (bx1 - bx0) * 0.5)
+    hl_dh = max(1e-9, by1 - by0)
 
-    # 2x supersampling for smoother edges
-    SS = 2
+    def _mix(a, b, t):
+        it = 1.0 - t
+        return (a[0] * it + b[0] * t,
+                a[1] * it + b[1] * t,
+                a[2] * it + b[2] * t)
+
     rows = []
-    for y in range(H):
-        row = bytearray([0])  # PNG filter byte (0 = None)
-        for x in range(W):
-            # Sample SS*SS sub-pixels
-            acc_r = acc_g = acc_b = 0
-            for sy in range(SS):
-                for sx in range(SS):
-                    fx = x + (sx + 0.5) / SS
-                    fy = y + (sy + 0.5) / SS
-                    nx = (fx - CX) / R
-                    ny = (fy - CY) / R
+    for py in range(size):
+        row = bytearray([0])
+        for px in range(size):
+            sx = ox + (px + 0.5) / scale
+            sy = oy + (py + 0.5) / scale
+            idx = py * size + px
+            a_body = body_mask[idx]
+            a_hl   = hl_mask[idx]
+            a_fin  = fin_mask[idx]
+            a_sh   = shadow_mask[idx]
 
-                    if _in_eye_highlight(nx, ny):
-                        pr, pg, pb = 230, 190, 110
-                    elif _in_eye(nx, ny):
-                        pr, pg, pb = 18, 10, 4
-                    elif _in_shark(nx, ny):
-                        # Gradient based on position (diagonal, matches header)
-                        t = (nx + 1.0) * 0.4 + (ny + 1.0) * 0.6
-                        pr, pg, pb = _golden(t * 0.9)
-                    else:
-                        # Dark background (#0d0d0d to #1a1a1a radial)
-                        d = (nx * nx + ny * ny) ** 0.5
-                        bg = max(10, int(26 - d * 16))
-                        pr, pg, pb = bg, bg, bg
+            color = BG
+            if a_sh > 0.002:
+                g_alpha = a_sh * SHADOW_STRENGTH
+                if g_alpha > 1.0:
+                    g_alpha = 1.0
+                color = _mix(color, SHADOW_RGB, g_alpha)
 
-                    acc_r += pr
-                    acc_g += pg
-                    acc_b += pb
-            n = SS * SS
-            row.extend([acc_r // n, acc_g // n, acc_b // n, 255])
+            if a_body > 0:
+                tg = ((sx - bx0) / body_dw + (sy - by0) / body_dh) / 2.0
+                if tg < 0: tg = 0.0
+                elif tg > 1: tg = 1.0
+                bc = _sample_gradient(_SHARK_G_STOPS, tg)
+                color = _mix(color, bc, a_body)
+
+                if a_hl > 0:
+                    hl_t = ((sx - bx0) / hl_dw + (sy - by0) / hl_dh) / 2.0
+                    if hl_t < 0: hl_t = 0.0
+                    elif hl_t > 1: hl_t = 1.0
+                    hc = _sample_gradient(_SHARK_HL_STOPS, hl_t)
+                    h_alpha = hc[3] * a_hl
+                    color = _mix(color, (hc[0], hc[1], hc[2]), h_alpha)
+
+                # Eye circles in SVG units
+                edx = sx - 44
+                edy = sy - 28
+                ed2 = edx * edx + edy * edy
+                if ed2 < (2.2 * 2.2):
+                    ed = math.sqrt(ed2)
+                    eye_a = (2.0 - ed) * scale * 0.5 + 0.5
+                    if eye_a < 0: eye_a = 0.0
+                    elif eye_a > 1: eye_a = 1.0
+                    color = _mix(color, EYE_RGB, eye_a)
+                    ehdx = sx - 44.5
+                    ehdy = sy - 27.3
+                    eh2 = ehdx * ehdx + ehdy * ehdy
+                    if eh2 < (0.9 * 0.9):
+                        eh = math.sqrt(eh2)
+                        ehl_a = ((0.7 - eh) * scale * 0.5 + 0.5) * 0.8
+                        if ehl_a < 0: ehl_a = 0.0
+                        elif ehl_a > 1: ehl_a = 1.0
+                        color = _mix(color, EYE_HL_RGB, ehl_a)
+
+            if a_fin > 0:
+                tg = ((sx - fx0) / fin_dw + (sy - fy0) / fin_dh) / 2.0
+                if tg < 0: tg = 0.0
+                elif tg > 1: tg = 1.0
+                fc = _sample_gradient(_SHARK_FIN_STOPS, tg)
+                color = _mix(color, fc, a_fin * 0.85)
+
+            r = int(color[0] + 0.5)
+            g = int(color[1] + 0.5)
+            b = int(color[2] + 0.5)
+            if r > 255: r = 255
+            elif r < 0: r = 0
+            if g > 255: g = 255
+            elif g < 0: g = 0
+            if b > 255: b = 255
+            elif b < 0: b = 0
+            row.extend([r, g, b, 255])
         rows.append(bytes(row))
 
     raw = b"".join(rows)
@@ -9278,14 +9523,13 @@ def _build_tradeshark_icon_png(size=180):
         )
 
     sig = b"\x89PNG\r\n\x1a\n"
-    ihdr = struct.pack(">IIBBBBB", W, H, 8, 6, 0, 0, 0)  # 8-bit RGBA
+    ihdr = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)
     idat = zlib.compress(raw, 9)
     return sig + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", idat) + _chunk(b"IEND", b"")
 
 try:
     _APPLE_TOUCH_ICON_PNG = _build_tradeshark_icon_png(180)
     _APPLE_TOUCH_ICON_192 = _build_tradeshark_icon_png(192)
-    # 512x512 is slow to rasterize pixel-by-pixel; skip unless needed.
     _APPLE_TOUCH_ICON_512 = None
 except Exception as _e:
     print(f"[icon] failed to build TradeShark PNG icon: {_e}")
