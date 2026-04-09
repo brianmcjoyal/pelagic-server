@@ -4942,19 +4942,15 @@ def floor_quota_snipe():
             except Exception:
                 continue
 
-            # ESPN validation — the whole point is we only bet when ESPN agrees
-            _team = _parts[-1].upper() if len(_parts) >= 2 else ""
-            _game = None
-            if _team:
-                try:
-                    _game = _get_espn_scores().get(_team.lower())
-                except Exception:
-                    pass
+            # ESPN validation — league-aware lookup so Kalshi team codes that
+            # differ from ESPN (WAS vs WSH, GSW vs GS, etc.) still resolve, and
+            # so shared codes across sports (CHI: Bulls vs Fire) don't collide.
+            _game, _espn_team = _find_espn_game_for_kalshi_ticker(ticker, title)
 
             _espn_prob = None
             if _game and _game.get("event_id"):
                 try:
-                    _is_home = _game.get("home_abbrev", "").upper() == _team
+                    _is_home = _game.get("home_abbrev", "").upper() == _espn_team
                     _espn_prob = _get_espn_win_prob(
                         _game["event_id"],
                         (_game.get("league") or "").lower(),
@@ -4962,12 +4958,12 @@ def floor_quota_snipe():
                     )
                 except Exception:
                     pass
-            # Fall back to moneyline implied probability
+            # Fall back to moneyline implied probability from ESPN odds feed
             if _espn_prob is None and _game and _game.get("odds"):
                 _odds = _game["odds"]
-                if _game.get("home_abbrev", "").upper() == _team:
+                if _game.get("home_abbrev", "").upper() == _espn_team:
                     _espn_prob = _odds.get("home_implied") or None
-                elif _game.get("away_abbrev", "").upper() == _team:
+                elif _game.get("away_abbrev", "").upper() == _espn_team:
                     _espn_prob = _odds.get("away_implied") or None
 
             if _espn_prob is None or _espn_prob <= 0:
@@ -11933,9 +11929,127 @@ def _fetch_all_espn_scores():
                                 team["short"].lower(), team["location"].lower()]:
                         if key:
                             games[key] = game_info
+                    # ALSO index under league-scoped key so shared codes
+                    # (e.g., "chi" is Bulls in NBA but Fire in MLS) don't
+                    # collide across sports. Lookup via
+                    # games["__league__nba__chi"] = nba_bulls_game.
+                    _lg = league.lower()
+                    for key in [team["abbrev"].lower(), team["name"].lower(),
+                                team["short"].lower(), team["location"].lower()]:
+                        if key:
+                            games[f"__league__{_lg}__{key}"] = game_info
         except Exception:
             continue
     return games
+
+
+# Map Kalshi ticker prefix → ESPN league key (matches _ESPN_ENDPOINTS above).
+_KALSHI_PREFIX_TO_ESPN_LEAGUE = {
+    "KXMLBGAME": "mlb",
+    "KXNBAGAME": "nba",
+    "KXNHLGAME": "nhl",
+    "KXNCAAMBGAME": "ncaab",
+    "KXNCAAWBGAME": "ncaawb",
+    "KXKBLGAME": "kbo",
+    "KXSOCCERGAME": "mls",  # also tries epl in helper
+    "KXATPMATCH": "atp",
+    "KXWTAMATCH": "wta",
+    "KXATPCHALLENGERMATCH": "atp",
+}
+
+# Kalshi team-suffix → ESPN abbreviation (only for mismatches — same-name
+# codes don't need an entry because the direct lookup already works).
+_KALSHI_TEAM_TO_ESPN = {
+    # NBA
+    "WAS": "WSH",   # Washington Wizards (Kalshi WAS, ESPN WSH)
+    "GSW": "GS",    # Golden State Warriors (Kalshi GSW, ESPN GS)
+    "NYK": "NY",    # New York Knicks (Kalshi NYK, ESPN NY)
+    "NOP": "NO",    # New Orleans Pelicans (Kalshi NOP, ESPN NO)
+    "SAS": "SA",    # San Antonio Spurs
+    # NHL
+    "TBL": "TB",    # Tampa Bay Lightning
+    "LAK": "LA",    # LA Kings
+    "SJS": "SJ",    # San Jose Sharks
+    "NJD": "NJ",    # New Jersey Devils
+    "VGK": "VGS",   # Vegas Golden Knights (ESPN sometimes uses VGS)
+    # MLB — most match. A few Kalshi uses slightly different codes.
+    "SFG": "SF",    # San Francisco Giants
+    "TBR": "TB",    # Tampa Bay Rays
+    "KCR": "KC",    # Kansas City Royals
+    "SDP": "SD",    # San Diego Padres
+    "WSN": "WSH",   # Washington Nationals
+    "CWS": "CHW",   # Chicago White Sox
+}
+
+
+def _kalshi_suffix_to_espn_abbrev(suffix):
+    """Normalize a Kalshi ticker team suffix (e.g. 'WAS') to the ESPN
+    abbreviation ('WSH'). Returns the input uppercased if no mapping exists."""
+    if not suffix:
+        return ""
+    up = suffix.upper()
+    return _KALSHI_TEAM_TO_ESPN.get(up, up)
+
+
+def _find_espn_game_for_kalshi_ticker(ticker, title=""):
+    """League-aware ESPN game lookup for a Kalshi sports ticker.
+
+    Returns (game_info, resolved_espn_abbrev) or (None, "").
+    Strategy:
+      1. Determine ESPN league from the Kalshi ticker prefix.
+      2. Extract the team suffix from the ticker (portion after the last '-').
+      3. Translate the Kalshi suffix to the ESPN abbrev via alias map.
+      4. Look up in the league-scoped index; fall back to league-scoped
+         lookups for alternate forms, then title-based extraction.
+    """
+    if not ticker:
+        return None, ""
+    t_upper = ticker.upper()
+    # Determine league from prefix
+    league = None
+    for prefix, lg in _KALSHI_PREFIX_TO_ESPN_LEAGUE.items():
+        if t_upper.startswith(prefix):
+            league = lg
+            break
+    scores_map = _get_espn_scores() or {}
+    parts = ticker.split("-")
+    raw_suffix = parts[-1] if len(parts) >= 2 else ""
+    espn_abbrev = _kalshi_suffix_to_espn_abbrev(raw_suffix)
+    # Candidate lookup keys, league-scoped first
+    candidates = []
+    if league:
+        candidates.extend([
+            f"__league__{league}__{espn_abbrev.lower()}",
+            f"__league__{league}__{raw_suffix.lower()}",
+        ])
+        # Also try EPL when ticker is soccer (MLS first, EPL as fallback)
+        if league == "mls":
+            candidates.extend([
+                f"__league__epl__{espn_abbrev.lower()}",
+                f"__league__epl__{raw_suffix.lower()}",
+            ])
+    # Unscoped fallbacks (may hit wrong league but better than nothing)
+    candidates.extend([espn_abbrev.lower(), raw_suffix.lower()])
+    for key in candidates:
+        if key and key in scores_map:
+            return scores_map[key], espn_abbrev
+    # Title-based fallback (still prefers league-scoped if possible)
+    try:
+        team_names = _extract_teams_from_title(title)
+        if team_names:
+            # Try league-scoped title lookups first
+            if league:
+                for name in team_names:
+                    scoped_key = f"__league__{league}__{name.lower()}"
+                    if scoped_key in scores_map:
+                        return scores_map[scoped_key], espn_abbrev
+            # Generic alias-based lookup
+            game = _find_game_for_teams(team_names, scores_map)
+            if game and (not league or (game.get("league") or "").lower() == league):
+                return game, espn_abbrev
+    except Exception:
+        pass
+    return None, espn_abbrev
 
 
 def _extract_teams_from_title(title):
