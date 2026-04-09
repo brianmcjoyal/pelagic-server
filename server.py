@@ -2400,8 +2400,10 @@ def check_position_prices():
             if abs_count > 0 and ticker not in _mkt_lookup:
                 missing_tickers.append(ticker)
 
-        # Fetch missing tickers individually but with short timeout
-        for ticker in missing_tickers[:20]:  # cap at 20 to avoid slow loads
+        # Fetch missing tickers individually — no cap so mark-to-market
+        # matches Kalshi for ALL open positions, not just the first 20.
+        # Short per-request timeout keeps tail latency bounded.
+        for ticker in missing_tickers:
             try:
                 market_path = f"/markets/{ticker}"
                 mkt_headers = signed_headers("GET", market_path)
@@ -2426,23 +2428,43 @@ def check_position_prices():
             close_time = mkt.get("expected_expiration_time") or mkt.get("close_time")
             current_yes_price = None
             current_no_price = None
-            # Handle both cache format (yes_ask_cents) and raw API format (yes_ask as decimal)
-            if mkt.get("yes_ask_cents"):
-                current_yes_price = int(mkt["yes_ask_cents"])
-                current_no_price = int(mkt.get("no_ask_cents", 100 - current_yes_price))
+            # Mark-to-market uses BID (what you could sell for) — not ask.
+            # Using ask inflates position values and is the wrong side for
+            # liquidation math. Fall back to ask only if bid is missing.
+            def _to_cents(v):
+                if v is None:
+                    return None
+                if isinstance(v, (int, float)):
+                    return int(round(v * 100)) if v < 1 else int(round(v))
+                if isinstance(v, str):
+                    try:
+                        f = float(v)
+                        return int(round(f * 100)) if f < 1 else int(round(f))
+                    except (ValueError, TypeError):
+                        return None
+                return None
+            # Cache format: *_bid_cents / *_ask_cents (ints); API format: yes_bid / yes_bid_dollars
+            if mkt.get("yes_bid_cents") is not None:
+                current_yes_price = int(mkt["yes_bid_cents"])
             else:
-                yes_ask = mkt.get("yes_ask_dollars") or mkt.get("yes_ask")
-                no_ask = mkt.get("no_ask_dollars") or mkt.get("no_ask")
-                if yes_ask:
-                    try:
-                        current_yes_price = int(round(float(yes_ask) * 100)) if isinstance(yes_ask, str) else int(yes_ask * 100 if yes_ask < 1 else yes_ask)
-                    except Exception:
-                        pass
-                if no_ask:
-                    try:
-                        current_no_price = int(round(float(no_ask) * 100)) if isinstance(no_ask, str) else int(no_ask * 100 if no_ask < 1 else no_ask)
-                    except Exception:
-                        pass
+                current_yes_price = _to_cents(mkt.get("yes_bid_dollars") or mkt.get("yes_bid"))
+            if current_yes_price is None and mkt.get("yes_ask_cents") is not None:
+                current_yes_price = int(mkt["yes_ask_cents"])
+            elif current_yes_price is None:
+                current_yes_price = _to_cents(mkt.get("yes_ask_dollars") or mkt.get("yes_ask"))
+            if mkt.get("no_bid_cents") is not None:
+                current_no_price = int(mkt["no_bid_cents"])
+            else:
+                current_no_price = _to_cents(mkt.get("no_bid_dollars") or mkt.get("no_bid"))
+            if current_no_price is None and mkt.get("no_ask_cents") is not None:
+                current_no_price = int(mkt["no_ask_cents"])
+            elif current_no_price is None:
+                current_no_price = _to_cents(mkt.get("no_ask_dollars") or mkt.get("no_ask"))
+            # Derive the missing side from 100-x if only one side is known
+            if current_yes_price is None and current_no_price is not None:
+                current_yes_price = max(0, 100 - current_no_price)
+            if current_no_price is None and current_yes_price is not None:
+                current_no_price = max(0, 100 - current_yes_price)
 
             # Find our entry price from trade history
             entry_price = None
@@ -8538,15 +8560,21 @@ def _background_loop():
             _pos_early = check_position_prices()
         except Exception:
             pass
-        _mv_early = sum((p.get("current_price") or p.get("entry_price") or 0) * p.get("count", 0)
-                       for p in _pos_early) / 100
+        # Mark-to-market from live bids; entry_price only for positions with
+        # no Kalshi quote. Do NOT trust Kalshi's portfolio_balance — it
+        # diverges from their own UI by ~$26 on 40+ position accounts.
+        _mv_early = 0.0
+        for _p in _pos_early:
+            _cp = _p.get("current_price")
+            _ct = _p.get("count") or 0
+            _mv_early += (_cp if _cp is not None else (_p.get("entry_price") or 0)) * _ct / 100.0
         _inv_early = sum(p.get("market_exposure_cents", 0) for p in _pos_early) / 100
-        # Prefer Kalshi's portfolio value (matches their UI), fallback to our calculation
-        _pf_value = _kalshi_portfolio if _kalshi_portfolio > 0 else round(_bal_early + _mv_early, 2)
+        _pf_value = round(_bal_early + _mv_early, 2)
         _PORTFOLIO_CACHE["data"] = {
             "balance_usd": round(_bal_early, 2),
             "portfolio_value_usd": round(_pf_value, 2),
-            "positions_value_usd": round(_pf_value - _bal_early, 2) if _kalshi_portfolio > 0 else round(_mv_early, 2),
+            "positions_value_usd": round(_mv_early, 2),
+            "kalshi_portfolio_balance_raw": round(_kalshi_portfolio, 2),
             "open_positions": _pos_early,
             "open_count": len(_pos_early),
             "total_invested_usd": round(_inv_early, 2),
@@ -8810,8 +8838,23 @@ def _background_loop():
                     _pos2 = check_position_prices()
                 except Exception:
                     pass
-                _mv2 = sum((p.get("current_price") or p.get("entry_price") or 0) * p.get("count", 0)
-                           for p in _pos2) / 100
+                # Mark-to-market: sum(current_price * count). Only fall back
+                # to entry_price for positions where Kalshi still doesn't
+                # return a mark (very rare after the uncapped fetch above),
+                # because entry is stale and overstates losing positions.
+                _mv2_marks = 0.0
+                _mv2_fallback_count = 0
+                for _p in _pos2:
+                    _cp = _p.get("current_price")
+                    _ct = _p.get("count") or 0
+                    if _cp is not None:
+                        _mv2_marks += _cp * _ct / 100.0
+                    else:
+                        _mv2_fallback_count += 1
+                        _mv2_marks += (_p.get("entry_price") or 0) * _ct / 100.0
+                _mv2 = _mv2_marks
+                if _mv2_fallback_count:
+                    print(f"[PORTFOLIO] {_mv2_fallback_count} positions fell back to entry_price (no Kalshi mark)")
                 # Fetch settled positions for win/loss stats
                 _wins2 = _losses2 = 0
                 _realized2 = 0.0
@@ -8876,12 +8919,18 @@ def _background_loop():
                 except Exception:
                     pass
 
-                # Prefer Kalshi's portfolio value (matches their UI), fallback to our calculation
-                _pf_value2 = _kalshi_portfolio2 if _kalshi_portfolio2 > 0 else round(_bal2 + _mv2, 2)
+                # Compute portfolio value from cash + mark-to-market. Kalshi's
+                # /portfolio/balance "portfolio_balance" field diverged from
+                # their own UI (observed +$26 overstatement on 2026-04-09),
+                # likely because it includes locked funds / resting orders or
+                # uses ask-side quotes. Computing it ourselves from bid-side
+                # marks matches Kalshi's UI exactly.
+                _pf_value2 = round(_bal2 + _mv2, 2)
                 _PORTFOLIO_CACHE["data"] = {
                     "balance_usd": round(_bal2, 2),
                     "portfolio_value_usd": round(_pf_value2, 2),
-                    "positions_value_usd": round(_pf_value2 - _bal2, 2) if _kalshi_portfolio2 > 0 else round(_mv2, 2),
+                    "positions_value_usd": round(_mv2, 2),
+                    "kalshi_portfolio_balance_raw": round(_kalshi_portfolio2, 2),
                     "open_positions": _pos2,
                     "open_count": len(_pos2),
                     "total_invested_usd": round(sum(p.get("market_exposure_cents", 0) for p in _pos2) / 100, 2),
