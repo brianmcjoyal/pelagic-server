@@ -10527,7 +10527,32 @@ def settled_positions():
         return jsonify({"settled": [], "error": str(e)})
 
 
-## debug-settled endpoint removed — no longer needed
+@app.route("/debug-kalshi-fields")
+def debug_kalshi_fields():
+    """Temporary debug: show raw field names from Kalshi balance + positions API."""
+    result = {}
+    try:
+        bh = signed_headers("GET", "/portfolio/balance")
+        br = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance", headers=bh, timeout=10)
+        if br.ok:
+            result["balance_fields"] = list(br.json().keys())
+            result["balance_raw"] = {k: str(v)[:50] for k, v in br.json().items()}
+    except Exception as e:
+        result["balance_error"] = str(e)
+    try:
+        ph = signed_headers("GET", "/portfolio/positions")
+        pr = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/positions",
+                         headers=ph, params={"limit": 3, "settlement_status": "settled"}, timeout=10)
+        if pr.ok:
+            positions = pr.json().get("market_positions", [])
+            if positions:
+                result["settled_position_fields"] = list(positions[0].keys())
+                result["settled_position_sample"] = {k: str(v)[:60] for k, v in positions[0].items()}
+            else:
+                result["settled_positions"] = "empty"
+    except Exception as e:
+        result["positions_error"] = str(e)
+    return jsonify(result)
 
 
 @app.route("/debug-scan")
