@@ -16838,9 +16838,20 @@ a:hover { color: #7da5f5; }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 #scan-btn:hover:not(:disabled) { background: #00dc5a !important; color: #000 !important; }
 #scan-btn:disabled { cursor: wait; }
+/* Bet hover tooltip */
+#bet-tooltip { position:fixed;z-index:9999;pointer-events:none;opacity:0;transition:opacity 0.15s;
+  background:#111827;border:1px solid #2a3a4a;border-radius:10px;padding:12px 16px;
+  box-shadow:0 8px 32px rgba(0,0,0,0.6);min-width:260px;max-width:340px;font-size:11px;line-height:1.5; }
+#bet-tooltip.visible { opacity:1; }
+#bet-tooltip .tt-header { font-size:13px;font-weight:700;color:#fff;margin-bottom:8px;border-bottom:1px solid #1f2937;padding-bottom:6px; }
+#bet-tooltip .tt-row { display:flex;justify-content:space-between;margin:3px 0; }
+#bet-tooltip .tt-label { color:#888;font-weight:500; }
+#bet-tooltip .tt-val { color:#e0e0e0;font-weight:600;text-align:right; }
+#bet-tooltip .tt-edge { margin-top:6px;padding-top:6px;border-top:1px solid #1f2937;color:#aaa;font-size:10px; }
 </style>
 </head>
 <body>
+<div id="bet-tooltip"></div>
 <!-- Ticker bar -->
 <div class="ticker-bar" id="ticker-bar">
   <div class="ticker-item"><span class="ticker-symbol">BTC</span> <span class="ticker-price" id="tk-btc">--</span> <span class="ticker-chg" id="tk-btc-chg"></span></div>
@@ -18094,7 +18105,29 @@ async function loadBetsFeed() {
       var convColor = convScore >= 8 ? '#00dc5a' : convScore >= 5 ? '#ffb400' : '#ff5000';
       var convTooltip = convBreakdown.join('&#10;');  // newline in title attr
 
-      h += '<div class="activity-line" style="cursor:pointer;position:relative">';
+      // Build tooltip data for hover
+      var fullTitle = t.title || t.ticker || '';
+      var betDesc = (t.side || 'yes').toUpperCase() + ' @ ' + (t.price_cents || 0) + '\u00a2';
+      var stakeDesc = '$' + (t.cost_usd || 0).toFixed(2) + ' (' + (t.count || 1) + ' contract' + ((t.count || 1) > 1 ? 's' : '') + ')';
+      var profitDesc = t.potential_profit ? '+$' + t.potential_profit.toFixed(2) : ('$' + ((100 - (t.price_cents || 50)) * (t.count || 1) / 100).toFixed(2));
+      var edgeDesc = '';
+      if (t.edge_reasons && t.edge_reasons.length > 0) edgeDesc = t.edge_reasons.join(' | ');
+      else if (t.espn_edge) edgeDesc = 'ESPN edge: +' + (t.espn_edge * 100).toFixed(1) + '%';
+      var scoreDisp = '';
+      var si = scoreMap[t.ticker];
+      if (si && si.display) scoreDisp = si.display;
+      // Encode as data attributes (HTML-safe)
+      var ttData = ' data-tt-title="' + fullTitle.replace(/"/g, '&quot;') + '"'
+        + ' data-tt-bet="' + betDesc + '"'
+        + ' data-tt-stake="' + stakeDesc + '"'
+        + ' data-tt-strategy="' + sl + '"'
+        + ' data-tt-conv="' + convScore + '"'
+        + ' data-tt-profit="' + profitDesc + '"'
+        + ' data-tt-edge="' + edgeDesc.replace(/"/g, '&quot;') + '"'
+        + ' data-tt-score="' + scoreDisp.replace(/"/g, '&quot;') + '"'
+        + ' data-tt-time="' + fmtTime(t.time) + '"';
+
+      h += '<div class="activity-line bet-row" style="cursor:pointer;position:relative"' + ttData + '>';
       h += '<span class="time">' + timeStr + '</span>';
       // Conviction badge with hover tooltip
       h += '<span title="' + convTooltip + '" style="display:inline-flex;align-items:center;justify-content:center;width:22px;height:16px;border-radius:4px;font-size:9px;font-weight:800;color:#000;background:' + convColor + ';margin:0 4px;cursor:help;flex-shrink:0">' + convScore + '</span>';
@@ -18167,32 +18200,71 @@ async function loadBetsFeed() {
       h += '</div>';
     });
     el.innerHTML = h;
-    // Add click handlers to toggle edge detail
-    el.querySelectorAll('.activity-line').forEach(function(line) {
-      line.addEventListener('click', function() {
-        var detail = line.querySelector('[id^="edge-"]');
-        if (detail) {
-          detail.style.display = detail.style.display === 'none' ? 'block' : 'none';
-        }
-      });
-    });
+    // Add click + hover handlers
+    _attachBetRowHandlers(el);
     // Also update dashboard version
     var dashBetsEl = document.getElementById('bets-lines-dash');
     if (dashBetsEl) {
       dashBetsEl.innerHTML = h;
-      dashBetsEl.querySelectorAll('.activity-line').forEach(function(line) {
-        line.addEventListener('click', function() {
-          var detail = line.querySelector('[id^="edge-"]');
-          if (detail) {
-            detail.style.display = detail.style.display === 'none' ? 'block' : 'none';
-          }
-        });
-      });
+      _attachBetRowHandlers(dashBetsEl);
     }
     // Pulse the dot
     var pulse = document.getElementById('bets-pulse');
     if (pulse && trades.length > 0) pulse.style.background = '#ffb400';
   } catch(e) {}
+}
+
+// Attach click-to-expand and hover tooltip to bet rows
+function _attachBetRowHandlers(container) {
+  var tooltip = document.getElementById('bet-tooltip');
+  container.querySelectorAll('.bet-row').forEach(function(row) {
+    // Click to expand edge detail
+    row.addEventListener('click', function() {
+      var detail = row.querySelector('[id^="edge-"]');
+      if (detail) detail.style.display = detail.style.display === 'none' ? 'block' : 'none';
+    });
+    // Hover tooltip
+    row.addEventListener('mouseenter', function(e) {
+      var title = row.getAttribute('data-tt-title') || '';
+      var bet = row.getAttribute('data-tt-bet') || '';
+      var stake = row.getAttribute('data-tt-stake') || '';
+      var strat = row.getAttribute('data-tt-strategy') || '';
+      var conv = row.getAttribute('data-tt-conv') || '';
+      var profit = row.getAttribute('data-tt-profit') || '';
+      var edge = row.getAttribute('data-tt-edge') || '';
+      var score = row.getAttribute('data-tt-score') || '';
+      var time = row.getAttribute('data-tt-time') || '';
+      var html = '<div class="tt-header">' + title + '</div>';
+      if (score) html += '<div class="tt-row"><span class="tt-label">Live Score</span><span class="tt-val" style="color:#00d4ff">' + score + '</span></div>';
+      html += '<div class="tt-row"><span class="tt-label">Our Bet</span><span class="tt-val" style="color:' + (bet.startsWith('YES') ? '#00dc5a' : '#ff5000') + '">' + bet + '</span></div>';
+      html += '<div class="tt-row"><span class="tt-label">Stake</span><span class="tt-val">' + stake + '</span></div>';
+      html += '<div class="tt-row"><span class="tt-label">If We Win</span><span class="tt-val" style="color:#00dc5a">' + profit + '</span></div>';
+      html += '<div class="tt-row"><span class="tt-label">Strategy</span><span class="tt-val">' + strat + '</span></div>';
+      html += '<div class="tt-row"><span class="tt-label">Conviction</span><span class="tt-val">' + conv + '/10</span></div>';
+      html += '<div class="tt-row"><span class="tt-label">Placed</span><span class="tt-val">' + time + '</span></div>';
+      if (edge) html += '<div class="tt-edge"><strong style="color:#ffb400">Edge:</strong> ' + edge + '</div>';
+      tooltip.innerHTML = html;
+      tooltip.classList.add('visible');
+      // Position near cursor
+      var x = e.clientX + 16, y = e.clientY - 10;
+      if (x + 350 > window.innerWidth) x = e.clientX - 360;
+      if (y + tooltip.offsetHeight > window.innerHeight) y = window.innerHeight - tooltip.offsetHeight - 10;
+      if (y < 10) y = 10;
+      tooltip.style.left = x + 'px';
+      tooltip.style.top = y + 'px';
+    });
+    row.addEventListener('mousemove', function(e) {
+      var x = e.clientX + 16, y = e.clientY - 10;
+      if (x + 350 > window.innerWidth) x = e.clientX - 360;
+      if (y + tooltip.offsetHeight > window.innerHeight) y = window.innerHeight - tooltip.offsetHeight - 10;
+      if (y < 10) y = 10;
+      tooltip.style.left = x + 'px';
+      tooltip.style.top = y + 'px';
+    });
+    row.addEventListener('mouseleave', function() {
+      tooltip.classList.remove('visible');
+    });
+  });
 }
 
 async function loadAllBets() {
