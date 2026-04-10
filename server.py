@@ -20681,9 +20681,36 @@ async function loadBrain(force) {
       }
     }
 
-    // Per-strategy knobs (adaptive)
+    // Per-strategy knobs (adaptive) — click a row to expand its description
     var adaptiveEl = _el('brain-adaptive');
     if (adaptiveEl) {
+      var STRAT_INFO = {
+        'live_sniper': {
+          tagline: 'High-probability favorites in live sports',
+          body: 'Targets 70-90c favorites in LIVE sports markets (NBA, NFL, NHL, soccer). Only takes vetted markets with real volume. High win rate with a small per-trade edge, earning roughly 10-30c per contract at settlement. Adaptive conviction and edge gates tighten after losses and loosen after wins.'
+        },
+        'moonshark': {
+          tagline: 'Cheap longshots on live sports underdogs',
+          body: 'Lottery-ticket strategy. Small bets on 10-30c underdog outcomes in liquid, closing-soon live sports markets. Win rate is low but each winner pays 70-90c per contract. Hard daily spend and trade-count caps keep variance bounded.'
+        },
+        'closegame': {
+          tagline: 'Buy underdogs late in close games',
+          body: 'Kalshi prices lag live action. When a team is down by 5 or fewer in Q4 at around 35c, the true win probability is often 40-45%. This strategy only fires when the game is BOTH tight AND late, targeting that lag-driven mispricing.'
+        },
+        'floor': {
+          tagline: 'Safety-net quota strategy',
+          body: 'Backup that activates only when the daily bet count drops below DAILY_BET_FLOOR. Uses relaxed filters to guarantee a minimum activity level so the trade journal and learning engine always have fresh data. Every floor bet is small and journaled.'
+        },
+        'momentum_swing': {
+          tagline: 'Fade momentum overreactions in NBA / NCAAB / NHL',
+          body: 'Uses the ESPN live win-probability model as ground truth. When Kalshi has the trailing team priced well below what ESPN thinks, that is usually an overreaction to a recent run. The strategy buys the undervalued side and holds for the mean-reversion swing.'
+        },
+        'goalie_pulled': {
+          tagline: 'NHL endgame fade when a goalie is (likely) pulled',
+          body: 'NHL period-3 games within 2 goals and under 3 minutes remaining are in goalie-pull territory. When the ESPN live win model diverges from Kalshi by the edge threshold, the strategy buys the mispriced side. Rare but high-edge setups.'
+        }
+      };
+
       var strats = [
         {name:'live_sniper', conv:'min_conviction_sniper', edge:'min_edge_sniper'},
         {name:'moonshark',   conv:'min_conviction_moonshark', edge:'min_edge_moonshark'},
@@ -20697,14 +20724,39 @@ async function loadBrain(force) {
         var conv = s.conv ? adaptive[s.conv] : null;
         var edge = adaptive[s.edge];
         if (edge == null) return;
-        h += '<div style="background:#0a1a22;border:1px solid #1a3a4a;border-radius:6px;padding:8px 12px;display:flex;justify-content:space-between;align-items:center;font-size:11px">';
-        h += '<span style="color:#00d4ff;font-weight:700;text-transform:uppercase;letter-spacing:0.3px">' + s.name + '</span>';
+        var info = STRAT_INFO[s.name] || {tagline:'', body:''};
+        h += '<div class="strat-row" style="background:#0a1a22;border:1px solid #1a3a4a;border-radius:6px;overflow:hidden">';
+        // Clickable header row
+        h += '<div class="strat-head" style="padding:8px 12px;display:flex;justify-content:space-between;align-items:center;font-size:11px;cursor:pointer;user-select:none">';
+        h += '<span style="color:#00d4ff;font-weight:700;text-transform:uppercase;letter-spacing:0.3px;display:flex;align-items:center;gap:6px">';
+        h += '<span class="strat-arrow" style="font-size:9px;color:#4a7a8a;display:inline-block;width:8px;transition:transform 0.15s ease">&#9656;</span>';
+        h += s.name;
+        h += '</span>';
         h += '<span style="color:#888">';
         if (conv != null) h += 'conv&ge;<span style="color:#fff">' + conv + '</span> &nbsp; ';
         h += 'edge&ge;<span style="color:#fff">' + (edge*100).toFixed(1) + '%</span>';
         h += '</span></div>';
+        // Expandable description body
+        h += '<div class="strat-detail" style="display:none;padding:0 12px 10px 28px;border-top:1px solid #11303c">';
+        h += '<div style="color:#aad9e8;font-size:10px;font-weight:600;margin:8px 0 4px;letter-spacing:0.2px">' + info.tagline + '</div>';
+        h += '<div style="color:#9ab;font-size:10px;line-height:1.55">' + info.body + '</div>';
+        h += '</div>';
+        h += '</div>';
       });
       adaptiveEl.innerHTML = h || '<div style="color:#555;font-size:11px">No adaptive state yet</div>';
+      // Wire up click-to-expand for each row (re-runs every loadBrain call,
+      // which is safe because innerHTML was just replaced above).
+      adaptiveEl.querySelectorAll('.strat-row').forEach(function(row) {
+        var head = row.querySelector('.strat-head');
+        var detail = row.querySelector('.strat-detail');
+        var arrow = row.querySelector('.strat-arrow');
+        if (!head || !detail) return;
+        head.addEventListener('click', function() {
+          var open = detail.style.display !== 'none';
+          detail.style.display = open ? 'none' : 'block';
+          if (arrow) arrow.style.transform = open ? 'rotate(0deg)' : 'rotate(90deg)';
+        });
+      });
     }
 
     // Per-strategy scorecard (7d)
