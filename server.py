@@ -8641,8 +8641,9 @@ def _background_loop():
             if _br_e.ok:
                 _bal_data = _br_e.json()
                 _bal_early = _bal_data.get("balance", 0) / 100
-                # Use Kalshi's own portfolio_balance if available (matches their UI exactly)
-                _kalshi_portfolio = _bal_data.get("portfolio_balance", 0) / 100
+                # Use Kalshi's own portfolio_value if available (matches their UI exactly)
+                # v2 API field is "portfolio_value" in cents (not "portfolio_balance")
+                _kalshi_portfolio = _bal_data.get("portfolio_value", 0) / 100
         except Exception:
             pass
         _pos_early = []
@@ -8929,10 +8930,10 @@ def _background_loop():
                     if _br2.ok:
                         _bal2_data = _br2.json()
                         _bal2 = _bal2_data.get("balance", 0) / 100
-                        _kalshi_portfolio2 = _bal2_data.get("portfolio_balance", 0) / 100
+                        _kalshi_portfolio2 = _bal2_data.get("portfolio_value", 0) / 100
                         # Log ALL fields so we can match Kalshi's UI exactly
                         print(f"[PORTFOLIO] Kalshi balance API fields: {list(_bal2_data.keys())}")
-                        print(f"[PORTFOLIO] Kalshi API: cash=${_bal2:.2f} portfolio_balance=${_kalshi_portfolio2:.2f}")
+                        print(f"[PORTFOLIO] Kalshi API: cash=${_bal2:.2f} portfolio_value=${_kalshi_portfolio2:.2f}")
                 except Exception:
                     if _PORTFOLIO_CACHE["data"]:
                         _bal2 = _PORTFOLIO_CACHE["data"].get("balance_usd", 0)
@@ -10151,6 +10152,10 @@ def settled_positions():
             if not ticker:
                 continue
             pnl_cents = _parse_kalshi_dollars(pos.get("realized_pnl_dollars") or pos.get("realized_pnl"))
+            # If settled position has zero realized_pnl, Kalshi has zeroed out the
+            # data — skip it so the fills-based computation below can handle it
+            if abs(pnl_cents) < 1 and pos.get("settlement_status") == "settled":
+                continue
             if ticker not in _seen_tickers or abs(pnl_cents) > abs(
                 _parse_kalshi_dollars(_seen_tickers[ticker].get("realized_pnl_dollars") or _seen_tickers[ticker].get("realized_pnl"))
             ):
@@ -10371,8 +10376,9 @@ def settled_positions():
                 "entry_time": _entry_time,
             })
 
-        # Add game results from fills for tickers NOT in positions API
-        # Kalshi removes game positions after settlement — we compute results from fills
+        # Compute settled results from fills for tickers NOT already handled above.
+        # Kalshi v2 zeroes out realized_pnl_dollars on settled positions, so we
+        # compute the actual P&L from buy-fill prices + market settlement result.
         _fills_added = 0
         _game_ticker_candidates = []
         for _fticker, _flist in _fills_by_ticker.items():
@@ -10387,13 +10393,37 @@ def settled_positions():
                 _game_ticker_candidates.append((_fticker, _flist, _ftrade_date))
         # Sort by date descending — process all using cached results when available
         _game_ticker_candidates.sort(key=lambda x: x[2], reverse=True)
-        _game_api_start = _time.time()
-        _game_api_calls = 0
+        # Pre-fetch market results in parallel for uncached tickers
+        _uncached_tickers = [t for t, _, _ in _game_ticker_candidates if t not in _GAME_RESULT_CACHE]
+        if _uncached_tickers:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            def _fetch_market_result(tk):
+                try:
+                    _mkt_h = signed_headers("GET", f"/markets/{tk}")
+                    _mkt_r = requests.get(
+                        KALSHI_BASE_URL + KALSHI_API_PREFIX + f"/markets/{tk}",
+                        headers=_mkt_h, timeout=5,
+                    )
+                    if _mkt_r.ok:
+                        _mkt = _mkt_r.json().get("market", {})
+                        return (tk, _mkt.get("result", ""), _mkt.get("title", tk), _mkt.get("status", ""))
+                except Exception:
+                    pass
+                return (tk, "", tk, "")
+            with ThreadPoolExecutor(max_workers=15) as executor:
+                _mkt_futures = {executor.submit(_fetch_market_result, tk): tk for tk in _uncached_tickers[:200]}
+                for future in as_completed(_mkt_futures, timeout=45):
+                    try:
+                        tk, result, title, status = future.result()
+                        if result:
+                            _GAME_RESULT_CACHE[tk] = {"result": result, "title": title}
+                            _title_cache[tk] = title
+                        elif status == "settled":
+                            _title_cache[tk] = title
+                    except Exception:
+                        pass
+            print(f"[SETTLED] Parallel-fetched {len(_uncached_tickers)} market results, cache now has {len(_GAME_RESULT_CACHE)} entries")
         for _fticker, _flist, _ftrade_date in _game_ticker_candidates:
-            # Time limit: 60s for API calls (prevents Railway timeout)
-            if _time.time() - _game_api_start > 60 and _fticker not in _GAME_RESULT_CACHE:
-                print(f"[SETTLED] Game API time limit reached after {_game_api_calls} calls, {_fills_added} results added")
-                break
             # Compute cost and result from fills
             _buy_fills = [f for f in _flist if f.get("action") == "buy"]
             if not _buy_fills:
@@ -10410,30 +10440,13 @@ def settled_positions():
                 _bf_count = int(float(str(_bf.get("count_fp") or _bf.get("count") or 0)))
                 _total_cost_cents += _price_cents * _bf_count
             _avg_entry = _total_cost_cents // max(1, _total_count)
-            # Check if market settled — use cache first, then API
+            # Check if market settled — use cache (populated by parallel fetch above)
             _settled_result = None
             if _fticker in _GAME_RESULT_CACHE:
                 _settled_result = _GAME_RESULT_CACHE[_fticker].get("result")
                 _title_cache[_fticker] = _GAME_RESULT_CACHE[_fticker].get("title", _fticker)
             else:
-                try:
-                    _mkt_h = signed_headers("GET", f"/markets/{_fticker}")
-                    _mkt_r = requests.get(
-                        KALSHI_BASE_URL + KALSHI_API_PREFIX + f"/markets/{_fticker}",
-                        headers=_mkt_h, timeout=3,
-                    )
-                    _game_api_calls += 1
-                    if _mkt_r.ok:
-                        _mkt = _mkt_r.json().get("market", {})
-                        _title_cache[_fticker] = _mkt.get("title", _fticker)
-                        _settled_result = _mkt.get("result", "")
-                    if not _settled_result and _mkt.get("status") != "settled":
-                        continue  # Market not settled yet — skip
-                    # Cache the result so we don't re-fetch on next settled call
-                    if _settled_result:
-                        _GAME_RESULT_CACHE[_fticker] = {"result": _settled_result, "title": _title_cache.get(_fticker, _fticker)}
-                except Exception:
-                    continue  # Can't check market — skip
+                continue  # No result available — skip
             # Compute P&L
             if _settled_result == "yes":
                 _game_pnl_cents = (100 - _avg_entry) * _total_count if _fill_side == "yes" else -_avg_entry * _total_count
@@ -10525,34 +10538,6 @@ def settled_positions():
         return jsonify(result)
     except Exception as e:
         return jsonify({"settled": [], "error": str(e)})
-
-
-@app.route("/debug-kalshi-fields")
-def debug_kalshi_fields():
-    """Temporary debug: show raw field names from Kalshi balance + positions API."""
-    result = {}
-    try:
-        bh = signed_headers("GET", "/portfolio/balance")
-        br = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance", headers=bh, timeout=10)
-        if br.ok:
-            result["balance_fields"] = list(br.json().keys())
-            result["balance_raw"] = {k: str(v)[:50] for k, v in br.json().items()}
-    except Exception as e:
-        result["balance_error"] = str(e)
-    try:
-        ph = signed_headers("GET", "/portfolio/positions")
-        pr = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/positions",
-                         headers=ph, params={"limit": 3, "settlement_status": "settled"}, timeout=10)
-        if pr.ok:
-            positions = pr.json().get("market_positions", [])
-            if positions:
-                result["settled_position_fields"] = list(positions[0].keys())
-                result["settled_position_sample"] = {k: str(v)[:60] for k, v in positions[0].items()}
-            else:
-                result["settled_positions"] = "empty"
-    except Exception as e:
-        result["positions_error"] = str(e)
-    return jsonify(result)
 
 
 @app.route("/debug-scan")
