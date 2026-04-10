@@ -17292,7 +17292,15 @@ function formatSettleTime(closeTime) {
     var close = new Date(closeTime);
     var now = new Date();
     var diff = close - now;
-    if (diff <= 0) return 'Settling now';
+    if (diff <= 0) {
+      // Past close — distinguish genuine "settling right now" from
+      // positions stuck waiting on Kalshi for hours or days so the UI
+      // doesn't keep lying to the user.
+      var staleMin = Math.floor(-diff / 60000);
+      if (staleMin < 120) return 'Settling now';
+      if (staleMin < 1440) return 'Awaiting ' + Math.floor(staleMin / 60) + 'h';
+      return 'Awaiting ' + Math.floor(staleMin / 1440) + 'd';
+    }
     var mins = Math.floor(diff / 60000);
     var hrs = Math.floor(mins / 60);
     var days = Math.floor(hrs / 24);
@@ -17700,11 +17708,18 @@ async function loadPortfolio() {
     var midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0).getTime();
     var weekEnd = nowMs + (7 * 86400000);
     var monthEnd = nowMs + (30 * 86400000);
-    var settlingNow = 0, closingToday = 0, thisWeek = 0, thisMonth = 0, later = 0;
+    // "Settling now" is reserved for positions that crossed their close
+    // time within the last 2 hours — anything stuck for longer is Kalshi
+    // sitting on an unsettled event, which gets its own "awaiting" bucket.
+    var settlingNow = 0, awaiting = 0, closingToday = 0, thisWeek = 0, thisMonth = 0, later = 0;
+    var twoHoursMs = 2 * 3600000;
     positions.forEach(function(p) {
       if (!p.close_time) { later++; return; }
       var close = new Date(p.close_time).getTime();
-      if (close <= nowMs) settlingNow++;
+      if (close <= nowMs) {
+        if (nowMs - close <= twoHoursMs) settlingNow++;
+        else awaiting++;
+      }
       else if (close <= midnight) closingToday++;
       else if (close <= weekEnd) thisWeek++;
       else if (close <= monthEnd) thisMonth++;
@@ -17721,6 +17736,7 @@ async function loadPortfolio() {
     html += '</div>';
     html += '<div style="display:flex;gap:8px;margin-bottom:6px;flex-wrap:wrap">';
     if (settlingNow > 0) html += '<span style="font-size:8px;padding:2px 6px;background:#1a1a1a;border:1px solid #ffb400;border-radius:3px;color:#ffb400">' + settlingNow + ' settling now</span>';
+    if (awaiting > 0) html += '<span style="font-size:8px;padding:2px 6px;background:#1a1a1a;border:1px solid #666;border-radius:3px;color:#888" title="Positions past their close time — Kalshi has not settled them yet">' + awaiting + ' awaiting settlement</span>';
     if (closingToday > 0) html += '<span style="font-size:8px;padding:2px 6px;background:#1a1a1a;border:1px solid #ffcc00;border-radius:3px;color:#ffcc00">' + closingToday + ' closing today</span>';
     if (thisWeek > 0) html += '<span style="font-size:8px;padding:2px 6px;background:#1a1a1a;border:1px solid #00bfff;border-radius:3px;color:#00bfff">' + thisWeek + ' this week</span>';
     if (thisMonth > 0) html += '<span style="font-size:8px;padding:2px 6px;background:#1a1a1a;border:1px solid #888;border-radius:3px;color:#888">' + thisMonth + ' this month</span>';
@@ -17940,13 +17956,20 @@ async function loadBetsFeed() {
         var pnlArrow = pnl > 0 ? '▲' : (pnl < 0 ? '▼' : '–');
         h += '<span style="color:' + pnlColor + ';font-size:10px;font-weight:700;margin-left:4px">' + pnlArrow + ' ' + (pnl > 0 ? '+' : '') + pnl + '% (' + t.current_price + '¢)</span> ';
       }
-      // Time until settlement
+      // Time until settlement — past-close trades get an accurate
+      // "awaiting" label if they've been stuck for more than 2 hours
+      // instead of permanently displaying "Settling now".
       var settleStr = '';
       if (t.close_time) {
         try {
           var ct = new Date(t.close_time);
           var diff = ct - new Date();
-          if (diff <= 0) { settleStr = 'Settling now'; }
+          if (diff <= 0) {
+            var staleMin = Math.floor(-diff / 60000);
+            if (staleMin < 120) settleStr = 'Settling now';
+            else if (staleMin < 1440) settleStr = 'Awaiting ' + Math.floor(staleMin / 60) + 'h';
+            else settleStr = 'Awaiting ' + Math.floor(staleMin / 1440) + 'd';
+          }
           else if (diff < 3600000) { settleStr = Math.ceil(diff/60000) + 'm'; }
           else if (diff < 86400000) { settleStr = Math.floor(diff/3600000) + 'h ' + Math.floor((diff%3600000)/60000) + 'm'; }
           else { settleStr = Math.floor(diff/86400000) + 'd ' + Math.floor((diff%86400000)/3600000) + 'h'; }
@@ -21128,15 +21151,31 @@ async function loadClosingSoon() {
     // Also get open positions with close times — only show next 30 days
     var posData = await fetch(API + '/portfolio-summary').then(function(r) { return r.json(); });
     var _now = new Date();
-    var _30d = new Date(_now.getTime() + 30 * 24 * 60 * 60 * 1000);
+    var _nowMs = _now.getTime();
+    var _30dMs = _nowMs + 30 * 24 * 60 * 60 * 1000;
     var positions = (posData.open_positions || []).filter(function(p) {
       if (!p.close_time) return false;
-      var ct = new Date(p.close_time);
-      return ct <= _30d;  // only positions closing within 30 days
+      var ctMs = new Date(p.close_time).getTime();
+      return ctMs <= _30dMs;  // only positions closing within 30 days (or already past close)
     });
-    positions.sort(function(a, b) { return (a.close_time || '').localeCompare(b.close_time || ''); });
 
-    var items = positions;
+    // Partition into future-closing (sorted soonest→latest) and
+    // past-close/stuck-settling (sorted most-recent-close→oldest). This way
+    // the widget surfaces actionable "closing soon" items first, and items
+    // that have been stuck in settlement limbo for days fall to the bottom
+    // with an accurate label instead of pretending to be "settling now".
+    var future = [];
+    var stuck = [];
+    positions.forEach(function(p) {
+      var ctMs = new Date(p.close_time).getTime();
+      if (ctMs >= _nowMs) future.push(p);
+      else stuck.push(p);
+    });
+    future.sort(function(a, b) { return (a.close_time || '').localeCompare(b.close_time || ''); });
+    // Most-recently-closed first (more likely to actually settle imminently)
+    stuck.sort(function(a, b) { return (b.close_time || '').localeCompare(a.close_time || ''); });
+
+    var items = future.concat(stuck);
     countEl.textContent = items.length;
 
     if (items.length === 0) {
@@ -21155,8 +21194,23 @@ async function loadClosingSoon() {
       var urgency = '#888';
 
       if (diffMin < 0) {
-        timeLeft = 'Settling now';
-        urgency = '#ffb400';
+        // Past close — figure out how stuck it is. "Settling now" should
+        // only apply to items that genuinely just crossed the close line;
+        // anything stuck for hours or days gets an accurate "Awaiting" label.
+        var staleMin = -diffMin;
+        if (staleMin < 120) {
+          // Less than 2h past close — still plausibly settling momentarily
+          timeLeft = 'Settling now';
+          urgency = '#ffb400';
+        } else if (staleMin < 1440) {
+          // 2h–24h past close — stuck today
+          timeLeft = 'Awaiting ' + Math.floor(staleMin / 60) + 'h';
+          urgency = '#888';
+        } else {
+          // More than a day past close — deprioritize visually
+          timeLeft = 'Awaiting ' + Math.floor(staleMin / 1440) + 'd';
+          urgency = '#555';
+        }
       } else if (diffMin < 60) {
         timeLeft = diffMin + 'm';
         urgency = '#ff3333';
