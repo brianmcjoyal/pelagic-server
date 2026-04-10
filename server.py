@@ -10423,11 +10423,21 @@ def settled_positions():
                     except Exception:
                         pass
             print(f"[SETTLED] Parallel-fetched {len(_uncached_tickers)} market results, cache now has {len(_GAME_RESULT_CACHE)} entries")
+        _debug_fills_logged = 0
         for _fticker, _flist, _ftrade_date in _game_ticker_candidates:
             # Compute cost and result from fills
             _buy_fills = [f for f in _flist if f.get("action") == "buy"]
             if not _buy_fills:
                 continue
+            # Debug: log raw fill fields for first few tickers
+            if _debug_fills_logged < 3:
+                _sample = _buy_fills[0]
+                print(f"[FILLS DEBUG] ticker={_fticker[:40]} fill_keys={list(_sample.keys())}")
+                print(f"[FILLS DEBUG]   count_fp={_sample.get('count_fp')!r} count={_sample.get('count')!r}")
+                print(f"[FILLS DEBUG]   yes_price_dollars={_sample.get('yes_price_dollars')!r} no_price_dollars={_sample.get('no_price_dollars')!r}")
+                print(f"[FILLS DEBUG]   yes_price={_sample.get('yes_price')!r} no_price={_sample.get('no_price')!r}")
+                print(f"[FILLS DEBUG]   action={_sample.get('action')!r} side={_sample.get('side')!r}")
+                _debug_fills_logged += 1
             _total_count = sum(int(float(str(f.get("count_fp") or f.get("count") or 0))) for f in _buy_fills)
             _total_cost_cents = 0
             _fill_side = _buy_fills[0].get("side", "yes")
@@ -10538,6 +10548,27 @@ def settled_positions():
         return jsonify(result)
     except Exception as e:
         return jsonify({"settled": [], "error": str(e)})
+
+
+@app.route("/debug-fills")
+def debug_fills():
+    """Temporary: show raw fill fields from Kalshi API."""
+    try:
+        h = signed_headers("GET", "/portfolio/fills")
+        r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/fills",
+                         headers=h, params={"limit": 3}, timeout=10)
+        if r.ok:
+            fills = r.json().get("fills", [])
+            if fills:
+                return jsonify({
+                    "fill_count": len(fills),
+                    "fill_keys": list(fills[0].keys()),
+                    "samples": [{k: str(v)[:60] for k, v in f.items()} for f in fills[:3]]
+                })
+            return jsonify({"fills": "empty"})
+        return jsonify({"error": f"HTTP {r.status_code}"})
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 
 @app.route("/debug-scan")
