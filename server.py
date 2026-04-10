@@ -9967,7 +9967,8 @@ def settled_positions():
     import time as _t
     now = _t.time()
     # Only serve cache if it has actual settled data (don't cache empty results)
-    if _SETTLED_CACHE["data"] and (now - _SETTLED_CACHE["ts"]) < _SETTLED_CACHE_TTL:
+    _nocache = request.args.get("nocache")
+    if not _nocache and _SETTLED_CACHE["data"] and (now - _SETTLED_CACHE["ts"]) < _SETTLED_CACHE_TTL:
         if _SETTLED_CACHE["data"].get("settled") or _SETTLED_CACHE["data"].get("wins", 0) + _SETTLED_CACHE["data"].get("losses", 0) > 0:
             return jsonify(_SETTLED_CACHE["data"])
     path = "/portfolio/positions"
@@ -10525,6 +10526,28 @@ def settled_positions():
             c["win_rate"] = round(c["wins"] / max(1, c["wins"] + c["losses"]) * 100, 1)
             c["pnl_usd"] = round(c["pnl_usd"], 2)
 
+        # Debug: include fill diagnostic info when ?nocache is set
+        _debug_info = {}
+        if _nocache:
+            _debug_info["total_fills_fetched"] = len(_all_fills)
+            _debug_info["fills_by_ticker_count"] = len(_fills_by_ticker)
+            _debug_info["game_ticker_candidates"] = len(_game_ticker_candidates)
+            _debug_info["seen_tickers_count"] = len(_seen_tickers)
+            _debug_info["fills_added"] = _fills_added
+            _debug_info["game_cache_size"] = len(_GAME_RESULT_CACHE)
+            # Show raw sample fill
+            if _all_fills:
+                _sf = _all_fills[0]
+                _debug_info["sample_fill_keys"] = list(_sf.keys())
+                _debug_info["sample_fill"] = {k: str(v)[:60] for k, v in _sf.items()}
+            # Show a candidate ticker's fills
+            if _game_ticker_candidates:
+                _dtk, _dfl, _ = _game_ticker_candidates[0]
+                _dbf = [f for f in _dfl if f.get("action") == "buy"]
+                _debug_info["candidate_ticker"] = _dtk
+                _debug_info["candidate_buy_fills"] = len(_dbf)
+                if _dbf:
+                    _debug_info["candidate_sample_buy"] = {k: str(v)[:60] for k, v in _dbf[0].items()}
         result = {
             "settled": settled,
             "wins": wins,
@@ -10541,6 +10564,8 @@ def settled_positions():
             "total_bets": total_bets,
             "by_category": by_category,
         }
+        if _debug_info:
+            result["_debug"] = _debug_info
         print(f"[SETTLED DEBUG] Deduped: {len(_seen_tickers)} tickers, skipped_zero_pnl={_skipped_zero}, skipped_pre_day1={_skipped_date}, included={_included}")
         print(f"[SETTLED DEBUG] Result: {wins}W/{losses}L, total_pnl=${total_pnl:.2f}")
         _SETTLED_CACHE["data"] = result
