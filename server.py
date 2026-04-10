@@ -10159,10 +10159,19 @@ def settled_positions():
         _skipped_zero = 0
         _skipped_date = 0
         _included = 0
+        # Debug: log first few positions to verify field parsing
+        _debug_count = 0
         for pos in _seen_tickers.values():
             pnl_cents = _parse_kalshi_dollars(pos.get("realized_pnl_dollars") or pos.get("realized_pnl"))
             pnl = pnl_cents / 100
             ticker = pos.get("ticker", "")
+            if _debug_count < 5:
+                _rpnl_raw = pos.get("realized_pnl_dollars")
+                _rpnl_v1 = pos.get("realized_pnl")
+                print(f"[SETTLED DEBUG] ticker={ticker[:30]} realized_pnl_dollars={_rpnl_raw!r} realized_pnl={_rpnl_v1!r} -> pnl_cents={pnl_cents} pnl_usd={pnl:.4f}")
+                if _debug_count == 0:
+                    print(f"[SETTLED DEBUG] First position ALL fields: {list(pos.keys())}")
+                _debug_count += 1
             # Skip positions with zero realized P&L (still open, no completed trades)
             if abs(pnl) < 0.005:
                 _skipped_zero += 1
@@ -12113,11 +12122,18 @@ def category_stats():
     return jsonify(stats)
 
 
+_TRADES_TODAY_CACHE = {"data": None, "ts": 0}
+_TRADES_TODAY_TTL = 8  # seconds — called by both loadBetsFeed and loadClosingSoon
+
 @app.route("/trades-today")
 def trades_today_endpoint():
     """Return all trades placed today (sniper + moonshark + closegame + manual).
     NOTE: Excludes BOT_STATE['trades_today'] — that list is hydrated from Kalshi
     fills API and double-counts trades already in the per-strategy lists."""
+    # Short cache to avoid duplicate API calls from multiple frontend consumers
+    now = _time.time()
+    if _TRADES_TODAY_CACHE["data"] and (now - _TRADES_TODAY_CACHE["ts"]) < _TRADES_TODAY_TTL:
+        return jsonify(_TRADES_TODAY_CACHE["data"])
     sniper_trades = BOT_STATE.get("snipe_trades_today", [])
     quant_trades = BOT_STATE.get("quant_trades", [])
     moonshark_trades = BOT_STATE.get("moonshark_trades_today", [])
@@ -12320,43 +12336,61 @@ def trades_today_endpoint():
                 }
     except Exception:
         pass
-    # 2) For tickers not in cache (live/closed markets), fetch from Kalshi API directly
-    missing = [t.get("ticker", "") for t in all_today if t.get("ticker", "") and t.get("ticker", "") not in market_info]
-    for ticker in set(missing):
+    # 2) For tickers not in cache — fetch in parallel (was sequential N+1)
+    missing = list(set(t.get("ticker", "") for t in all_today if t.get("ticker", "") and t.get("ticker", "") not in market_info))
+    def _fetch_market_info(ticker):
         try:
             path = f"/markets/{ticker}"
             sh = signed_headers("GET", path)
             if sh:
-                resp = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + path, headers=sh, timeout=3)
+                resp = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + path, headers=sh, timeout=5)
                 if resp.ok:
                     mk = resp.json().get("market", {})
                     yp = int(round(float(mk.get("yes_ask", mk.get("last_price", 0.5))) * 100))
-                    np = 100 - yp
-                    market_info[ticker] = {
-                        "close_time": mk.get("expected_expiration_time") or mk.get("close_time") or "",
-                        "yes_price": yp,
-                        "no_price": np,
-                    }
+                    return ticker, {"close_time": mk.get("expected_expiration_time") or mk.get("close_time") or "", "yes_price": yp, "no_price": 100 - yp}
         except Exception:
             pass
-    # Check realized P&L for settled positions
+        return ticker, None
+
+    # Fetch missing markets + settled positions in parallel
     _settled_pnl = {}
-    try:
-        _sph = signed_headers("GET", "/portfolio/positions")
-        if _sph:
-            _spr = requests.get(
-                KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/positions",
-                headers=_sph, params={"limit": 200, "settlement_status": "settled"},
-                timeout=8,
-            )
-            if _spr.ok:
-                for _sp in _spr.json().get("market_positions", []):
-                    _stk = _sp.get("ticker", "")
-                    _spnl = _parse_kalshi_dollars(_sp.get("realized_pnl_dollars") or _sp.get("realized_pnl"))
-                    if _stk:
-                        _settled_pnl[_stk] = _spnl / 100  # in USD
-    except Exception:
-        pass
+    def _fetch_settled_pnl():
+        try:
+            _sph = signed_headers("GET", "/portfolio/positions")
+            if _sph:
+                _spr = requests.get(
+                    KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/positions",
+                    headers=_sph, params={"limit": 200, "settlement_status": "settled"},
+                    timeout=8,
+                )
+                if _spr.ok:
+                    result = {}
+                    for _sp in _spr.json().get("market_positions", []):
+                        _stk = _sp.get("ticker", "")
+                        _spnl = _parse_kalshi_dollars(_sp.get("realized_pnl_dollars") or _sp.get("realized_pnl"))
+                        if _stk:
+                            result[_stk] = _spnl / 100
+                    return result
+        except Exception:
+            pass
+        return {}
+
+    if missing or True:  # always fetch settled PnL
+        with ThreadPoolExecutor(max_workers=min(12, len(missing) + 1)) as pool:
+            # Submit all market fetches + settled PnL fetch in parallel
+            market_futures = {pool.submit(_fetch_market_info, tk): tk for tk in missing}
+            settled_future = pool.submit(_fetch_settled_pnl)
+            for future in as_completed(market_futures, timeout=8):
+                try:
+                    tk, info = future.result(timeout=5)
+                    if info:
+                        market_info[tk] = info
+                except Exception:
+                    pass
+            try:
+                _settled_pnl = settled_future.result(timeout=8)
+            except Exception:
+                pass
 
     for t in all_today:
         info = market_info.get(t.get("ticker", ""), {})
@@ -12402,7 +12436,10 @@ def trades_today_endpoint():
     # Sort by time descending
     all_today.sort(key=lambda x: x.get("time", ""), reverse=True)
     total_spent = sum(t["cost_usd"] for t in all_today if t["success"])
-    return jsonify({"trades": all_today, "count": len(all_today), "total_spent": round(total_spent, 2)})
+    _result = {"trades": all_today, "count": len(all_today), "total_spent": round(total_spent, 2)}
+    _TRADES_TODAY_CACHE["data"] = _result
+    _TRADES_TODAY_CACHE["ts"] = _time.time()
+    return jsonify(_result)
 
 
 # ── Live Scores (ESPN) ────────────────────────────────────────────────
@@ -12477,12 +12514,23 @@ def _get_espn_scores():
 def _fetch_all_espn_scores():
     """Fetch today's scores from all ESPN endpoints. Returns dict of normalized_team_key -> game info."""
     games = {}
-    for league, url in _ESPN_ENDPOINTS.items():
+    # Pre-fetch all leagues in parallel, then process sequentially
+    _espn_responses = {}
+    with ThreadPoolExecutor(max_workers=len(_ESPN_ENDPOINTS)) as pool:
+        def _fetch_league(league_url):
+            league, url = league_url
+            try:
+                resp = requests.get(url, timeout=5)
+                if resp.ok:
+                    return league, resp.json()
+            except Exception:
+                pass
+            return league, None
+        for league, data in pool.map(_fetch_league, _ESPN_ENDPOINTS.items()):
+            if data:
+                _espn_responses[league] = data
+    for league, data in _espn_responses.items():
         try:
-            resp = requests.get(url, timeout=5)
-            if not resp.ok:
-                continue
-            data = resp.json()
             for event in data.get("events", []):
                 competition = (event.get("competitions") or [{}])[0]
                 competitors = competition.get("competitors", [])
@@ -21420,7 +21468,11 @@ setInterval(checkNotifications, 15000);
 // --- Closing Soon Panel ---
 async function loadClosingSoon() {
   try {
-    var data = await fetch(API + '/trades-today').then(function(r) { return r.json(); });
+    // Fetch both endpoints in parallel (was sequential — slow)
+    var [data, posData] = await Promise.all([
+      fetch(API + '/trades-today').then(function(r) { return r.json(); }),
+      fetch(API + '/portfolio-summary').then(function(r) { return r.json(); })
+    ]);
     var trades = data.trades || [];
     var el = document.getElementById('closing-soon-lines');
     var countEl = document.getElementById('closing-soon-count');
@@ -21428,9 +21480,6 @@ async function loadClosingSoon() {
     // Filter to trades with close_time, sort by soonest
     var withClose = trades.filter(function(t) { return t.close_time; });
     withClose.sort(function(a, b) { return (a.close_time || '').localeCompare(b.close_time || ''); });
-
-    // Also get open positions with close times — only show next 30 days
-    var posData = await fetch(API + '/portfolio-summary').then(function(r) { return r.json(); });
     var _now = new Date();
     var _nowMs = _now.getTime();
     var _30dMs = _nowMs + 30 * 24 * 60 * 60 * 1000;
