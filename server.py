@@ -2954,6 +2954,19 @@ def _fit_to_game_cap(event_key, price_cents, count):
 # ---------------------------------------------------------------------------
 DAILY_BET_FLOOR = 3  # minimum bets placed per day — 5 was too aggressive, caused spray-betting
 
+def _total_daily_spent():
+    """Sum daily spending across ALL 7 strategy buckets. Used for global budget enforcement."""
+    return (
+        BOT_STATE.get("daily_spent_usd", 0)
+        + BOT_STATE.get("snipe_daily_spent", 0)
+        + BOT_STATE.get("moonshark_daily_spent", 0)
+        + BOT_STATE.get("closegame_daily_spent", 0)
+        + BOT_STATE.get("floor_daily_spent", 0)
+        + BOT_STATE.get("swing_daily_spent", 0)
+        + BOT_STATE.get("goalie_daily_spent", 0)
+    )
+
+
 def _total_bets_today():
     """Count every bet placed today across every strategy."""
     return (
@@ -3274,8 +3287,7 @@ def live_game_snipe():
                     break
 
                 # SAFETY: check total spending across ALL strategies vs cash
-                total_daily = BOT_STATE.get("daily_spent_usd", 0) + BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0) + BOT_STATE.get("closegame_daily_spent", 0)
-                if total_daily >= BOT_CONFIG["max_daily_usd"]:
+                if _total_daily_spent() >= BOT_CONFIG["max_daily_usd"]:
                     break
 
                 # Closing time edge — markets closing in <30min at 70%+ rarely flip
@@ -3849,11 +3861,7 @@ def moonshark_snipe():
                     break
 
                 # SAFETY: check total spending across ALL strategies vs cash
-                total_daily = (BOT_STATE.get("daily_spent_usd", 0)
-                               + BOT_STATE.get("snipe_daily_spent", 0)
-                               + BOT_STATE.get("moonshark_daily_spent", 0)
-                               + BOT_STATE.get("closegame_daily_spent", 0))
-                if total_daily >= BOT_CONFIG["max_daily_usd"]:
+                if _total_daily_spent() >= BOT_CONFIG["max_daily_usd"]:
                     break
 
                 # Calculate quantity using Kelly Criterion
@@ -4526,8 +4534,7 @@ def closegame_snipe():
         if len(BOT_STATE.get("closegame_trades_today", [])) >= CLOSEGAME_MAX_TRADES:
             break
         # SAFETY: check total spending across ALL strategies
-        _cg_total_daily = BOT_STATE.get("daily_spent_usd", 0) + BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0) + BOT_STATE.get("closegame_daily_spent", 0)
-        if _cg_total_daily >= BOT_CONFIG["max_daily_usd"]:
+        if _total_daily_spent() >= BOT_CONFIG["max_daily_usd"]:
             break
 
         underdog = cg["underdog"].upper()
@@ -5116,6 +5123,9 @@ def floor_quota_snipe():
             break
         if BOT_STATE.get("floor_daily_spent", 0) >= FLOOR_MAX_DAILY_USD:
             break
+        # SAFETY: check total spending across ALL strategies
+        if _total_daily_spent() >= BOT_CONFIG["max_daily_usd"]:
+            break
 
         ticker = cand["ticker"]
         title = cand["title"]
@@ -5316,6 +5326,9 @@ def momentum_swing_snipe():
         if BOT_STATE.get("swing_daily_spent", 0) >= SWING_MAX_DAILY_USD:
             break
         if len(BOT_STATE.get("swing_trades_today", [])) >= SWING_MAX_TRADES:
+            break
+        # SAFETY: check total spending across ALL strategies
+        if _total_daily_spent() >= BOT_CONFIG["max_daily_usd"]:
             break
 
         try:
@@ -5632,6 +5645,9 @@ def goalie_pulled_snipe():
         if BOT_STATE.get("goalie_daily_spent", 0) >= GOALIE_MAX_DAILY_USD:
             break
         if len(BOT_STATE.get("goalie_trades_today", [])) >= GOALIE_MAX_TRADES:
+            break
+        # SAFETY: check total spending across ALL strategies
+        if _total_daily_spent() >= BOT_CONFIG["max_daily_usd"]:
             break
 
         period = game.get("clock", "") or ""
@@ -6446,7 +6462,7 @@ def run_quant_strategies(all_markets):
         return
 
     # Check daily limit
-    total_daily = BOT_STATE.get("daily_spent_usd", 0) + BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0) + BOT_STATE.get("closegame_daily_spent", 0)
+    total_daily = _total_daily_spent()
     if total_daily >= BOT_CONFIG["max_daily_usd"]:
         return
 
@@ -6592,7 +6608,7 @@ def run_quant_strategies(all_markets):
             continue
 
         # Daily limit re-check
-        total_daily = BOT_STATE.get("daily_spent_usd", 0) + BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0) + BOT_STATE.get("closegame_daily_spent", 0)
+        total_daily = _total_daily_spent()
         if total_daily >= BOT_CONFIG["max_daily_usd"]:
             break
 
@@ -11175,7 +11191,7 @@ def insights_endpoint():
         pending = [t for t in _TRADE_JOURNAL if t.get("result") is None]
         markets_scanned = BOT_STATE.get("last_scan_markets", 0)
         mispriced_count = BOT_STATE.get("last_scan_mispriced", 0)
-        daily_spent = BOT_STATE.get("daily_spent_usd", 0) + BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0) + BOT_STATE.get("closegame_daily_spent", 0)
+        daily_spent = _total_daily_spent()
         max_daily = BOT_CONFIG.get("max_daily_usd", 125.0)
         moonshark_trades = BOT_STATE.get("moonshark_trades_today", [])
         moonshark_spent = BOT_STATE.get("moonshark_daily_spent", 0.0)
@@ -11993,13 +12009,16 @@ def ticker_prices():
 
 def _count_trades_today():
     """Count unique trades placed today (deduplicated by ticker+side).
-    Uses the same logic as /trades-today to ensure both numbers match."""
+    Includes ALL strategy buckets to match _total_bets_today."""
     seen = set()
     count = 0
     for _tlist in [BOT_STATE.get("snipe_trades_today", []),
                    BOT_STATE.get("moonshark_trades_today", []),
                    BOT_STATE.get("closegame_trades_today", []),
-                   BOT_STATE.get("manual_trades_today", [])]:
+                   BOT_STATE.get("manual_trades_today", []),
+                   BOT_STATE.get("floor_trades_today", []),
+                   BOT_STATE.get("swing_trades_today", []),
+                   BOT_STATE.get("goalie_trades_today", [])]:
         for t in _tlist:
             tk = t.get("ticker", "")
             side = t.get("side", "")
@@ -12025,7 +12044,7 @@ def status():
         "daily_bet_floor": DAILY_BET_FLOOR,
         "quota_shortfall": _quota_shortfall(),
         "floor_mode_active": _floor_mode_active(),
-        "daily_spent_usd": BOT_STATE.get("daily_spent_usd", 0) + BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0) + BOT_STATE.get("closegame_daily_spent", 0) + BOT_STATE.get("floor_daily_spent", 0) + BOT_STATE.get("swing_daily_spent", 0) + BOT_STATE.get("goalie_daily_spent", 0),
+        "daily_spent_usd": _total_daily_spent(),
         "total_trades_all_time": len(BOT_STATE["all_trades"]),
         "recent_errors": BOT_STATE["errors"][-5:],
         "scheduler_running": scheduler.running,
@@ -13563,7 +13582,7 @@ def _check_arbitrage():
             )
             # Buy both sides
             # Budget check — arb trades must respect daily limits
-            daily_spent = BOT_STATE.get("daily_spent_usd", 0) + BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0) + BOT_STATE.get("closegame_daily_spent", 0)
+            daily_spent = _total_daily_spent()
             daily_max = BOT_CONFIG.get("max_daily_usd", 125)
             remaining_budget = max(0, daily_max - daily_spent)
             max_contracts = min(50, int(BOT_CONFIG.get("max_bet_usd", 5) * 100 / total))
@@ -16325,7 +16344,7 @@ def execute_trade():
     pc = int(price_cents)
     count = max(1, 500 // pc) if pc > 0 else 1  # target $5 per trade
     cost_usd = (pc * count) / 100.0
-    daily_spent = BOT_STATE.get("daily_spent_usd", 0) + BOT_STATE.get("snipe_daily_spent", 0) + BOT_STATE.get("moonshark_daily_spent", 0) + BOT_STATE.get("closegame_daily_spent", 0)
+    daily_spent = _total_daily_spent()
     daily_max = BOT_CONFIG.get("max_daily_usd", 125)
     if daily_spent + cost_usd > daily_max:
         return jsonify({"error": f"Would exceed daily limit (${daily_spent:.2f} + ${cost_usd:.2f} > ${daily_max:.2f})"}), 400
