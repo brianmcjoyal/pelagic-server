@@ -70,7 +70,7 @@ BOT_CONFIG = {
     "max_daily_usd": 125.0,        # max $125/day — 25% of $500 bankroll across all strategies
     "min_balance_usd": 250.0,     # SAFETY FLOOR: stop all trading if cash below $250
     "min_cash_reserve_pct": 0.05, # keep 5% of portfolio in cash — legacy positions skew ratio
-    "max_open_positions": 40,     # tightened from 150 — prevents position bloat and forces quality over quantity
+    "max_open_positions": 150,    # no hard cap — quality is controlled by conviction + edge gates, not position count
     "min_deviation": 0.08,        # 8% mispricing — catch more edges
     "min_platforms": 1,           # single platform OK — MoonShark is our main strategy
     "min_volume": 50,             # include smaller markets
@@ -188,7 +188,7 @@ _LEARNING_STATE = {
     "adaptive": {
         "min_conviction_sniper": 4,
         "min_conviction_moonshark": 4,
-        "min_edge_sniper": 0.02,    # ESPN edge required
+        "min_edge_sniper": 0.03,    # 3% ESPN edge minimum — never bet on razor-thin margins
         "min_edge_moonshark": 0.05,
         "min_edge_closegame": 0.03,
         "min_edge_floor": 0.02,
@@ -3853,7 +3853,7 @@ def moonshark_snipe():
                             # over Kalshi price. Floor mode relaxes further.
                             _ms_min_edge = _adaptive_get("min_edge_moonshark", 0.05)
                             if _floor_mode_active():
-                                _ms_min_edge = max(0.02, _ms_min_edge - 0.02)
+                                _ms_min_edge = max(0.04, _ms_min_edge - 0.01)  # floor can only shave 1%, never below 4%
                             if espn_edge < _ms_min_edge:
                                 _ms_reasons["no_edge"] = _ms_reasons.get("no_edge", 0) + 1
                                 continue
@@ -4068,7 +4068,7 @@ def moonshark_snipe():
                 _win_prob_est = espn_implied if espn_implied else (price / 100.0)
                 _ev_per_contract = (_win_prob_est * (100 - price) - (1 - _win_prob_est) * price) / 100.0
                 _ev_after_fees = _ev_per_contract - (_kalshi_fee * price / 100.0)
-                if _ev_after_fees < 0.005:  # Less than half a cent EV per contract after fees
+                if _ev_after_fees < 0.015:  # Less than 1.5 cents EV per contract after fees — not worth the risk
                     _ms_reasons["low_ev"] = _ms_reasons.get("low_ev", 0) + 1
                     continue
 
@@ -4863,7 +4863,7 @@ FLOOR_MAX_DAILY_USD = 30.0  # total cap for the floor strategy per day
 FLOOR_BET_USD = 3.0         # default bet size — small so losses stay small
 FLOOR_MIN_PRICE = 20        # widest allowed range — 20c to 88c
 FLOOR_MAX_PRICE = 88
-FLOOR_MIN_EDGE = 0.02       # 2% ESPN edge minimum (vs 5% for regular sniper)
+FLOOR_MIN_EDGE = 0.05       # 5% ESPN edge minimum — same bar as moonshark, no charity bets
 FLOOR_MIN_CONVICTION = 3    # relaxed but not reckless — 2 was too loose
 
 def floor_quota_snipe():
@@ -7434,9 +7434,9 @@ def _auto_tune_thresholds():
 
         # Map strategy name -> (conviction_key, edge_key, conviction_bounds, edge_bounds, default_edge)
         _knobs = {
-            "live_sniper": ("min_conviction_sniper", "min_edge_sniper", (3, 7), (0.01, 0.10), 0.02),
-            "moonshark":   ("min_conviction_moonshark", "min_edge_moonshark", (3, 7), (0.02, 0.12), 0.05),
-            "closegame":   (None,                     "min_edge_closegame",   None,   (0.01, 0.10), 0.03),
+            "live_sniper": ("min_conviction_sniper", "min_edge_sniper", (3, 7), (0.03, 0.10), 0.03),
+            "moonshark":   ("min_conviction_moonshark", "min_edge_moonshark", (3, 7), (0.04, 0.12), 0.05),
+            "closegame":   (None,                     "min_edge_closegame",   None,   (0.03, 0.10), 0.03),
             "floor":       (None,                     "min_edge_floor",       None,   (0.01, 0.08), 0.02),
             "momentum_swing": (None,                  "min_edge_swing",       None,   (0.03, 0.15), 0.06),
             "goalie_pulled":  (None,                  "min_edge_goalie",      None,   (0.03, 0.15), 0.05),
