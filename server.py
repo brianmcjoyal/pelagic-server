@@ -1611,9 +1611,9 @@ def research_market(question):
 _market_cache = {"data": [], "time": None}
 
 def fetch_all_markets():
-    # Cache for 12 seconds (scanning every 15s, leave buffer)
+    # Cache for 8 seconds (scanning every 10s, leave buffer)
     now = datetime.datetime.utcnow()
-    if _market_cache["time"] and (now - _market_cache["time"]).total_seconds() < 12 and _market_cache["data"]:
+    if _market_cache["time"] and (now - _market_cache["time"]).total_seconds() < 8 and _market_cache["data"]:
         return _market_cache["data"]
     all_markets = []
     with ThreadPoolExecutor(max_workers=6) as pool:
@@ -6749,7 +6749,7 @@ def place_orders_parallel(orders):
 # ---------------------------------------------------------------------------
 
 _orderbook_cache = {}  # ticker -> {"bids": [], "asks": [], "time": datetime}
-_OB_CACHE_TTL = 15     # seconds
+_OB_CACHE_TTL = 10     # seconds — match 10s scan interval
 
 def fetch_orderbook(ticker):
     """Fetch full order book for a Kalshi market. Returns bid/ask depth."""
@@ -8628,7 +8628,7 @@ def _sync_kalshi_fills():
 
 def _background_loop():
     """Simple background loop that runs scans, warms cache, monitors positions."""
-    _time.sleep(30)  # wait 30s for server to fully start before scanning
+    _time.sleep(10)  # brief startup delay then start scanning
     print("[BG] Background loop started")
     _log_activity("Background engine started — v3 QUANT")
     # Early cache warm — get balance + positions so dashboard shows data immediately
@@ -9075,11 +9075,10 @@ def _background_loop():
             _log_activity(f"Background error: {str(e)[:80]}", "error")
             print(f"[BG] Error in background loop: {e}")
             traceback.print_exc()
-        # Dynamic scan interval — fastest during peak game hours
+        # Dynamic scan interval — 10s during game hours for fast edge capture
         _now_pt = datetime.datetime.now(tz=_PACIFIC)
-        _is_peak_hours = 16 <= _now_pt.hour <= 22  # 4PM-10PM PT — most games live
         _is_game_hours = 10 <= _now_pt.hour <= 23
-        _sleep_time = 15 if _is_peak_hours else (30 if _is_game_hours else 300)
+        _sleep_time = 10 if _is_game_hours else 60
         _time.sleep(_sleep_time)
 
 _bg_thread = None
@@ -9094,7 +9093,7 @@ def _ensure_bg_thread():
 
     # Close-Game Sniper — fast 10s loop for live game edge
     def _closegame_loop():
-        _time.sleep(60)  # wait for main loop to warm up first
+        _time.sleep(20)  # brief warmup — main loop starts fast now
         print("[CLOSEGAME] Fast sniper thread started (10s interval)")
         _cg_cycle = 0
         while True:
@@ -12452,9 +12451,9 @@ _TEAM_ALIASES = {
     "ny rangers": ["nyr", "rangers"], "ny islanders": ["nyi", "islanders"],
 }
 
-# --- Global ESPN scores cache (15-second TTL) ---
+# --- Global ESPN scores cache (10-second TTL) ---
 _ESPN_SCORES_CACHE = {"data": {}, "ts": 0}
-_ESPN_CACHE_TTL = 15  # seconds
+_ESPN_CACHE_TTL = 10  # seconds — refresh every 10s for fast live score updates
 
 
 def _get_espn_scores():
@@ -13117,7 +13116,7 @@ _ESPN_SUMMARY_PATHS = {
 }
 
 _win_prob_cache = {}  # cache_key -> {"prob": float, "ts": float}
-_WIN_PROB_TTL = 30  # 30 second cache
+_WIN_PROB_TTL = 15  # 15 second cache — faster updates for live game edge
 
 
 def _get_espn_win_prob(event_id, league, home_team=True):
@@ -21243,28 +21242,20 @@ async function loadAnalytics() {
   }
 }
 
-// Load everything on page load
-loadTicker();
-loadSeventyFivers();
-loadQuantPicks();
+// Load everything on page load — all in parallel for fast first paint
+Promise.all([
+  loadTicker(), loadSeventyFivers(), loadQuantPicks(),
+  loadStatus(), loadActivity(), loadBetsFeed(), loadAllBets(),
+  loadPortfolio(), loadTopPicks(), loadTodayPicks(),
+  loadPositions(), loadSettled(), loadMispriced(),
+  loadTrades(), loadMoonshark()
+]).catch(function(e){ console.warn('Init load partial fail:', e); });
+// Auto-refresh intervals
 setInterval(loadSeventyFivers, 60000);
 setInterval(loadQuantPicks, 60000);
-loadStatus();
-loadActivity();
-loadBetsFeed();
-loadAllBets();
-loadPortfolio();
-loadTopPicks();
-loadTodayPicks();
-loadPositions();
-loadSettled();
-loadMispriced();
-loadTrades();
-loadMoonshark();
-// Auto-refresh: ticker every 60s, activity every 10s, portfolio every 30s
 setInterval(() => { loadTicker(); }, 60000);
 setInterval(() => { loadActivity(); loadBetsFeed(); checkForNotifications(); }, 10000);
-setInterval(() => { loadStatus(); loadPortfolio(); loadTopPicks(); loadTodayPicks(); loadPositions(); loadSettled(); loadTrades(); checkNotifications(); if (document.getElementById('tab-performance') && document.getElementById('tab-performance').classList.contains('active')) loadPerformance(); }, 15000);
+setInterval(() => { loadStatus(); loadPortfolio(); loadTopPicks(); loadTodayPicks(); loadPositions(); loadSettled(); loadTrades(); checkNotifications(); if (document.getElementById('tab-performance') && document.getElementById('tab-performance').classList.contains('active')) loadPerformance(); }, 10000);
 
 // --- Notification Bell ---
 var _notifItems = [];
