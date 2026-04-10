@@ -2915,7 +2915,7 @@ def _fit_to_game_cap(event_key, price_cents, count):
 # ---------------------------------------------------------------------------
 # DAILY BET FLOOR — guarantee minimum activity so we always learn & earn
 # ---------------------------------------------------------------------------
-DAILY_BET_FLOOR = 5  # minimum bets placed per day across all strategies
+DAILY_BET_FLOOR = 3  # minimum bets placed per day — 5 was too aggressive, caused spray-betting
 
 def _total_bets_today():
     """Count every bet placed today across every strategy."""
@@ -3294,7 +3294,7 @@ def live_game_snipe():
                 # based on rolling win rate. Floor mode relaxes by 1 more.
                 _min_conv_snipe = _adaptive_get("min_conviction_sniper", 4)
                 if _floor_mode_active():
-                    _min_conv_snipe = max(2, _min_conv_snipe - 1)
+                    _min_conv_snipe = max(3, _min_conv_snipe - 1)
                 if conviction < _min_conv_snipe:
                     continue
 
@@ -4033,11 +4033,13 @@ def moonshark_snipe():
                         )
 
                 # Require minimum conviction — adaptive + floor relaxation
+                # Floor mode can relax by 1, but NEVER below 3 — conviction 2
+                # bets have near-random signal and bleed money.
                 _ms_min_conviction = _adaptive_get("min_conviction_moonshark", 4)
                 if _floor_mode_active():
-                    _ms_min_conviction = max(2, _ms_min_conviction - 1)
+                    _ms_min_conviction = max(3, _ms_min_conviction - 1)
                 if _ms_below_floor:
-                    _ms_min_conviction = max(2, _ms_min_conviction - 1)
+                    _ms_min_conviction = max(3, _ms_min_conviction - 1)
                 if ms_conviction < _ms_min_conviction:
                     _ms_reasons["low_conviction"] = _ms_reasons.get("low_conviction", 0) + 1
                     continue
@@ -4854,7 +4856,7 @@ FLOOR_BET_USD = 3.0         # default bet size — small so losses stay small
 FLOOR_MIN_PRICE = 20        # widest allowed range — 20c to 88c
 FLOOR_MAX_PRICE = 88
 FLOOR_MIN_EDGE = 0.02       # 2% ESPN edge minimum (vs 5% for regular sniper)
-FLOOR_MIN_CONVICTION = 2    # much lower than regular strategies (vs 4)
+FLOOR_MIN_CONVICTION = 3    # relaxed but not reckless — 2 was too loose
 
 def floor_quota_snipe():
     """Safety-net strategy. Runs when total bets today < DAILY_BET_FLOOR.
@@ -5155,7 +5157,7 @@ def floor_quota_snipe():
             ticker, title, side, price, filled, actual_cost, "floor",
             is_live=True, close_time=mkt.get("close_time", "") if isinstance(mkt, dict) else "",
             game_info=cand.get("game"), espn_edge_data=_edge_data,
-            conviction=2, conviction_reasons=[f"ESPN+{edge:.0%}", "floor_mode"],
+            conviction=3, conviction_reasons=[f"ESPN+{edge:.0%}", "floor_mode"],
         )
 
         _log_activity(
