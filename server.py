@@ -8692,7 +8692,9 @@ def _background_loop():
                         _early_realized += _epnl_usd
                         _etk = _esp.get("ticker", "")
                         _ebd = _buy_dates.get(_etk, "")
-                        _is_day1 = _ebd >= TRADE_JOURNAL_START if _ebd else False
+                        # If no buy date found (e.g. after deploy), assume Day 1+
+                        # rather than excluding — better to count than to show 0W/0L
+                        _is_day1 = _ebd >= TRADE_JOURNAL_START if _ebd else True
 
                         if _epnl_usd > 0.005:
                             _early_wins += 1
@@ -8716,8 +8718,17 @@ def _background_loop():
         _PORTFOLIO_CACHE["ts"] = _time.time()
         # Record performance history snapshot for line chart
         if _pf_value > 0:
+            _now_pt = datetime.datetime.now(tz=_PACIFIC)
+            # If history is empty after deploy, seed with Day 1 anchor + current
+            # so the chart renders immediately instead of showing "Waiting for data"
+            if len(_PERF_HISTORY) < 2:
+                _PERF_HISTORY.insert(0, {
+                    "ts": "2026-03-31T09:00:00-07:00",
+                    "value": 500.00,
+                    "cash": 500.00,
+                })
             _PERF_HISTORY.append({
-                "ts": datetime.datetime.now(tz=_PACIFIC).isoformat(),
+                "ts": _now_pt.isoformat(),
                 "value": round(_pf_value, 2),
                 "cash": round(_bal_early, 2),
             })
