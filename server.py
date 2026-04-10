@@ -9967,8 +9967,7 @@ def settled_positions():
     import time as _t
     now = _t.time()
     # Only serve cache if it has actual settled data (don't cache empty results)
-    _nocache = request.args.get("nocache")
-    if not _nocache and _SETTLED_CACHE["data"] and (now - _SETTLED_CACHE["ts"]) < _SETTLED_CACHE_TTL:
+    if _SETTLED_CACHE["data"] and (now - _SETTLED_CACHE["ts"]) < _SETTLED_CACHE_TTL:
         if _SETTLED_CACHE["data"].get("settled") or _SETTLED_CACHE["data"].get("wins", 0) + _SETTLED_CACHE["data"].get("losses", 0) > 0:
             return jsonify(_SETTLED_CACHE["data"])
     path = "/portfolio/positions"
@@ -10377,23 +10376,63 @@ def settled_positions():
                 "entry_time": _entry_time,
             })
 
-        # Compute settled results from fills for tickers NOT already handled above.
+        # Compute settled results for tickers NOT already handled above.
         # Kalshi v2 zeroes out realized_pnl_dollars on settled positions, so we
-        # compute the actual P&L from buy-fill prices + market settlement result.
+        # reconstruct P&L from trade execution data + market settlement result.
+        #
+        # Data sources (in priority order):
+        # 1. BOT_STATE["all_trades"] — has valid count, price, side from execution
+        # 2. _TRADE_JOURNAL — enriched trade records with strategy, edge data
+        # 3. Fills API — raw fill records (may have zeroed fields in v2)
         _fills_added = 0
+
+        # Build lookup of trade data from BOT_STATE (populated by _hydrate_from_kalshi)
+        _trade_lookup = {}
+        for _at in BOT_STATE.get("all_trades", []):
+            _tk = _at.get("ticker", "")
+            if _tk and _at.get("action", "buy") == "buy":
+                if _tk not in _trade_lookup:
+                    _trade_lookup[_tk] = {"count": 0, "cost_cents": 0, "side": _at.get("side", "yes"),
+                                          "strategy": _at.get("strategy", "unknown"), "time": _at.get("timestamp", "")}
+                _tcount = _at.get("count", 0) or 0
+                _tprice = _at.get("price_cents", 0) or _at.get("price", 0) or 0
+                _trade_lookup[_tk]["count"] += _tcount
+                _trade_lookup[_tk]["cost_cents"] += _tprice * _tcount
+        # Also check trade journal for additional data
+        for _jt in _TRADE_JOURNAL:
+            _tk = _jt.get("ticker", "")
+            if _tk and _tk not in _trade_lookup and _jt.get("count", 0) > 0:
+                _tcount = _jt.get("count", 0)
+                _tprice = _jt.get("price_cents", 0) or _jt.get("price_at_entry", 0) or 0
+                _trade_lookup[_tk] = {"count": _tcount, "cost_cents": _tprice * _tcount,
+                                      "side": _jt.get("side", "yes"),
+                                      "strategy": _jt.get("strategy", "unknown"),
+                                      "time": _jt.get("entry_time", "")}
+
+        # Build candidate list: tickers with fills OR trade data, not yet in _seen_tickers
         _game_ticker_candidates = []
+        _candidate_tickers_seen = set()
+        # From fills
         for _fticker, _flist in _fills_by_ticker.items():
             if _fticker in _seen_tickers:
-                continue  # Already processed from positions API
+                continue
             _ftrade_date = _trade_dates.get(_fticker, "")
             if _ftrade_date and _ftrade_date < _day1_cutoff:
                 continue
-            # If no trade date found, include it — better to show than miss settled games
-            _buy_fills = [f for f in _flist if f.get("action") == "buy"]
-            if _buy_fills:
-                _game_ticker_candidates.append((_fticker, _flist, _ftrade_date))
-        # Sort by date descending — process all using cached results when available
+            _game_ticker_candidates.append((_fticker, _flist, _ftrade_date))
+            _candidate_tickers_seen.add(_fticker)
+        # From trade data (catches tickers not in fills due to pagination limits)
+        for _tk, _td in _trade_lookup.items():
+            if _tk in _seen_tickers or _tk in _candidate_tickers_seen:
+                continue
+            _ftrade_date = _trade_dates.get(_tk, _td.get("time", "")[:10])
+            if _ftrade_date and _ftrade_date < _day1_cutoff:
+                continue
+            _game_ticker_candidates.append((_tk, [], _ftrade_date))
+
+        # Sort by date descending
         _game_ticker_candidates.sort(key=lambda x: x[2], reverse=True)
+
         # Pre-fetch market results in parallel for uncached tickers
         _uncached_tickers = [t for t, _, _ in _game_ticker_candidates if t not in _GAME_RESULT_CACHE]
         if _uncached_tickers:
@@ -10424,40 +10463,82 @@ def settled_positions():
                     except Exception:
                         pass
             print(f"[SETTLED] Parallel-fetched {len(_uncached_tickers)} market results, cache now has {len(_GAME_RESULT_CACHE)} entries")
-        _debug_fills_logged = 0
+
+        _debug_logged = 0
         for _fticker, _flist, _ftrade_date in _game_ticker_candidates:
-            # Compute cost and result from fills
-            _buy_fills = [f for f in _flist if f.get("action") == "buy"]
-            if not _buy_fills:
-                continue
-            # Debug: log raw fill fields for first few tickers
-            if _debug_fills_logged < 3:
-                _sample = _buy_fills[0]
-                print(f"[FILLS DEBUG] ticker={_fticker[:40]} fill_keys={list(_sample.keys())}")
-                print(f"[FILLS DEBUG]   count_fp={_sample.get('count_fp')!r} count={_sample.get('count')!r}")
-                print(f"[FILLS DEBUG]   yes_price_dollars={_sample.get('yes_price_dollars')!r} no_price_dollars={_sample.get('no_price_dollars')!r}")
-                print(f"[FILLS DEBUG]   yes_price={_sample.get('yes_price')!r} no_price={_sample.get('no_price')!r}")
-                print(f"[FILLS DEBUG]   action={_sample.get('action')!r} side={_sample.get('side')!r}")
-                _debug_fills_logged += 1
-            _total_count = sum(int(float(str(f.get("count_fp") or f.get("count") or 0))) for f in _buy_fills)
+            # Get trade data: prefer BOT_STATE trades (always valid), fallback to fills
+            _total_count = 0
             _total_cost_cents = 0
-            _fill_side = _buy_fills[0].get("side", "yes")
-            for _bf in _buy_fills:
-                # Use v2 dollar fields (yes_price_dollars/no_price_dollars) first, fall back to v1
-                if _fill_side == "no":
-                    _price_cents = _parse_kalshi_dollars(_bf.get("no_price_dollars") or _bf.get("no_price") or 0) or (100 - _parse_kalshi_dollars(_bf.get("yes_price_dollars") or _bf.get("yes_price") or 0))
-                else:
-                    _price_cents = _parse_kalshi_dollars(_bf.get("yes_price_dollars") or _bf.get("yes_price") or 0)
-                _bf_count = int(float(str(_bf.get("count_fp") or _bf.get("count") or 0)))
-                _total_cost_cents += _price_cents * _bf_count
+            _fill_side = "yes"
+            _data_source = "unknown"
+            _trade_strategy = "unknown"
+            _entry_time = ""
+
+            # Source 1: BOT_STATE["all_trades"] — most reliable
+            if _fticker in _trade_lookup:
+                _td = _trade_lookup[_fticker]
+                _total_count = _td["count"]
+                _total_cost_cents = _td["cost_cents"]
+                _fill_side = _td["side"]
+                _trade_strategy = _td.get("strategy", "unknown")
+                _entry_time = _td.get("time", "")
+                _data_source = "all_trades"
+
+            # Source 2: Fills API — fallback if not in trade data
+            if _total_count == 0 and _flist:
+                _buy_fills = [f for f in _flist if f.get("action") == "buy"]
+                if _buy_fills:
+                    _fill_side = _buy_fills[0].get("side", "yes")
+                    for _bf in _buy_fills:
+                        _bf_count = 0
+                        try:
+                            _bf_count = int(float(str(_bf.get("count_fp") or _bf.get("count") or 0)))
+                        except Exception:
+                            pass
+                        _price_cents = 0
+                        try:
+                            if _fill_side == "no":
+                                _price_cents = _parse_kalshi_dollars(_bf.get("no_price_dollars") or _bf.get("no_price") or 0) or (100 - _parse_kalshi_dollars(_bf.get("yes_price_dollars") or _bf.get("yes_price") or 0))
+                            else:
+                                _price_cents = _parse_kalshi_dollars(_bf.get("yes_price_dollars") or _bf.get("yes_price") or 0)
+                        except Exception:
+                            pass
+                        _total_count += _bf_count
+                        _total_cost_cents += _price_cents * _bf_count
+                    _data_source = "fills"
+
+            # Source 3: Trade journal — last resort
+            if _total_count == 0:
+                for _jt in _TRADE_JOURNAL:
+                    if _jt.get("ticker") == _fticker and _jt.get("count", 0) > 0:
+                        _total_count = _jt["count"]
+                        _ep = _jt.get("price_cents", 0) or _jt.get("price_at_entry", 0) or 0
+                        _total_cost_cents = _ep * _total_count
+                        _fill_side = _jt.get("side", "yes")
+                        _trade_strategy = _jt.get("strategy", "unknown")
+                        _entry_time = _jt.get("entry_time", "")
+                        _data_source = "journal"
+                        break
+
+            if _total_count == 0:
+                if _debug_logged < 5:
+                    print(f"[SETTLED] SKIP {_fticker[:40]}: count=0 from all sources (fills={len(_flist)}, in_trades={'Y' if _fticker in _trade_lookup else 'N'})")
+                    if _flist:
+                        _sf = _flist[0]
+                        print(f"  fill_keys={list(_sf.keys())} action={_sf.get('action')!r} count_fp={_sf.get('count_fp')!r} count={_sf.get('count')!r}")
+                    _debug_logged += 1
+                continue
+
             _avg_entry = _total_cost_cents // max(1, _total_count)
-            # Check if market settled — use cache (populated by parallel fetch above)
+
+            # Check if market settled
             _settled_result = None
             if _fticker in _GAME_RESULT_CACHE:
                 _settled_result = _GAME_RESULT_CACHE[_fticker].get("result")
                 _title_cache[_fticker] = _GAME_RESULT_CACHE[_fticker].get("title", _fticker)
             else:
                 continue  # No result available — skip
+
             # Compute P&L
             if _settled_result == "yes":
                 _game_pnl_cents = (100 - _avg_entry) * _total_count if _fill_side == "yes" else -_avg_entry * _total_count
@@ -10465,6 +10546,7 @@ def settled_positions():
                 _game_pnl_cents = -_avg_entry * _total_count if _fill_side == "yes" else (100 - _avg_entry) * _total_count
             else:
                 continue  # Unknown result
+
             _game_pnl = _game_pnl_cents / 100
             _game_won = _game_pnl > 0
             _game_cost = _total_cost_cents / 100
@@ -10478,6 +10560,30 @@ def settled_positions():
                 biggest_loss = min(biggest_loss, _game_pnl)
             else:
                 breakeven += 1
+
+            # Enrich with trade journal data (edge reasons, strategy, etc.)
+            _edge_reasons = []
+            _espn_edge = None
+            _conviction = 0
+            _game_state = ""
+            for _jrec in _TRADE_JOURNAL:
+                if _jrec.get("ticker") == _fticker:
+                    _trade_strategy = _jrec.get("strategy", _trade_strategy)
+                    _entry_time = _jrec.get("entry_time", _entry_time)
+                    if _jrec.get("espn_edge"):
+                        try:
+                            _espn_edge = float(_jrec["espn_edge"])
+                            _edge_reasons.append(f"ESPN edge: +{_espn_edge:.1%}")
+                        except (ValueError, TypeError):
+                            pass
+                    if _jrec.get("game_state") == "in":
+                        _game_state = "live"
+                    elif _jrec.get("game_state") == "post":
+                        _game_state = "post"
+                    break
+            if not _edge_reasons:
+                _edge_reasons.append(f"Entry at {_avg_entry}c ({_data_source})")
+
             _game_title = _title_cache.get(_fticker, _fticker)
             settled.append({
                 "ticker": _fticker,
@@ -10486,21 +10592,21 @@ def settled_positions():
                 "won": _game_won,
                 "total_traded": round(_game_cost, 2),
                 "category": classify_market_category(_game_title, _fticker),
-                "strategy": "live_sniper",
+                "strategy": _trade_strategy,
                 "side": _fill_side,
                 "count": _total_count,
                 "entry_cents": _avg_entry,
                 "trade_date": _ftrade_date,
                 "settle_time": "",
-                "edge_reasons": [f"Entry at {_avg_entry}c — computed from fills"],
-                "espn_edge": None,
-                "conviction": 0,
-                "game_state_at_entry": "",
-                "entry_time": "",
+                "edge_reasons": _edge_reasons,
+                "espn_edge": round(_espn_edge, 4) if _espn_edge else None,
+                "conviction": _conviction,
+                "game_state_at_entry": _game_state,
+                "entry_time": _entry_time,
             })
             _fills_added += 1
         if _fills_added:
-            print(f"[SETTLED] Added {_fills_added} game results from fills API")
+            print(f"[SETTLED] Added {_fills_added} settled results from trade data + market results")
 
         # Sort by trade_date descending (most recently placed first)
         # Note: settle_time uses market close_time which can be far-future (2099 etc), so not reliable for sort
@@ -10526,28 +10632,6 @@ def settled_positions():
             c["win_rate"] = round(c["wins"] / max(1, c["wins"] + c["losses"]) * 100, 1)
             c["pnl_usd"] = round(c["pnl_usd"], 2)
 
-        # Debug: include fill diagnostic info when ?nocache is set
-        _debug_info = {}
-        if _nocache:
-            _debug_info["total_fills_fetched"] = len(_all_fills)
-            _debug_info["fills_by_ticker_count"] = len(_fills_by_ticker)
-            _debug_info["game_ticker_candidates"] = len(_game_ticker_candidates)
-            _debug_info["seen_tickers_count"] = len(_seen_tickers)
-            _debug_info["fills_added"] = _fills_added
-            _debug_info["game_cache_size"] = len(_GAME_RESULT_CACHE)
-            # Show raw sample fill
-            if _all_fills:
-                _sf = _all_fills[0]
-                _debug_info["sample_fill_keys"] = list(_sf.keys())
-                _debug_info["sample_fill"] = {k: str(v)[:60] for k, v in _sf.items()}
-            # Show a candidate ticker's fills
-            if _game_ticker_candidates:
-                _dtk, _dfl, _ = _game_ticker_candidates[0]
-                _dbf = [f for f in _dfl if f.get("action") == "buy"]
-                _debug_info["candidate_ticker"] = _dtk
-                _debug_info["candidate_buy_fills"] = len(_dbf)
-                if _dbf:
-                    _debug_info["candidate_sample_buy"] = {k: str(v)[:60] for k, v in _dbf[0].items()}
         result = {
             "settled": settled,
             "wins": wins,
@@ -10564,8 +10648,6 @@ def settled_positions():
             "total_bets": total_bets,
             "by_category": by_category,
         }
-        if _debug_info:
-            result["_debug"] = _debug_info
         print(f"[SETTLED DEBUG] Deduped: {len(_seen_tickers)} tickers, skipped_zero_pnl={_skipped_zero}, skipped_pre_day1={_skipped_date}, included={_included}")
         print(f"[SETTLED DEBUG] Result: {wins}W/{losses}L, total_pnl=${total_pnl:.2f}")
         _SETTLED_CACHE["data"] = result
@@ -10573,27 +10655,6 @@ def settled_positions():
         return jsonify(result)
     except Exception as e:
         return jsonify({"settled": [], "error": str(e)})
-
-
-@app.route("/debug-fills")
-def debug_fills():
-    """Temporary: show raw fill fields from Kalshi API."""
-    try:
-        h = signed_headers("GET", "/portfolio/fills")
-        r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/fills",
-                         headers=h, params={"limit": 3}, timeout=10)
-        if r.ok:
-            fills = r.json().get("fills", [])
-            if fills:
-                return jsonify({
-                    "fill_count": len(fills),
-                    "fill_keys": list(fills[0].keys()),
-                    "samples": [{k: str(v)[:60] for k, v in f.items()} for f in fills[:3]]
-                })
-            return jsonify({"fills": "empty"})
-        return jsonify({"error": f"HTTP {r.status_code}"})
-    except Exception as e:
-        return jsonify({"error": str(e)})
 
 
 @app.route("/debug-scan")
