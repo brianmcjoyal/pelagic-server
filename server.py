@@ -505,18 +505,28 @@ def _hydrate_from_kalshi():
             if order_id not in existing_ids:
                 new_count += 1
 
-        # Enrich with market titles (batch unique tickers)
+        # Enrich with market titles (parallel fetch for speed)
         unique_tickers = list(set(t["ticker"] for t in all_trades_rebuilt if t.get("ticker")))
         title_map = {}
-        for tk in unique_tickers[:50]:  # cap at 50 to avoid long startup
+        def _fetch_title_hydrate(tk):
             try:
                 mkt_path = f"/markets/{tk}"
                 mkt_h = signed_headers("GET", mkt_path)
-                mkt_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + mkt_path, headers=mkt_h, timeout=5)
+                mkt_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + mkt_path, headers=mkt_h, timeout=3)
                 if mkt_r.ok:
-                    title_map[tk] = mkt_r.json().get("market", {}).get("title", tk)
+                    return (tk, mkt_r.json().get("market", {}).get("title", tk))
             except Exception:
                 pass
+            return (tk, tk)
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(_fetch_title_hydrate, tk): tk for tk in unique_tickers[:100]}
+            for future in as_completed(futures, timeout=20):
+                try:
+                    tk, title = future.result()
+                    title_map[tk] = title
+                except Exception:
+                    pass
         for t in all_trades_rebuilt:
             if t["ticker"] in title_map:
                 t["question"] = title_map[t["ticker"]]
@@ -10061,7 +10071,7 @@ def settled_positions():
                 mkt_h = signed_headers("GET", mkt_path)
                 mkt_r = requests.get(
                     KALSHI_BASE_URL + KALSHI_API_PREFIX + mkt_path,
-                    headers=mkt_h, timeout=5,
+                    headers=mkt_h, timeout=3,
                 )
                 if mkt_r.ok:
                     mkt = mkt_r.json().get("market", {})
@@ -10071,6 +10081,38 @@ def settled_positions():
                 pass
             _title_cache[ticker] = ticker
             return ticker
+
+        # Pre-fetch titles in parallel for all tickers not in cache
+        # Prevents N+1 sequential API calls that cause /settled to timeout
+        _missing_titles = [
+            pos.get("ticker", "") for pos in positions_list
+            if pos.get("ticker", "") and pos.get("ticker", "") not in _title_cache
+        ]
+        _missing_titles = list(set(_missing_titles))  # dedupe
+        if _missing_titles:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            def _fetch_title(tk):
+                try:
+                    mkt_path = f"/markets/{tk}"
+                    mkt_h = signed_headers("GET", mkt_path)
+                    mkt_r = requests.get(
+                        KALSHI_BASE_URL + KALSHI_API_PREFIX + mkt_path,
+                        headers=mkt_h, timeout=3,
+                    )
+                    if mkt_r.ok:
+                        return (tk, mkt_r.json().get("market", {}).get("title", tk))
+                except Exception:
+                    pass
+                return (tk, tk)
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = {executor.submit(_fetch_title, tk): tk for tk in _missing_titles[:100]}
+                for future in as_completed(futures, timeout=15):
+                    try:
+                        tk, title = future.result()
+                        _title_cache[tk] = title
+                    except Exception:
+                        pass
+            print(f"[SETTLED] Batch-fetched {len(_missing_titles)} missing titles in parallel")
 
         # Deduplicate positions by ticker — the same ticker can appear in both
         # "settled" and "unsettled" results with non-zero realized P&L
@@ -17666,7 +17708,7 @@ async function loadPortfolio() {
     var dailyPl = (data.daily_pnl_usd !== undefined) ? data.daily_pnl_usd : (data.total_unrealized_usd || 0);
     var dailyEl = document.getElementById('pf-daily-pl');
     if (dailyEl) {
-      dailyEl.textContent = (dailyPl >= 0 ? '+' : '') + '$' + Math.abs(dailyPl).toFixed(2);
+      dailyEl.textContent = (dailyPl >= 0 ? '+$' : '-$') + Math.abs(dailyPl).toFixed(2);
       dailyEl.style.color = dailyPl >= 0 ? '#00dc5a' : '#ff5000';
     }
     // Total P&L — use /settled endpoint for Day 1+ accuracy (fetched below for win rate)
@@ -17685,12 +17727,12 @@ async function loadPortfolio() {
     rEl.style.color = rPnl >= 0 ? '#00dc5a' : '#ff5000';
 
     // Use /settled endpoint for accurate win rate (same source as scorecard)
-    // Use AbortController for 5s timeout so header doesn't show "--" forever
+    // Use AbortController for 15s timeout — /settled can be slow after deploy
     var wr = data.win_rate || 0;
     var w = data.wins || 0, l = data.losses || 0;
     try {
       var _ac = new AbortController();
-      var _to = setTimeout(function(){ _ac.abort(); }, 5000);
+      var _to = setTimeout(function(){ _ac.abort(); }, 15000);
       var settledData = await fetch(API + '/settled', {signal: _ac.signal}).then(function(r){return r.json();});
       clearTimeout(_to);
       if (settledData && settledData.win_rate !== undefined) {
@@ -19494,8 +19536,14 @@ async function loadPerformance() {
       dailyPnls[day] += pnl;
     });
 
+    // If client-side recount found 0 wins but endpoint disagrees, use endpoint values
+    // This handles cases where the `won` field doesn't survive JSON serialization
+    if (wins === 0 && losses === 0 && settledData.wins > 0) {
+      wins = settledData.wins || 0;
+      losses = settledData.losses || 0;
+    }
     var total = wins + losses;
-    var winRate = total > 0 ? (wins / total * 100) : 0;
+    var winRate = total > 0 ? (wins / total * 100) : (settledData.win_rate || 0);
     var roi = totalWagered > 0 ? (totalPnl / totalWagered * 100) : 0;
     var avgWin = winPnls.length > 0 ? winPnls.reduce(function(a,b){return a+b;},0) / winPnls.length : 0;
     var avgLoss = lossPnls.length > 0 ? Math.abs(lossPnls.reduce(function(a,b){return a+b;},0) / lossPnls.length) : 0;
