@@ -70,7 +70,7 @@ BOT_CONFIG = {
     "max_daily_usd": 125.0,        # max $125/day — 25% of $500 bankroll across all strategies
     "min_balance_usd": 250.0,     # SAFETY FLOOR: stop all trading if cash below $250
     "min_cash_reserve_pct": 0.05, # keep 5% of portfolio in cash — legacy positions skew ratio
-    "max_open_positions": 150,    # high limit — legacy positions settling, bot uses daily trade cap instead
+    "max_open_positions": 40,     # tightened from 150 — prevents position bloat and forces quality over quantity
     "min_deviation": 0.08,        # 8% mispricing — catch more edges
     "min_platforms": 1,           # single platform OK — MoonShark is our main strategy
     "min_volume": 50,             # include smaller markets
@@ -3046,6 +3046,10 @@ def live_game_snipe():
     existing_events = set()
     try:
         positions = check_position_prices()
+        # Enforce global position cap — no new snipes if already bloated
+        if len(positions) >= BOT_CONFIG.get("max_open_positions", 40):
+            _log_activity(f"🎯 Sniper SKIP: {len(positions)} open positions >= cap", "warn")
+            return []
         for p in positions:
             existing_tickers.add(p.get("ticker", ""))
             parts = p.get("ticker", "").split("-")
@@ -3601,6 +3605,10 @@ def moonshark_snipe():
     existing_events = set()
     try:
         positions = check_position_prices()
+        # Enforce global position cap — prevents bloat across days
+        if len(positions) >= BOT_CONFIG.get("max_open_positions", 40):
+            _log_activity(f"🦈 MoonShark SKIP: {len(positions)} open positions >= cap", "warn")
+            return []
         for p in positions:
             existing_tickers.add(p.get("ticker", ""))
             parts = p.get("ticker", "").split("-")
@@ -4893,6 +4901,10 @@ def floor_quota_snipe():
     existing_events = set()
     try:
         positions = check_position_prices()
+        # Enforce global position cap — no new floor bets if already bloated
+        if len(positions) >= BOT_CONFIG.get("max_open_positions", 40):
+            _log_activity(f"🎯 FLOOR SKIP: {len(positions)} open positions >= cap", "warn")
+            return []
         for p in positions:
             existing_tickers.add(p.get("ticker", ""))
             parts = p.get("ticker", "").split("-")
