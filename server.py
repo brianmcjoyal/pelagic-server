@@ -18104,29 +18104,23 @@ async function loadBetsFeed() {
       var convColor = convScore >= 8 ? '#00dc5a' : convScore >= 5 ? '#ffb400' : '#ff5000';
       var convTooltip = convBreakdown.join('&#10;');  // newline in title attr
 
-      // Build tooltip data for hover
-      var fullTitle = t.title || t.ticker || '';
-      var betDesc = (t.side || 'yes').toUpperCase() + ' @ ' + (t.price_cents || 0) + '\u00a2';
-      var stakeDesc = '$' + (t.cost_usd || 0).toFixed(2) + ' (' + (t.count || 1) + ' contract' + ((t.count || 1) > 1 ? 's' : '') + ')';
-      var profitDesc = t.potential_profit ? '+$' + t.potential_profit.toFixed(2) : ('$' + ((100 - (t.price_cents || 50)) * (t.count || 1) / 100).toFixed(2));
-      var edgeDesc = '';
-      if (t.edge_reasons && t.edge_reasons.length > 0) edgeDesc = t.edge_reasons.join(' | ');
-      else if (t.espn_edge) edgeDesc = 'ESPN edge: +' + (t.espn_edge * 100).toFixed(1) + '%';
-      var scoreDisp = '';
-      var si = scoreMap[t.ticker];
-      if (si && si.display) scoreDisp = si.display;
-      // Encode as data attributes (HTML-safe)
-      var ttData = ' data-tt-title="' + fullTitle.replace(/"/g, '&quot;') + '"'
-        + ' data-tt-bet="' + betDesc + '"'
-        + ' data-tt-stake="' + stakeDesc + '"'
-        + ' data-tt-strategy="' + sl + '"'
-        + ' data-tt-conv="' + convScore + '"'
-        + ' data-tt-profit="' + profitDesc + '"'
-        + ' data-tt-edge="' + edgeDesc.replace(/"/g, '&quot;') + '"'
-        + ' data-tt-score="' + scoreDisp.replace(/"/g, '&quot;') + '"'
-        + ' data-tt-time="' + fmtTime(t.time) + '"';
+      // Build tooltip data for hover — store as JSON in a single data attribute
+      var _ttObj = {
+        title: t.title || t.ticker || '',
+        bet: (t.side || 'yes').toUpperCase() + ' @ ' + (t.price_cents || 0) + 'c',
+        stake: '$' + (t.cost_usd || 0).toFixed(2) + ' (' + (t.count || 1) + ' contract' + ((t.count || 1) > 1 ? 's' : '') + ')',
+        profit: t.potential_profit ? '+$' + t.potential_profit.toFixed(2) : ('$' + ((100 - (t.price_cents || 50)) * (t.count || 1) / 100).toFixed(2)),
+        strategy: sl,
+        conv: convScore,
+        edge: (t.edge_reasons && t.edge_reasons.length > 0) ? t.edge_reasons.join(' | ') : (t.espn_edge ? 'ESPN edge: +' + (t.espn_edge * 100).toFixed(1) + '%' : ''),
+        score: (scoreMap[t.ticker] && scoreMap[t.ticker].display) ? scoreMap[t.ticker].display : '',
+        time: fmtTime(t.time),
+        side: t.side || 'yes'
+      };
+      // Encode as HTML-safe base64 to avoid attribute escaping issues
+      var _ttJson = btoa(unescape(encodeURIComponent(JSON.stringify(_ttObj))));
 
-      h += '<div class="activity-line bet-row" style="cursor:pointer;position:relative"' + ttData + '>';
+      h += '<div class="activity-line bet-row" style="cursor:pointer;position:relative" data-tt="' + _ttJson + '">';
       h += '<span class="time">' + timeStr + '</span>';
       // Conviction badge with hover tooltip
       h += '<span title="' + convTooltip + '" style="display:inline-flex;align-items:center;justify-content:center;width:22px;height:16px;border-radius:4px;font-size:9px;font-weight:800;color:#000;background:' + convColor + ';margin:0 4px;cursor:help;flex-shrink:0">' + convScore + '</span>';
@@ -18216,6 +18210,7 @@ async function loadBetsFeed() {
 // Attach click-to-expand and hover tooltip to bet rows
 function _attachBetRowHandlers(container) {
   var tooltip = document.getElementById('bet-tooltip');
+  if (!tooltip) return;
   container.querySelectorAll('.bet-row').forEach(function(row) {
     // Click to expand edge detail
     row.addEventListener('click', function() {
@@ -18224,46 +18219,39 @@ function _attachBetRowHandlers(container) {
     });
     // Hover tooltip
     row.addEventListener('mouseenter', function(e) {
-      var title = row.getAttribute('data-tt-title') || '';
-      var bet = row.getAttribute('data-tt-bet') || '';
-      var stake = row.getAttribute('data-tt-stake') || '';
-      var strat = row.getAttribute('data-tt-strategy') || '';
-      var conv = row.getAttribute('data-tt-conv') || '';
-      var profit = row.getAttribute('data-tt-profit') || '';
-      var edge = row.getAttribute('data-tt-edge') || '';
-      var score = row.getAttribute('data-tt-score') || '';
-      var time = row.getAttribute('data-tt-time') || '';
-      var html = '<div class="tt-header">' + title + '</div>';
-      if (score) html += '<div class="tt-row"><span class="tt-label">Live Score</span><span class="tt-val" style="color:#00d4ff">' + score + '</span></div>';
-      html += '<div class="tt-row"><span class="tt-label">Our Bet</span><span class="tt-val" style="color:' + (bet.startsWith('YES') ? '#00dc5a' : '#ff5000') + '">' + bet + '</span></div>';
-      html += '<div class="tt-row"><span class="tt-label">Stake</span><span class="tt-val">' + stake + '</span></div>';
-      html += '<div class="tt-row"><span class="tt-label">If We Win</span><span class="tt-val" style="color:#00dc5a">' + profit + '</span></div>';
-      html += '<div class="tt-row"><span class="tt-label">Strategy</span><span class="tt-val">' + strat + '</span></div>';
-      html += '<div class="tt-row"><span class="tt-label">Conviction</span><span class="tt-val">' + conv + '/10</span></div>';
-      html += '<div class="tt-row"><span class="tt-label">Placed</span><span class="tt-val">' + time + '</span></div>';
-      if (edge) html += '<div class="tt-edge"><strong style="color:#ffb400">Edge:</strong> ' + edge + '</div>';
-      tooltip.innerHTML = html;
-      tooltip.classList.add('visible');
-      // Position near cursor
-      var x = e.clientX + 16, y = e.clientY - 10;
-      if (x + 350 > window.innerWidth) x = e.clientX - 360;
-      if (y + tooltip.offsetHeight > window.innerHeight) y = window.innerHeight - tooltip.offsetHeight - 10;
-      if (y < 10) y = 10;
-      tooltip.style.left = x + 'px';
-      tooltip.style.top = y + 'px';
+      try {
+        var raw = row.getAttribute('data-tt');
+        if (!raw) return;
+        var d = JSON.parse(decodeURIComponent(escape(atob(raw))));
+        var html = '<div class="tt-header">' + (d.title || '').replace(/</g, '&lt;') + '</div>';
+        if (d.score) html += '<div class="tt-row"><span class="tt-label">Live Score</span><span class="tt-val" style="color:#00d4ff">' + d.score + '</span></div>';
+        html += '<div class="tt-row"><span class="tt-label">Our Bet</span><span class="tt-val" style="color:' + (d.side === 'yes' ? '#00dc5a' : '#ff5000') + '">' + d.bet + '</span></div>';
+        html += '<div class="tt-row"><span class="tt-label">Stake</span><span class="tt-val">' + d.stake + '</span></div>';
+        html += '<div class="tt-row"><span class="tt-label">If We Win</span><span class="tt-val" style="color:#00dc5a">' + d.profit + '</span></div>';
+        html += '<div class="tt-row"><span class="tt-label">Strategy</span><span class="tt-val">' + d.strategy + '</span></div>';
+        html += '<div class="tt-row"><span class="tt-label">Conviction</span><span class="tt-val">' + d.conv + '/10</span></div>';
+        html += '<div class="tt-row"><span class="tt-label">Placed</span><span class="tt-val">' + d.time + '</span></div>';
+        if (d.edge) html += '<div class="tt-edge"><strong style="color:#ffb400">Edge:</strong> ' + d.edge.replace(/</g, '&lt;') + '</div>';
+        tooltip.innerHTML = html;
+        tooltip.classList.add('visible');
+        _positionTooltip(tooltip, e);
+      } catch(err) { console.warn('Tooltip error:', err); }
     });
     row.addEventListener('mousemove', function(e) {
-      var x = e.clientX + 16, y = e.clientY - 10;
-      if (x + 350 > window.innerWidth) x = e.clientX - 360;
-      if (y + tooltip.offsetHeight > window.innerHeight) y = window.innerHeight - tooltip.offsetHeight - 10;
-      if (y < 10) y = 10;
-      tooltip.style.left = x + 'px';
-      tooltip.style.top = y + 'px';
+      if (tooltip.classList.contains('visible')) _positionTooltip(tooltip, e);
     });
     row.addEventListener('mouseleave', function() {
       tooltip.classList.remove('visible');
     });
   });
+}
+function _positionTooltip(tip, e) {
+  var x = e.clientX + 16, y = e.clientY - 10;
+  if (x + 350 > window.innerWidth) x = e.clientX - 360;
+  if (y + tip.offsetHeight > window.innerHeight) y = window.innerHeight - tip.offsetHeight - 10;
+  if (y < 10) y = 10;
+  tip.style.left = x + 'px';
+  tip.style.top = y + 'px';
 }
 
 async function loadAllBets() {
