@@ -10017,26 +10017,38 @@ def settled_positions():
             if _tk and _ts:
                 if _tk not in _trade_dates or _ts > _trade_dates[_tk]:
                     _trade_dates[_tk] = _ts
-        # Fetch fills from Kalshi to fill in any missing trade dates
-        # This ensures recent bot trades show up even after Railway deploy resets BOT_STATE
-        # Fetch fills (single page) for trade dates and game result computation
+        # Fetch ALL fills from Kalshi (paginated) — needed to reconstruct game results
+        # after settlement since Kalshi removes game positions from the positions API
         _all_fills = []
         try:
-            _fills_h = signed_headers("GET", "/portfolio/fills")
-            _fills_r = requests.get(
-                KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/fills",
-                headers=_fills_h, params={"limit": 200}, timeout=10,
-            )
-            if _fills_r.ok:
-                _all_fills = _fills_r.json().get("fills", [])
-                for _f in _all_fills:
-                    _fk = _f.get("ticker", "")
-                    _ft = (_f.get("created_time", "") or "")[:10]
-                    _fa = _f.get("action", "buy")
-                    if _fk and _ft and _fa != "sell":
-                        if _fk not in _trade_dates or _ft > _trade_dates[_fk]:
-                            _trade_dates[_fk] = _ft
-            print(f"[SETTLED] Fetched {len(_all_fills)} fills, hydrated {len(_trade_dates)} trade dates")
+            _fills_cursor = None
+            _fills_pages = 0
+            for _fills_page in range(20):  # max 20 pages = 4000 fills
+                _fills_h = signed_headers("GET", "/portfolio/fills")
+                _fills_params = {"limit": 200}
+                if _fills_cursor:
+                    _fills_params["cursor"] = _fills_cursor
+                _fills_r = requests.get(
+                    KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/fills",
+                    headers=_fills_h, params=_fills_params, timeout=10,
+                )
+                _fills_pages += 1
+                if _fills_r.ok:
+                    _page_fills = _fills_r.json().get("fills", [])
+                    _all_fills.extend(_page_fills)
+                    _fills_cursor = _fills_r.json().get("cursor")
+                    if not _fills_cursor or not _page_fills:
+                        break
+                else:
+                    break
+            for _f in _all_fills:
+                _fk = _f.get("ticker", "")
+                _ft = (_f.get("created_time", "") or "")[:10]
+                _fa = _f.get("action", "buy")
+                if _fk and _ft and _fa != "sell":
+                    if _fk not in _trade_dates or _ft > _trade_dates[_fk]:
+                        _trade_dates[_fk] = _ft
+            print(f"[SETTLED] Fetched {len(_all_fills)} fills across {_fills_pages} pages, hydrated {len(_trade_dates)} trade dates")
         except Exception as _fe:
             print(f"[SETTLED] Fills fetch error: {_fe}")
 
@@ -10343,8 +10355,7 @@ def settled_positions():
             _ftrade_date = _trade_dates.get(_fticker, "")
             if _ftrade_date and _ftrade_date < _day1_cutoff:
                 continue
-            if not _ftrade_date:
-                continue
+            # If no trade date found, include it — better to show than miss settled games
             _buy_fills = [f for f in _flist if f.get("action") == "buy"]
             if _buy_fills:
                 _game_ticker_candidates.append((_fticker, _flist, _ftrade_date))
@@ -10361,16 +10372,17 @@ def settled_positions():
             _buy_fills = [f for f in _flist if f.get("action") == "buy"]
             if not _buy_fills:
                 continue
-            _total_count = sum(int(f.get("count", 0)) for f in _buy_fills)
+            _total_count = sum(int(float(str(f.get("count_fp") or f.get("count") or 0))) for f in _buy_fills)
             _total_cost_cents = 0
             _fill_side = _buy_fills[0].get("side", "yes")
             for _bf in _buy_fills:
-                _price_cents = _parse_kalshi_dollars(_bf.get("yes_price") or _bf.get("no_price") or 0)
+                # Use v2 dollar fields (yes_price_dollars/no_price_dollars) first, fall back to v1
                 if _fill_side == "no":
-                    _price_cents = _parse_kalshi_dollars(_bf.get("no_price") or 0) or (100 - _parse_kalshi_dollars(_bf.get("yes_price") or 0))
+                    _price_cents = _parse_kalshi_dollars(_bf.get("no_price_dollars") or _bf.get("no_price") or 0) or (100 - _parse_kalshi_dollars(_bf.get("yes_price_dollars") or _bf.get("yes_price") or 0))
                 else:
-                    _price_cents = _parse_kalshi_dollars(_bf.get("yes_price") or 0)
-                _total_cost_cents += _price_cents * int(_bf.get("count", 0))
+                    _price_cents = _parse_kalshi_dollars(_bf.get("yes_price_dollars") or _bf.get("yes_price") or 0)
+                _bf_count = int(float(str(_bf.get("count_fp") or _bf.get("count") or 0)))
+                _total_cost_cents += _price_cents * _bf_count
             _avg_entry = _total_cost_cents // max(1, _total_count)
             # Check if market settled — use cache first, then API
             _settled_result = None
