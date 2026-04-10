@@ -8743,7 +8743,9 @@ def _background_loop():
             pass
         _PORTFOLIO_CACHE["ts"] = _time.time()
         # Record performance history snapshot for line chart
-        if _pf_value > 0:
+        # Use balance as fallback if portfolio value calc returns 0
+        _chart_value = _pf_value if _pf_value > 0 else _bal_early
+        if _chart_value > 0:
             _now_pt = datetime.datetime.now(tz=_PACIFIC)
             # If history is empty after deploy, seed with Day 1 anchor + current
             # so the chart renders immediately instead of showing "Waiting for data"
@@ -8755,12 +8757,12 @@ def _background_loop():
                 })
             _PERF_HISTORY.append({
                 "ts": _now_pt.isoformat(),
-                "value": round(_pf_value, 2),
+                "value": round(_chart_value, 2),
                 "cash": round(_bal_early, 2),
             })
             if len(_PERF_HISTORY) > _PERF_HISTORY_MAX:
                 _PERF_HISTORY[:] = _PERF_HISTORY[-_PERF_HISTORY_MAX:]
-        print(f"[BG] Early cache warm: ${_bal_early:.2f} cash, {len(_pos_early)} positions, P&L ${_early_realized:+.2f}")
+        print(f"[BG] Early cache warm: ${_bal_early:.2f} cash, {len(_pos_early)} positions, P&L ${_early_realized:+.2f}, chart pts={len(_PERF_HISTORY)}")
         # Pre-warm settled cache so Performance tab loads instantly
         try:
             with app.test_request_context():
@@ -9053,13 +9055,14 @@ def _background_loop():
                 }
                 _PORTFOLIO_CACHE["ts"] = _time.time()
                 # Record performance history snapshot for line chart
-                # Throttle to ~1 point per minute to avoid bloat (bg loop runs every 15s)
-                _last_perf_ts = _PERF_HISTORY[-1]["ts"][:16] if _PERF_HISTORY else ""
-                _now_perf_ts = datetime.datetime.now(tz=_PACIFIC).isoformat()[:16]
-                if _now_perf_ts != _last_perf_ts and _pf_value2 > 0:
+                # Throttle to ~1 point per 30s to balance chart resolution vs storage
+                _last_perf_ts = _PERF_HISTORY[-1]["ts"][:18] if _PERF_HISTORY else ""
+                _now_perf_ts = datetime.datetime.now(tz=_PACIFIC).isoformat()[:18]
+                _chart_val2 = _pf_value2 if _pf_value2 > 0 else _bal2
+                if _now_perf_ts != _last_perf_ts and _chart_val2 > 0:
                     _PERF_HISTORY.append({
                         "ts": datetime.datetime.now(tz=_PACIFIC).isoformat(),
-                        "value": round(_pf_value2, 2),
+                        "value": round(_chart_val2, 2),
                         "cash": round(_bal2, 2),
                     })
                     if len(_PERF_HISTORY) > _PERF_HISTORY_MAX:
@@ -9954,7 +9957,7 @@ def positions():
 
 
 _SETTLED_CACHE = {"data": None, "ts": 0}
-_SETTLED_CACHE_TTL = 300  # 5 minutes — expensive call, data changes slowly
+_SETTLED_CACHE_TTL = 120  # 2 minutes — balance freshness vs API cost
 _GAME_RESULT_CACHE = {}  # {ticker: {"result": "yes"/"no", "title": "..."}} — persists across settled calls
 _TITLE_CACHE = {}  # {ticker: "market title"} — persists across settled calls
 
@@ -17086,9 +17089,9 @@ a:hover { color: #7da5f5; }
       <div style="display:flex;gap:6px" id="perf-chart-range">
         <button onclick="setPerfRange('1h')" class="refresh-btn perf-range-btn" data-range="1h" style="font-size:9px;padding:2px 8px">1H</button>
         <button onclick="setPerfRange('6h')" class="refresh-btn perf-range-btn" data-range="6h" style="font-size:9px;padding:2px 8px">6H</button>
-        <button onclick="setPerfRange('1d')" class="refresh-btn perf-range-btn active" data-range="1d" style="font-size:9px;padding:2px 8px;background:#00dc5a;color:#000">1D</button>
+        <button onclick="setPerfRange('1d')" class="refresh-btn perf-range-btn" data-range="1d" style="font-size:9px;padding:2px 8px">1D</button>
         <button onclick="setPerfRange('7d')" class="refresh-btn perf-range-btn" data-range="7d" style="font-size:9px;padding:2px 8px">7D</button>
-        <button onclick="setPerfRange('all')" class="refresh-btn perf-range-btn" data-range="all" style="font-size:9px;padding:2px 8px">ALL</button>
+        <button onclick="setPerfRange('all')" class="refresh-btn perf-range-btn active" data-range="all" style="font-size:9px;padding:2px 8px;background:#00dc5a;color:#000">ALL</button>
       </div>
     </div>
     <div style="position:relative;height:220px">
@@ -18747,7 +18750,7 @@ async function loadTrades() {
 // P/L Chart
 // ── Performance Line Chart ──
 var _perfChartData = [];
-var _perfChartRange = '1d';
+var _perfChartRange = 'all';
 var _perfChartHover = -1;
 
 function setPerfRange(range) {
@@ -18764,12 +18767,15 @@ function setPerfRange(range) {
 
 async function loadPerfHistory() {
   try {
-    var resp = await fetch(API + '/performance-history');
+    var _ac = new AbortController();
+    var _to = setTimeout(function(){ _ac.abort(); }, 8000);
+    var resp = await fetch(API + '/performance-history', {signal: _ac.signal});
+    clearTimeout(_to);
     var data = await resp.json();
     _perfChartData = data.history || [];
     drawPerfLineChart();
   } catch(e) {
-    console.error('Failed to load performance history:', e);
+    if (e.name !== 'AbortError') console.error('Failed to load performance history:', e);
   }
 }
 
@@ -19514,11 +19520,10 @@ async function loadSettled() {
 
 // === COMBINED PERFORMANCE TAB ===
 async function loadPerformance() {
-  // Load performance history chart in parallel (non-blocking)
-  loadPerfHistory();
   try {
-    // Fetch all data in parallel
-    var [settledData, analyticsData, tradesData, insightsData, portfolioData] = await Promise.all([
+    // Fetch chart data + all KPI data in parallel
+    var [_ph, settledData, analyticsData, tradesData, insightsData, portfolioData] = await Promise.all([
+      loadPerfHistory(),
       fetch(API + '/settled').then(r => r.json()),
       fetch(API + '/analytics').then(r => r.json()),
       fetch(API + '/trades').then(r => r.json()),
@@ -21248,14 +21253,15 @@ Promise.all([
   loadStatus(), loadActivity(), loadBetsFeed(), loadAllBets(),
   loadPortfolio(), loadTopPicks(), loadTodayPicks(),
   loadPositions(), loadSettled(), loadMispriced(),
-  loadTrades(), loadMoonshark()
+  loadTrades(), loadMoonshark(), loadPerfHistory(),
+  loadPerformance(), loadClosingSoon()
 ]).catch(function(e){ console.warn('Init load partial fail:', e); });
-// Auto-refresh intervals
+// Auto-refresh intervals — all data stays fresh
 setInterval(loadSeventyFivers, 60000);
 setInterval(loadQuantPicks, 60000);
 setInterval(() => { loadTicker(); }, 60000);
 setInterval(() => { loadActivity(); loadBetsFeed(); checkForNotifications(); }, 10000);
-setInterval(() => { loadStatus(); loadPortfolio(); loadTopPicks(); loadTodayPicks(); loadPositions(); loadSettled(); loadTrades(); checkNotifications(); if (document.getElementById('tab-performance') && document.getElementById('tab-performance').classList.contains('active')) loadPerformance(); }, 10000);
+setInterval(() => { loadStatus(); loadPortfolio(); loadTopPicks(); loadTodayPicks(); loadPositions(); loadSettled(); loadTrades(); loadPerfHistory(); loadPerformance(); checkNotifications(); loadClosingSoon(); }, 10000);
 
 // --- Notification Bell ---
 var _notifItems = [];
@@ -21466,8 +21472,7 @@ async function loadClosingSoon() {
     console.log('closingSoon error', e);
   }
 }
-setTimeout(loadClosingSoon, 4000);
-setInterval(loadClosingSoon, 30000);
+// loadClosingSoon is now in the main 10s refresh loop
 
 // --- News Feed ---
 var _newsLoaded = false;
