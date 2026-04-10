@@ -8650,20 +8650,20 @@ def _background_loop():
             _pos_early = check_position_prices()
         except Exception:
             pass
-        # Mark-to-market from live bids; entry_price only for positions with
-        # no Kalshi quote. Do NOT trust Kalshi's portfolio_balance — it
-        # diverges from their own UI by ~$26 on 40+ position accounts.
+        # Mark-to-market from live bids (used for per-position P&L)
         _mv_early = 0.0
         for _p in _pos_early:
             _cp = _p.get("current_price")
             _ct = _p.get("count") or 0
             _mv_early += (_cp if _cp is not None else (_p.get("entry_price") or 0)) * _ct / 100.0
         _inv_early = sum(p.get("market_exposure_cents", 0) for p in _pos_early) / 100
-        _pf_value = round(_bal_early + _mv_early, 2)
+        # Use Kalshi's portfolio_balance as source of truth (matches their UI)
+        _pf_value = round(_kalshi_portfolio if _kalshi_portfolio > 0 else (_bal_early + _mv_early), 2)
+        _positions_value_early = round(_pf_value - _bal_early, 2) if _pf_value > _bal_early else round(_mv_early, 2)
         _PORTFOLIO_CACHE["data"] = {
             "balance_usd": round(_bal_early, 2),
-            "portfolio_value_usd": round(_pf_value, 2),
-            "positions_value_usd": round(_mv_early, 2),
+            "portfolio_value_usd": _pf_value,
+            "positions_value_usd": _positions_value_early,
             "kalshi_portfolio_balance_raw": round(_kalshi_portfolio, 2),
             "open_positions": _pos_early,
             "open_count": len(_pos_early),
@@ -9022,17 +9022,16 @@ def _background_loop():
                 except Exception:
                     pass
 
-                # Compute portfolio value from cash + mark-to-market. Kalshi's
-                # /portfolio/balance "portfolio_balance" field diverged from
-                # their own UI (observed +$26 overstatement on 2026-04-09),
-                # likely because it includes locked funds / resting orders or
-                # uses ask-side quotes. Computing it ourselves from bid-side
-                # marks matches Kalshi's UI exactly.
-                _pf_value2 = round(_bal2 + _mv2, 2)
+                # Use Kalshi's portfolio_balance as the source of truth for
+                # total portfolio value — it matches their UI exactly.
+                # Our own mark-to-market (_mv2) is still used for per-position
+                # P&L display, but the header number must match Kalshi.
+                _pf_value2 = round(_kalshi_portfolio2 if _kalshi_portfolio2 > 0 else (_bal2 + _mv2), 2)
+                _positions_value2 = round(_pf_value2 - _bal2, 2) if _pf_value2 > _bal2 else round(_mv2, 2)
                 _PORTFOLIO_CACHE["data"] = {
                     "balance_usd": round(_bal2, 2),
-                    "portfolio_value_usd": round(_pf_value2, 2),
-                    "positions_value_usd": round(_mv2, 2),
+                    "portfolio_value_usd": _pf_value2,
+                    "positions_value_usd": _positions_value2,
                     "kalshi_portfolio_balance_raw": round(_kalshi_portfolio2, 2),
                     "open_positions": _pos2,
                     "open_count": len(_pos2),
