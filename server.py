@@ -4439,7 +4439,19 @@ def closegame_snipe():
                 underdog = game.get("away_abbrev", "")
                 underdog_name = game.get("away_name", "")
             else:
-                continue  # Tied game — skip
+                # Tied game — use ESPN win probability to find the value play
+                try:
+                    home_prob = self._get_espn_win_prob(game["event_id"], sport, home_team=True)
+                    if home_prob is not None and home_prob < 0.45:
+                        underdog = game.get("home_abbrev", "")
+                        underdog_name = game.get("home_name", "")
+                    elif home_prob is not None and home_prob > 0.55:
+                        underdog = game.get("away_abbrev", "")
+                        underdog_name = game.get("away_name", "")
+                    else:
+                        continue  # True toss-up or no data — skip
+                except Exception:
+                    continue  # ESPN lookup failed — skip
 
             close_games.append({
                 "sport": sport,
@@ -16604,6 +16616,17 @@ a:hover { color: #7da5f5; }
   .toast { max-width: 100%; font-size: 12px; padding: 10px 14px; }
   /* Positions winning/losing columns stack on tablet */
   #pos-split { grid-template-columns: 1fr !important; }
+  /* Dashboard 3-col → 1-col on tablet */
+  #dash-live-grid { grid-template-columns: 1fr !important; }
+  /* Performance KPI row → 3-col on tablet */
+  #perf-kpis { grid-template-columns: repeat(3, 1fr) !important; }
+  /* Brain tab grids → 1-col on tablet */
+  #brain-header { grid-template-columns: repeat(2, 1fr) !important; }
+  #brain-grid-1, #brain-grid-2, #brain-grid-3 { grid-template-columns: 1fr !important; }
+  /* Picks grid → 1-col on tablet */
+  #gs-picks-grid { grid-template-columns: 1fr !important; }
+  /* Notification panel — keep on screen */
+  #notif-panel { max-width: calc(100vw - 16px) !important; right: 8px !important; }
 }
 
 /* ===== MOBILE (max 480px) ===== */
@@ -16673,6 +16696,17 @@ a:hover { color: #7da5f5; }
   /* Hide less critical info on mobile */
   .pos-count { font-size: 11px; }
   .empty { padding: 20px; font-size: 12px; }
+  /* Dashboard 3-col → 1-col on mobile */
+  #dash-live-grid { grid-template-columns: 1fr !important; }
+  /* Performance KPI row → 2-col on mobile */
+  #perf-kpis { grid-template-columns: repeat(2, 1fr) !important; }
+  /* Brain tab grids → 1-col on mobile */
+  #brain-header { grid-template-columns: repeat(2, 1fr) !important; }
+  #brain-grid-1, #brain-grid-2, #brain-grid-3 { grid-template-columns: 1fr !important; }
+  /* Picks grid → 1-col on mobile */
+  #gs-picks-grid { grid-template-columns: 1fr !important; }
+  /* Notification panel — keep on screen */
+  #notif-panel { max-width: calc(100vw - 16px) !important; right: 8px !important; left: auto !important; }
 }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 #scan-btn:hover:not(:disabled) { background: #00dc5a !important; color: #000 !important; }
@@ -16822,7 +16856,7 @@ a:hover { color: #7da5f5; }
 <!-- Positions Tab -->
 <div class="tab-content active" id="tab-positions">
   <!-- Live Feed + Bets Placed Today + Closing Soon -->
-  <div style="display:grid;grid-template-columns:1fr 1.2fr 1fr;gap:12px;margin-bottom:16px;min-width:0">
+  <div id="dash-live-grid" style="display:grid;grid-template-columns:1fr 1.2fr 1fr;gap:12px;margin-bottom:16px;min-width:0">
     <div class="section" style="min-width:0;overflow:hidden">
       <div class="section-title">Live Feed <span style="width:8px;height:8px;border-radius:50%;background:#00dc5a;display:inline-block;animation:pulse 2s infinite" id="activity-pulse-dash"></span></div>
       <div class="activity-bar" id="activity-feed-dash" style="max-height:300px;overflow-y:auto">
@@ -17121,7 +17155,7 @@ a:hover { color: #7da5f5; }
   </div>
 
   <!-- Insights + Per-strategy knobs -->
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
+  <div id="brain-grid-1" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
     <div class="section">
       <div class="section-title">&#127919; Latest Insights</div>
       <div id="brain-insights" style="display:flex;flex-direction:column;gap:6px;max-height:320px;overflow-y:auto">
@@ -17145,7 +17179,7 @@ a:hover { color: #7da5f5; }
   </div>
 
   <!-- Skip reasons + Loss post-mortem -->
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
+  <div id="brain-grid-2" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
     <div class="section">
       <div class="section-title">&#128065;&#65039; Skip Reasons (why trades didn't fire today)</div>
       <div id="brain-skips" style="display:flex;flex-direction:column;gap:6px;max-height:280px;overflow-y:auto">
@@ -17161,7 +17195,7 @@ a:hover { color: #7da5f5; }
   </div>
 
   <!-- Tune history + Smart exit peaks -->
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+  <div id="brain-grid-3" style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
     <div class="section">
       <div class="section-title">&#128200; Recent Tune History</div>
       <div id="brain-tunes" style="display:flex;flex-direction:column;gap:6px;max-height:300px;overflow-y:auto">
@@ -20777,6 +20811,7 @@ async function loadBrain(force) {
         h += '<th style="text-align:center;padding:8px 4px">P&amp;L</th>';
         h += '<th style="text-align:center;padding:8px 4px">CLV</th>';
         h += '<th style="text-align:center;padding:8px 4px">MTM Worst</th>';
+        h += '<th style="text-align:center;padding:8px 4px">Verdict</th>';
         h += '</tr>';
         keys.sort().forEach(function(k) {
           var p = per[k];
@@ -20794,6 +20829,13 @@ async function loadBrain(force) {
           h += '<td style="text-align:center;padding:8px 4px;color:' + pnlColor + '">' + pnl + '</td>';
           h += '<td style="text-align:center;padding:8px 4px;color:' + clvColor + '">' + clvVal + '</td>';
           h += '<td style="text-align:center;padding:8px 4px;color:#888">' + mtmVal + '</td>';
+          var samples = (p.wins || 0) + (p.losses || 0);
+          var verdictLabel, verdictColor, verdictBg;
+          if (samples < 10) { verdictLabel = 'N/A'; verdictColor = '#666'; verdictBg = '#1a1a1a'; }
+          else if (p.win_rate >= 0.55) { verdictLabel = '✓'; verdictColor = '#00dc5a'; verdictBg = 'rgba(0,220,90,0.12)'; }
+          else if (p.win_rate >= 0.45) { verdictLabel = '~'; verdictColor = '#f0c000'; verdictBg = 'rgba(240,192,0,0.12)'; }
+          else { verdictLabel = '✗'; verdictColor = '#ff5000'; verdictBg = 'rgba(255,80,0,0.12)'; }
+          h += '<td style="text-align:center;padding:8px 4px"><span style="display:inline-block;padding:2px 8px;border-radius:4px;font-weight:700;color:' + verdictColor + ';background:' + verdictBg + '">' + verdictLabel + '</span></td>';
           h += '</tr>';
         });
         h += '</table>';
