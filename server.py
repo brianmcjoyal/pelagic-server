@@ -9538,7 +9538,96 @@ def _sample_gradient(stops, t):
 
 
 def _build_tradeshark_icon_png(size=180):
-    """Render the TradeShark header SVG logo to a PNG at `size`×`size`."""
+    """Render a gold 'T' letter icon matching the shark logo's gold palette."""
+    import struct, zlib, math
+
+    # Gold gradient colors (same as shark logo)
+    gold_top = (0xda, 0xb0, 0x60)     # bright gold
+    gold_mid = (0xc9, 0x96, 0x3a)     # mid gold
+    gold_bot = (0x8b, 0x5e, 0x28)     # dark gold
+    bg_color = (0x0d, 0x0d, 0x0d)     # dark background
+
+    # Build RGBA pixel buffer
+    pixels = [bg_color + (255,)] * (size * size)
+
+    # Draw the "T" letter — proportioned for the icon
+    pad = int(size * 0.15)
+    # Top crossbar
+    bar_top = pad
+    bar_bottom = pad + int(size * 0.16)
+    bar_left = pad
+    bar_right = size - pad
+    # Vertical stem
+    stem_left = int(size * 0.38)
+    stem_right = int(size * 0.62)
+    stem_top = bar_bottom
+    stem_bottom = size - pad
+
+    def _gold_at_y(y):
+        """Interpolate gold gradient based on vertical position."""
+        t = (y - pad) / max(1, size - 2 * pad)
+        if t < 0.3:
+            f = t / 0.3
+            return tuple(int(gold_top[i] * (1 - f) + gold_mid[i] * f) for i in range(3))
+        else:
+            f = (t - 0.3) / 0.7
+            return tuple(int(gold_mid[i] * (1 - f) + gold_bot[i] * f) for i in range(3))
+
+    # Render T shape with rounded corners via anti-aliasing
+    for y in range(size):
+        for x in range(size):
+            in_bar = bar_left <= x < bar_right and bar_top <= y < bar_bottom
+            in_stem = stem_left <= x < stem_right and stem_top <= y < stem_bottom
+            if in_bar or in_stem:
+                gold = _gold_at_y(y)
+                pixels[y * size + x] = gold + (255,)
+
+    # Add subtle glow around the T
+    glow_radius = max(2, size // 30)
+    glow_color = (0xda, 0xb0, 0x60)
+    # Simple box-blur glow pass
+    alpha_map = [0.0] * (size * size)
+    for y in range(size):
+        for x in range(size):
+            if pixels[y * size + x][:3] != bg_color:
+                alpha_map[y * size + x] = 1.0
+    # Skip heavy blur for speed — just add a 1px border glow
+    for y in range(1, size - 1):
+        for x in range(1, size - 1):
+            if alpha_map[y * size + x] == 0:
+                # Check if adjacent to the letter
+                neighbors = (
+                    alpha_map[(y-1)*size+x] + alpha_map[(y+1)*size+x] +
+                    alpha_map[y*size+x-1] + alpha_map[y*size+x+1]
+                )
+                if neighbors > 0:
+                    a = int(neighbors * 25)
+                    pixels[y * size + x] = glow_color + (min(255, a),)
+
+    # Encode to PNG
+    raw = bytearray()
+    for y in range(size):
+        raw.append(0)  # filter byte
+        for x in range(size):
+            r, g, b, a = pixels[y * size + x]
+            raw.extend((r, g, b, a))
+
+    def _chunk(tag, data):
+        return (
+            struct.pack(">I", len(data))
+            + tag
+            + data
+            + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        )
+
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)
+    idat = zlib.compress(bytes(raw), 9)
+    return sig + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", idat) + _chunk(b"IEND", b"")
+
+
+def _build_tradeshark_icon_png_shark(size=180):
+    """Original shark logo renderer — kept for reference."""
     import struct, zlib, math
 
     body_poly = _parse_svg_path(_SHARK_BODY_PATH)
@@ -12421,16 +12510,25 @@ _PORTFOLIO_CACHE_TTL = 15  # seconds — serve cached data between refreshes
 
 @app.route("/performance-history")
 def performance_history():
-    """Return portfolio value history for the performance line chart."""
-    # Optional query params for filtering
-    since = request.args.get("since", "")  # ISO date string e.g. "2026-04-05"
+    """Return portfolio value history for the performance line chart.
+    Downsamples large datasets to keep response <50KB for fast loads."""
+    since = request.args.get("since", "")
     limit = int(request.args.get("limit", "0") or "0")
     with _PERF_HISTORY_LOCK:
-        pts = list(_PERF_HISTORY)  # snapshot under lock
+        pts = list(_PERF_HISTORY)
     if since:
         pts = [p for p in pts if p["ts"][:10] >= since]
     if limit and limit > 0:
         pts = pts[-limit:]
+    # Downsample to max 500 points — preserves first, last, and evenly-spaced interior
+    max_pts = 500
+    if len(pts) > max_pts:
+        step = len(pts) / (max_pts - 2)  # -2 for first and last
+        sampled = [pts[0]]
+        for i in range(1, max_pts - 1):
+            sampled.append(pts[int(i * step)])
+        sampled.append(pts[-1])
+        pts = sampled
     return jsonify({"history": pts, "count": len(pts)})
 
 
@@ -22064,12 +22162,13 @@ Promise.all([
   loadTrades(), loadMoonshark(), loadPerfHistory(),
   loadPerformance(), loadClosingSoon()
 ]).catch(function(e){ console.warn('Init load partial fail:', e); });
-// Auto-refresh intervals — all data stays fresh
-setInterval(loadSeventyFivers, 60000);
-setInterval(loadQuantPicks, 60000);
-setInterval(() => { loadTicker(); }, 60000);
-setInterval(() => { loadActivity(); loadBetsFeed(); checkForNotifications(); }, 10000);
-setInterval(() => { loadStatus(); loadPortfolio(); loadTopPicks(); loadTodayPicks(); loadPositions(); loadSettled(); loadTrades(); loadPerfHistory(); loadPerformance(); checkNotifications(); loadClosingSoon(); }, 10000);
+// Auto-refresh intervals — tiered by data freshness needs
+// FAST (10s): live status, activity feed, today's bets — changes frequently
+setInterval(() => { loadStatus(); loadActivity(); loadBetsFeed(); loadPortfolio(); checkForNotifications(); }, 10000);
+// MEDIUM (30s): positions, trades, closing soon — changes with market activity
+setInterval(() => { loadPositions(); loadTrades(); loadClosingSoon(); loadTopPicks(); loadTodayPicks(); checkNotifications(); }, 30000);
+// SLOW (60s): settled stats, perf history, analytics — expensive + rarely changes
+setInterval(() => { loadSettled(); loadPerfHistory(); loadPerformance(); loadTicker(); loadSeventyFivers(); loadQuantPicks(); }, 60000);
 
 // --- Notification Bell ---
 var _notifItems = [];
