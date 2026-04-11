@@ -17298,6 +17298,21 @@ a:hover { color: #7da5f5; }
     <span style="color:#666">Loading...</span>
   </div>
 
+  <!-- Closed Bets Log -->
+  <div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:14px;margin-bottom:12px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Closed Bets <span class="badge" id="closed-bets-count" style="margin-left:6px">0</span></div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button class="refresh-btn perf-range-btn" onclick="toggleClosedBetsFilter('all')" data-cb="all" id="cb-all" style="font-size:9px;padding:2px 8px;background:#00dc5a;color:#000">All</button>
+        <button class="refresh-btn perf-range-btn" onclick="toggleClosedBetsFilter('wins')" data-cb="wins" id="cb-wins" style="font-size:9px;padding:2px 8px">Wins</button>
+        <button class="refresh-btn perf-range-btn" onclick="toggleClosedBetsFilter('losses')" data-cb="losses" id="cb-losses" style="font-size:9px;padding:2px 8px">Losses</button>
+      </div>
+    </div>
+    <div id="closed-bets-list" style="max-height:400px;overflow-y:auto;display:flex;flex-direction:column;gap:4px">
+      <div style="color:#555;font-size:11px;padding:8px">Loading closed bets...</div>
+    </div>
+  </div>
+
   <!-- Row 2: Trade Feed -->
   <div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:14px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -19002,6 +19017,108 @@ function setPerfRange(range) {
   drawPerfLineChart();
 }
 
+function toggleClosedBetsFilter(f) {
+  window._closedBetsFilter = f;
+  ['all','wins','losses'].forEach(function(k) {
+    var btn = document.getElementById('cb-' + k);
+    if (btn) {
+      if (k === f) { btn.style.background = '#00dc5a'; btn.style.color = '#000'; }
+      else { btn.style.background = ''; btn.style.color = ''; }
+    }
+  });
+  renderClosedBets();
+}
+
+function renderClosedBets() {
+  var list = window._closedBetsData || [];
+  var filter = window._closedBetsFilter || 'all';
+  var el = document.getElementById('closed-bets-list');
+  var countEl = document.getElementById('closed-bets-count');
+  if (!el) return;
+
+  var filtered = list;
+  if (filter === 'wins') filtered = list.filter(function(s) { return s.won === true; });
+  else if (filter === 'losses') filtered = list.filter(function(s) { return s.won === false; });
+
+  if (countEl) countEl.textContent = filtered.length;
+
+  if (filtered.length === 0) {
+    el.innerHTML = '<div style="color:#555;font-size:11px;padding:8px">No ' + (filter === 'all' ? 'closed' : filter === 'wins' ? 'winning' : 'losing') + ' bets yet.</div>';
+    return;
+  }
+
+  var html = '';
+  filtered.forEach(function(s) {
+    var isWin = s.won === true;
+    var pnl = s.pnl_usd || 0;
+    var borderColor = isWin ? '#00dc5a' : '#ff5000';
+    var pnlColor = isWin ? '#00dc5a' : '#ff5000';
+    var bgColor = isWin ? 'rgba(0,220,90,0.06)' : 'rgba(255,80,0,0.06)';
+    var pnlStr = (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2);
+    var resultIcon = isWin ? '&#x2714;' : '&#x2718;';
+    var resultText = isWin ? 'WON' : 'LOST';
+
+    // Format time
+    var timeStr = '';
+    if (s.settle_time) {
+      try {
+        var d = new Date(s.settle_time);
+        var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        var hr = d.getHours(), ampm = hr >= 12 ? 'pm' : 'am';
+        hr = hr % 12 || 12;
+        var min = d.getMinutes();
+        timeStr = months[d.getMonth()] + ' ' + d.getDate() + ', ' + hr + ':' + (min < 10 ? '0' : '') + min + ampm;
+      } catch(e) {}
+    }
+    if (!timeStr && s.entry_time) {
+      try {
+        var d2 = new Date(s.entry_time);
+        var months2 = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        var hr2 = d2.getHours(), ampm2 = hr2 >= 12 ? 'pm' : 'am';
+        hr2 = hr2 % 12 || 12;
+        var min2 = d2.getMinutes();
+        timeStr = months2[d2.getMonth()] + ' ' + d2.getDate() + ', ' + hr2 + ':' + (min2 < 10 ? '0' : '') + min2 + ampm2;
+      } catch(e) {}
+    }
+    if (!timeStr && s.trade_date) {
+      var parts = s.trade_date.split('-');
+      var months3 = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      timeStr = months3[parseInt(parts[1])-1] + ' ' + parseInt(parts[2]);
+    }
+
+    // Strategy badge
+    var stratLabels = {live_sniper:'SNIPER', sniper:'SNIPER', moonshark:'MOON', closegame:'CLOSE', manual:'MANUAL'};
+    var stratColors = {live_sniper:'#ffb400', sniper:'#ffb400', moonshark:'#e040fb', closegame:'#00d4ff', manual:'#5abf5a'};
+    var strat = s.strategy || 'unknown';
+    var stratLabel = stratLabels[strat] || strat.toUpperCase();
+    var stratColor = stratColors[strat] || '#555';
+
+    var entryCents = s.entry_cents || 0;
+    var count = s.count || 0;
+    var side = (s.side || 'yes').toUpperCase();
+
+    html += '<div style="display:flex;align-items:center;gap:10px;border-left:3px solid ' + borderColor + ';background:' + bgColor + ';border-radius:6px;padding:8px 12px">';
+    // Result icon
+    html += '<div style="color:' + pnlColor + ';font-size:14px;font-weight:800;min-width:18px;text-align:center">' + resultIcon + '</div>';
+    // Main info
+    html += '<div style="flex:1;min-width:0">';
+    html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">';
+    html += '<span style="font-size:8px;padding:1px 5px;background:' + stratColor + '22;border:1px solid ' + stratColor + '44;border-radius:3px;color:' + stratColor + ';font-weight:700">' + stratLabel + '</span>';
+    html += '<span style="color:#ddd;font-size:11px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (s.title || s.ticker || '') + '</span>';
+    html += '</div>';
+    html += '<div style="color:#666;font-size:9px">' + side + ' ' + entryCents + '&cent; x' + count + (timeStr ? ' &middot; ' + timeStr : '') + '</div>';
+    html += '</div>';
+    // P&L
+    html += '<div style="text-align:right;flex-shrink:0">';
+    html += '<div style="color:' + pnlColor + ';font-size:14px;font-weight:800">' + pnlStr + '</div>';
+    html += '<div style="color:' + pnlColor + ';font-size:8px;font-weight:700;letter-spacing:0.5px">' + resultText + '</div>';
+    html += '</div>';
+    html += '</div>';
+  });
+
+  el.innerHTML = html;
+}
+
 async function loadPerfHistory() {
   try {
     var _ac = new AbortController();
@@ -19885,6 +20002,13 @@ async function loadPerformance() {
     khtml += kpi('Streak', streakLabel, streakColor, 'Sharpe: ' + sharpe);
 
     kpiEl.innerHTML = khtml;
+
+    // === CLOSED BETS LOG ===
+    window._closedBetsData = settled.slice().sort(function(a, b) {
+      return (b.settle_time || b.trade_date || '').localeCompare(a.settle_time || a.trade_date || '');
+    });
+    window._closedBetsFilter = window._closedBetsFilter || 'all';
+    renderClosedBets();
 
     // === TRADE FEED ===
     var feedEl = document.getElementById('trade-feed');
