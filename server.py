@@ -402,19 +402,21 @@ def _load_state():
         if saved_hwm:
             _SETTLED_HWM.update(saved_hwm)
             print(f"[STATE] Restored HWM: {_SETTLED_HWM['wins']}W/{_SETTLED_HWM['losses']}L, P&L=${_SETTLED_HWM['total_pnl']:.2f}")
-        # Seed minimum known W/L from verified session data (April 11, 2026)
-        # This ensures we never show fewer than these known-good numbers
-        if _SETTLED_HWM["wins"] < 120:
-            _SETTLED_HWM["wins"] = 120
-        if _SETTLED_HWM["losses"] < 85:
-            _SETTLED_HWM["losses"] = 85
 
         print(f"[STATE] Restored {len(BOT_STATE['all_trades'])} trades from disk, "
               f"daily_spent reset to $0 for new session, same_day={is_same_day}")
     except FileNotFoundError:
-        pass
+        print(f"[STATE] No state file found at {_STATE_FILE} — starting fresh")
     except Exception as e:
         print(f"[STATE] Load error: {e}")
+
+    # Seed minimum known W/L from verified session data (April 11, 2026)
+    # Runs OUTSIDE try/except so it applies even on first boot with no state file
+    if _SETTLED_HWM["wins"] < 120:
+        _SETTLED_HWM["wins"] = 120
+    if _SETTLED_HWM["losses"] < 85:
+        _SETTLED_HWM["losses"] = 85
+    print(f"[STATE] HWM after seed: {_SETTLED_HWM['wins']}W/{_SETTLED_HWM['losses']}L")
 
 def _hydrate_from_kalshi():
     """Pull actual trade fills from Kalshi API to rebuild state after deploy."""
