@@ -3524,15 +3524,17 @@ def live_game_snipe():
                     _snipe_espn_prob = _get_espn_win_prob(_snipe_event_id, _snipe_league, home_team=_snipe_is_home)
 
                 if _snipe_espn_prob is not None:
-                    _espn_edge = _snipe_espn_prob - implied_prob_snipe
+                    # For NO bets, our win prob is 1 - team's win prob
+                    _snipe_our_prob = (1 - _snipe_espn_prob) if side == "no" else _snipe_espn_prob
+                    _espn_edge = _snipe_our_prob - implied_prob_snipe
                     _log_activity(
-                        f"SNIPE ESPN CHECK: {ticker} — ESPN={_snipe_espn_prob:.1%} vs Kalshi={implied_prob_snipe:.0%} edge={_espn_edge:+.1%}",
+                        f"SNIPE ESPN CHECK: {ticker} — ESPN={_snipe_our_prob:.1%} (side={side}) vs Kalshi={implied_prob_snipe:.0%} edge={_espn_edge:+.1%}",
                         "info"
                     )
                     # SKIP if ESPN says favorite is overpriced by >5%
                     if _espn_edge < -0.05:
                         _log_activity(
-                            f"SNIPE SKIP: {ticker} — ESPN win prob {_snipe_espn_prob:.1%} < Kalshi {implied_prob_snipe:.0%} by {abs(_espn_edge):.1%}, overpriced",
+                            f"SNIPE SKIP: {ticker} — ESPN prob {_snipe_our_prob:.1%} (side={side}) < Kalshi {implied_prob_snipe:.0%} by {abs(_espn_edge):.1%}, overpriced",
                             "info"
                         )
                         _ms_reasons["espn_overpriced"] = _ms_reasons.get("espn_overpriced", 0) + 1
@@ -3564,12 +3566,12 @@ def live_game_snipe():
                         f"SNIPE ODDS API: {ticker} — consensus={_snipe_consensus:.1%} vs Kalshi={implied_prob_snipe:.0%} edge={_snipe_cons_edge:+.1%}",
                         "info"
                     )
-                    if _snipe_cons_edge >= 0.03 and _snipe_espn_prob and (_snipe_espn_prob - implied_prob_snipe) > 0.02:
+                    if _snipe_cons_edge >= 0.03 and _snipe_our_prob and (_snipe_our_prob - implied_prob_snipe) > 0.02:
                         conviction += 1  # both sources agree
-                    elif _snipe_cons_edge < -0.03 and _snipe_espn_prob and (_snipe_espn_prob - implied_prob_snipe) > 0.03:
+                    elif _snipe_cons_edge < -0.03 and _snipe_our_prob and (_snipe_our_prob - implied_prob_snipe) > 0.03:
                         conviction -= 2  # sportsbook consensus disagrees with ESPN
                         _log_activity(
-                            f"SNIPE: Sportsbook consensus disagrees with ESPN — consensus={_snipe_consensus:.1%} vs ESPN={_snipe_espn_prob:.1%}",
+                            f"SNIPE: Sportsbook consensus disagrees with ESPN — consensus={_snipe_consensus:.1%} vs ESPN={_snipe_our_prob:.1%}",
                             "warn"
                         )
 
@@ -3600,7 +3602,7 @@ def live_game_snipe():
 
                 # EV post-fees filter — edge must exceed Kalshi fee drag
                 _snipe_fee = PLATFORM_FEES.get("kalshi", 0.07)
-                _snipe_win_est = _snipe_espn_prob if _snipe_espn_prob is not None else (price / 100.0)
+                _snipe_win_est = _snipe_our_prob if (_snipe_espn_prob is not None) else (price / 100.0)
                 _snipe_ev_per = (_snipe_win_est * (100 - price) - (1 - _snipe_win_est) * price) / 100.0
                 _snipe_ev_after_fees = _snipe_ev_per - (_snipe_fee * price / 100.0)
                 if _snipe_ev_after_fees < 0.01:  # Less than 1c EV per contract after fees
@@ -3613,8 +3615,8 @@ def live_game_snipe():
                 reasons.append(f"cat={mcat}")
                 reasons.append(f"vol={_ask_size:.0f}")
                 if _snipe_espn_prob is not None:
-                    _espn_edge_display = _snipe_espn_prob - implied_prob_snipe
-                    reasons.append(f"ESPN={_snipe_espn_prob:.0%} edge={_espn_edge_display:+.0%}")
+                    _espn_edge_display = _snipe_our_prob - implied_prob_snipe
+                    reasons.append(f"ESPN={_snipe_our_prob:.0%}({side}) edge={_espn_edge_display:+.0%}")
                 else:
                     reasons.append("ESPN=N/A")
                 if closing_boost > 1:
@@ -3656,7 +3658,7 @@ def live_game_snipe():
                 if _snipe_ob_pre and _snipe_ob_pre.get("imbalance") is not None:
                     _snipe_ob_imb = _snipe_ob_pre["imbalance"]
                     _snipe_buying_yes = (side == "yes")
-                    _snipe_espn_edge_val = (_snipe_espn_prob - implied_prob_snipe) if _snipe_espn_prob is not None else None
+                    _snipe_espn_edge_val = (_snipe_our_prob - implied_prob_snipe) if _snipe_espn_prob is not None else None
                     if _snipe_buying_yes and _snipe_ob_imb < -0.3:
                         conviction -= 2
                         if _snipe_ob_imb < -0.5 and (_snipe_espn_edge_val is None or _snipe_espn_edge_val < 0.05):
@@ -3756,8 +3758,10 @@ def live_game_snipe():
                         existing_tickers.add(ticker)
                         existing_events.add(event_key)
                     else:
+                        _release_game_exposure(event_key, cost_usd)
                         _log_activity(f"🎯 Snipe missed: {ticker} — 0 filled at {price}c", "error")
                 else:
+                    _release_game_exposure(event_key, cost_usd)
                     err = result.get("error", "")[:60]
                     body = result.get("response_body", "")[:100]
                     print(f"[SNIPER] Order rejected: {ticker} side={side} price={price}c err={err} body={body}")
@@ -4516,8 +4520,10 @@ def moonshark_snipe():
                         existing_tickers.add(ticker)
                         existing_events.add(event_key)
                     else:
+                        _release_game_exposure(event_key, cost_usd)
                         _log_activity(f"MOONSHARK missed: {ticker} — 0 filled at {price}c", "error")
                 else:
+                    _release_game_exposure(event_key, cost_usd)
                     err = result.get("error", "")[:60]
                     body = result.get("response_body", "")[:100]
                     print(f"[MOONSHARK] Order rejected: {ticker} side={side} price={price}c count={count} err={err} body={body}")
@@ -4669,7 +4675,7 @@ def closegame_snipe():
             else:
                 # Tied game — use ESPN win probability to find the value play
                 try:
-                    home_prob = self._get_espn_win_prob(game["event_id"], sport, home_team=True)
+                    home_prob = _get_espn_win_prob(game["event_id"], sport, home_team=True)
                     if home_prob is not None and home_prob < 0.45:
                         underdog = game.get("home_abbrev", "")
                         underdog_name = game.get("home_name", "")
@@ -5055,8 +5061,10 @@ def closegame_snipe():
                         existing_tickers.add(ticker)
                         existing_events.add(event_key)
                     else:
+                        _release_game_exposure(event_key, cost_usd)
                         _log_activity(f"CLOSEGAME missed: {ticker} — 0 filled at {price}c", "error")
                 else:
+                    _release_game_exposure(event_key, cost_usd)
                     err = result.get("error", "")[:60]
                     _log_activity(f"CLOSEGAME failed: {ticker} — {err}", "error")
 
@@ -5348,6 +5356,7 @@ def floor_quota_snipe():
             _err_str = (result.get("error", "") or "")[:80]
             _body_str = (result.get("response_body", "") or "")[:120]
             _combined = (_err_str + " | " + _body_str).strip(" |")[:200]
+            _release_game_exposure(event_key, cost_usd)
             _log_activity(f"FLOOR failed: {ticker} — {_combined}", "error")
             continue
 
@@ -5366,6 +5375,7 @@ def floor_quota_snipe():
                 BOT_STATE["fill_successes_by_strategy"]["floor"] = BOT_STATE.get("fill_successes_by_strategy", {}).get("floor", 0) + 1
 
         if filled <= 0:
+            _release_game_exposure(event_key, cost_usd)
             _log_activity(f"FLOOR missed: {ticker} — 0 filled", "info")
             continue
 
@@ -5432,9 +5442,9 @@ SWING_BET_USD = 6.0          # slightly larger than floor — this is higher con
 SWING_MIN_EDGE = 0.06        # 6% — must be a real overreaction, not noise
 SWING_MIN_PRICE = 18
 SWING_MAX_PRICE = 62         # only buy the trailing side at a discount
-BOT_STATE["swing_trades_today"] = []
-BOT_STATE["swing_daily_spent"] = 0.0
-BOT_STATE["swing_date"] = None
+BOT_STATE.setdefault("swing_trades_today", [])
+BOT_STATE.setdefault("swing_daily_spent", 0.0)
+BOT_STATE.setdefault("swing_date", None)
 
 
 def momentum_swing_snipe():
@@ -5664,6 +5674,7 @@ def momentum_swing_snipe():
 
             result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob)
             if "error" in result:
+                _release_game_exposure(event_key, cost_usd)
                 _log_activity(f"SWING failed: {ticker} — {result.get('error', '')[:60]}", "error")
                 continue
 
@@ -5684,6 +5695,7 @@ def momentum_swing_snipe():
                         BOT_STATE.get("fill_successes_by_strategy", {}).get("swing", 0) + 1
 
             if filled <= 0:
+                _release_game_exposure(event_key, cost_usd)
                 _log_activity(f"SWING missed: {ticker} — 0 filled at {price}c", "info")
                 continue
 
@@ -5751,9 +5763,9 @@ GOALIE_BET_USD = 4.0
 GOALIE_MIN_EDGE = 0.05  # 5% — this is a fast-moving microstructure bet
 GOALIE_MIN_PRICE = 8
 GOALIE_MAX_PRICE = 92
-BOT_STATE["goalie_trades_today"] = []
-BOT_STATE["goalie_daily_spent"] = 0.0
-BOT_STATE["goalie_date"] = None
+BOT_STATE.setdefault("goalie_trades_today", [])
+BOT_STATE.setdefault("goalie_daily_spent", 0.0)
+BOT_STATE.setdefault("goalie_date", None)
 
 
 def goalie_pulled_snipe():
@@ -5893,12 +5905,17 @@ def goalie_pulled_snipe():
 
         best = None  # best edge across both sides
         best_mkt = None
+        # Build uppercase dedup sets for case-insensitive matching
+        _existing_upper = {t.upper() for t in existing_tickers}
+        _events_upper = {e.upper() for e in existing_events}
+        _bet_today_upper = {e.upper() for e in _EVENTS_BET_TODAY}
         for mkt in markets:
-            ticker = (mkt.get("ticker", "") or "").upper()
+            _raw_ticker = mkt.get("ticker", "") or ""
+            ticker = _raw_ticker.upper()  # uppercase for matching
             if not (home_abbrev in ticker or away_abbrev in ticker):
                 continue
             event_key = "-".join(ticker.split("-")[:2]) if ticker else ""
-            if ticker in existing_tickers or event_key in existing_events or event_key in _EVENTS_BET_TODAY:
+            if ticker in _existing_upper or event_key in _events_upper or event_key in _bet_today_upper:
                 continue
             try:
                 ya = mkt.get("yes_ask_dollars") or mkt.get("yes_ask")
@@ -5915,7 +5932,7 @@ def goalie_pulled_snipe():
             if edge >= GOALIE_MIN_EDGE and (best is None or edge > best["edge"]):
                 best = {
                     "edge": edge, "price": yes_ask, "implied": implied,
-                    "our_prob": our_prob, "ticker": mkt.get("ticker", ""),
+                    "our_prob": our_prob, "ticker": _raw_ticker,
                     "title": mkt.get("title", ""), "event_key": event_key,
                     "is_home": is_home_ticker,
                 }
@@ -5964,6 +5981,7 @@ def goalie_pulled_snipe():
         )
         result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob)
         if "error" in result:
+            _release_game_exposure(event_key, cost_usd)
             _log_activity(f"GOALIE failed: {ticker} — {result.get('error', '')[:60]}", "error")
             continue
 
@@ -5984,6 +6002,7 @@ def goalie_pulled_snipe():
                     BOT_STATE.get("fill_successes_by_strategy", {}).get("goalie", 0) + 1
 
         if filled <= 0:
+            _release_game_exposure(event_key, cost_usd)
             _log_activity(f"GOALIE missed: {ticker} — 0 filled at {price}c", "info")
             continue
 
