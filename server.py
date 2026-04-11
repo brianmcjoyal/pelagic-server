@@ -3485,6 +3485,16 @@ def live_game_snipe():
                 if expected_profit < 1.00:  # skip if less than $1 potential profit
                     continue
 
+                # EV post-fees filter — edge must exceed Kalshi fee drag
+                _snipe_fee = PLATFORM_FEES.get("kalshi", 0.07)
+                _snipe_win_est = _snipe_espn_prob if _snipe_espn_prob is not None else (price / 100.0)
+                _snipe_ev_per = (_snipe_win_est * (100 - price) - (1 - _snipe_win_est) * price) / 100.0
+                _snipe_ev_after_fees = _snipe_ev_per - (_snipe_fee * price / 100.0)
+                if _snipe_ev_after_fees < 0.01:  # Less than 1c EV per contract after fees
+                    _log_activity(f"SNIPE SKIP: {ticker} — EV after fees {_snipe_ev_after_fees:.3f}c < 1c threshold", "info")
+                    _ms_reasons["low_ev_snipe"] = _ms_reasons.get("low_ev_snipe", 0) + 1
+                    continue
+
                 # Vetting log — show WHY this trade passed all filters
                 reasons = []
                 reasons.append(f"cat={mcat}")
@@ -7518,12 +7528,23 @@ def _auto_tune_thresholds():
     and vice versa. Every change is recorded in tune_history so a subsequent
     run can roll it back if it made things worse.
 
-    Rules (per strategy, rolling 7 days):
-      - wr > 55% OR CLV_avg >= +1c     → LOOSEN (-1 conviction, -0.01 edge)
-      - 40% <= wr <= 55%               → HOLD
-      - 25% <= wr < 40%                → TIGHTEN (+1 conviction, +0.01 edge)
-      - wr < 25%                       → TIGHTEN HARD (+2 conviction, +0.02 edge)
-      - sample < 10                    → LOOSEN (need volume)
+    Rules (per strategy, rolling 7 days) — strategy-specific thresholds:
+      live_sniper (high-WR strategy):
+        - wr > 70% OR CLV >= +1c  → LOOSEN
+        - 55% <= wr <= 70%        → HOLD
+        - 40% <= wr < 55%         → TIGHTEN
+        - wr < 40%                → TIGHTEN HARD
+      moonshark / closegame (asymmetric strategies):
+        - wr > 40% OR CLV >= +1c  → LOOSEN
+        - 25% <= wr <= 40%        → HOLD
+        - 15% <= wr < 25%         → TIGHTEN
+        - wr < 15%                → TIGHTEN HARD
+      all others:
+        - wr > 55% OR CLV >= +1c  → LOOSEN
+        - 40% <= wr <= 55%        → HOLD
+        - 25% <= wr < 40%         → TIGHTEN
+        - wr < 25%                → TIGHTEN HARD
+      - sample < 10               → LOOSEN (need volume)
     """
     try:
         adaptive = _LEARNING_STATE.setdefault("adaptive", {})
@@ -7559,21 +7580,29 @@ def _auto_tune_thresholds():
             elif wr is None:
                 continue
             else:
-                # CLV overrides win rate on small samples — positive CLV means
-                # we're getting good prices even if variance is masking it.
+                # Strategy-specific WR thresholds — high-WR strategies (sniper)
+                # need tighter standards; asymmetric strategies (moonshark,
+                # closegame) use lower thresholds since they win less often but
+                # pay more per win.
                 clv_loose = (clv is not None and clv >= 1.0)
-                if wr > 0.55 or clv_loose:
+                if strat == "live_sniper":
+                    _wr_loosen, _wr_hold, _wr_tighten = 0.70, 0.55, 0.40
+                elif strat in ("moonshark", "closegame"):
+                    _wr_loosen, _wr_hold, _wr_tighten = 0.40, 0.25, 0.15
+                else:
+                    _wr_loosen, _wr_hold, _wr_tighten = 0.55, 0.40, 0.25
+                if wr > _wr_loosen or clv_loose:
                     delta = -1
-                    reason = f"{strat} wr={wr:.0%} clv={clv}c → loosen"
-                elif wr >= 0.40:
+                    reason = f"{strat} wr={wr:.0%} clv={clv}c → loosen (>{_wr_loosen:.0%})"
+                elif wr >= _wr_hold:
                     delta = 0
                     reason = f"{strat} wr={wr:.0%} → hold"
-                elif wr >= 0.25:
+                elif wr >= _wr_tighten:
                     delta = 1
-                    reason = f"{strat} wr={wr:.0%} → tighten"
+                    reason = f"{strat} wr={wr:.0%} → tighten (<{_wr_hold:.0%})"
                 else:
                     delta = 2
-                    reason = f"{strat} wr={wr:.0%} → tighten hard"
+                    reason = f"{strat} wr={wr:.0%} → tighten hard (<{_wr_tighten:.0%})"
 
             if delta == 0:
                 continue
@@ -17263,65 +17292,68 @@ a:hover { color: #7da5f5; }
 /* ===== MOBILE (max 480px) ===== */
 @media (max-width: 480px) {
   body { font-size: 13px; }
-  .portfolio-value { font-size: 20px; letter-spacing: -0.5px; }
+  .portfolio-value { font-size: 22px; letter-spacing: -0.5px; }
   .portfolio-change { font-size: 12px; }
-  .portfolio-hero { padding: 16px 8px 4px; }
+  .portfolio-hero { padding: 16px 10px 6px; }
   .stats-row { grid-template-columns: 1fr 1fr; gap: 1px; border-radius: 8px; }
-  .stat-card { padding: 8px 4px; }
-  .stat-value { font-size: 13px; }
-  .stat-label { font-size: 7px; letter-spacing: 0.3px; }
-  .tab { padding: 8px 12px; font-size: 11px; }
-  .tabs { gap: 0; padding: 0 4px; }
+  .stat-card { padding: 10px 6px; }
+  .stat-value { font-size: 14px; }
+  .stat-label { font-size: 7.5px; letter-spacing: 0.3px; }
+  .tab { padding: 10px 14px; font-size: 11px; }
+  .tabs { gap: 0; padding: 0 4px; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
   .ticker-bar { font-size: 9px; gap: 12px; padding: 4px 8px; justify-content: flex-start; }
   .ticker-item { gap: 3px; }
-  .header { padding: 8px 10px; top: 22px; margin: 0 -8px 0; }
+  .header { padding: 10px 10px; top: 22px; margin: 0 -6px 0; }
   .header h1 { font-size: 16px; }
-  .logo { width: 26px; height: 26px; }
+  .header-left { padding-left: 6px; gap: 8px; }
+  .logo { width: 28px; height: 28px; }
   h1 { font-size: 16px; }
-  #scan-btn { padding: 4px 10px; font-size: 11px; }
+  #scan-btn { padding: 6px 12px; font-size: 11px; }
   #scan-btn svg { width: 12px; height: 12px; }
   .switch { width: 40px; height: 22px; }
   .slider:before { height: 16px; width: 16px; }
   input:checked + .slider:before { transform: translateX(18px); }
   .toggle-label { font-size: 10px; }
   .container { padding: 0 6px 20px; }
-  .chart-section { display: none; }
+  .chart-section { display: block; padding: 0 4px 8px; }
+  .chart-canvas { height: 100px; }
   .progress-section { padding: 6px 10px; margin: 0 0 6px; }
   .progress-section span { font-size: 9px !important; }
-  .section-title { font-size: 12px; flex-wrap: wrap; }
+  .section-title { font-size: 12px; flex-wrap: wrap; gap: 4px; }
   .badge { font-size: 10px; padding: 1px 8px; }
-  .refresh-btn { padding: 4px 10px; font-size: 10px; }
+  .refresh-btn { padding: 6px 12px; font-size: 10px; }
   /* Tables — card-like on mobile */
   table { font-size: 10px; }
   table th { padding: 6px 4px; font-size: 8px; }
   table td { padding: 8px 4px; font-size: 10px; }
   .pos-table-compact th { font-size: 8px; padding: 4px 3px; }
   .pos-table-compact td { font-size: 9px; padding: 6px 3px; }
-  .pos-scroll { max-height: 400px; }
+  .pos-scroll { max-height: 500px; -webkit-overflow-scrolling: touch; }
   /* Cards */
-  .pick-card { padding: 10px; border-radius: 8px; }
-  .pick-question { font-size: 12px; -webkit-line-clamp: 2; }
+  .pick-card { padding: 12px; border-radius: 10px; }
+  .pick-question { font-size: 13px; -webkit-line-clamp: 2; }
   .pick-edge { font-size: 10px; }
-  .pick-execute { padding: 6px 10px; font-size: 11px; }
-  .pick-footer { gap: 4px; }
+  .pick-execute { padding: 8px 12px; font-size: 12px; min-height: 44px; }
+  .pick-footer { gap: 6px; }
   .pick-meta { font-size: 9px; }
   .hero-grid { grid-template-columns: 1fr; gap: 8px; }
-  .hero-card { padding: 10px; border-radius: 8px; }
-  .hero-prob { font-size: 22px; }
-  .hero-question { font-size: 12px; }
-  .hero-execute { padding: 5px 10px; font-size: 11px; }
-  /* Activity */
-  .activity-line { gap: 6px; padding: 6px 0; }
-  .activity-line .time { font-size: 10px; min-width: 55px; }
-  .activity-line .msg { font-size: 11px; }
-  .activity-bar { max-height: 250px; }
+  .hero-card { padding: 12px; border-radius: 10px; }
+  .hero-prob { font-size: 24px; }
+  .hero-question { font-size: 13px; }
+  .hero-execute { padding: 8px 12px; font-size: 12px; min-height: 44px; }
+  /* Activity — critical for mobile usability */
+  .activity-line { gap: 4px; padding: 8px 0; flex-wrap: wrap; }
+  .activity-line .time { font-size: 10px; min-width: 50px; }
+  .activity-line .msg { font-size: 11px; line-height: 1.5; word-break: break-word; }
+  .activity-bar { max-height: 350px; -webkit-overflow-scrolling: touch; }
   /* Breakdown */
-  .portfolio-breakdown { gap: 8px; margin-top: 8px; }
-  .breakdown-val { font-size: 13px; }
+  .portfolio-breakdown { gap: 10px; margin-top: 8px; flex-wrap: wrap; justify-content: center; }
+  .breakdown-val { font-size: 14px; }
   .breakdown-label { font-size: 9px; }
   .breakdown-dot { display: none; }
-  /* Today trades dropdown */
-  #today-trades-dropdown { min-width: 280px !important; left: -100px !important; right: auto !important; }
+  /* Today trades dropdown — full-width on mobile */
+  #today-trades-dropdown { min-width: calc(100vw - 32px) !important; left: 50% !important; right: auto !important; transform: translateX(-50%); max-height: 70vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
   /* Quant/75ers cards on mobile */
   .sf-card { padding: 10px !important; }
   /* Hide less critical info on mobile */
@@ -17336,8 +17368,18 @@ a:hover { color: #7da5f5; }
   #brain-grid-1, #brain-grid-2, #brain-grid-3 { grid-template-columns: 1fr !important; }
   /* Picks grid → 1-col on mobile */
   #gs-picks-grid { grid-template-columns: 1fr !important; }
-  /* Notification panel — keep on screen */
-  #notif-panel { max-width: calc(100vw - 16px) !important; right: 8px !important; left: auto !important; }
+  /* Notification panel — full-width on mobile */
+  #notif-panel { max-width: calc(100vw - 16px) !important; right: 8px !important; left: 8px !important; }
+  /* Bet tooltip — bottom sheet on mobile */
+  #bet-tooltip { position: fixed !important; bottom: 0 !important; left: 0 !important; right: 0 !important; top: auto !important; max-width: 100% !important; width: 100% !important; border-radius: 16px 16px 0 0 !important; padding: 16px 20px 24px !important; max-height: 60vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  /* Closed bets section — taller on mobile */
+  #closed-bets-list { max-height: 500px !important; -webkit-overflow-scrolling: touch; }
+  /* Perf chart time range buttons */
+  .perf-range-btns { flex-wrap: wrap; }
+  .perf-range-btns button { padding: 6px 10px !important; font-size: 10px !important; min-height: 36px; }
+  /* Strategy knobs accordion */
+  .strat-accordion { font-size: 11px !important; }
+  .strat-accordion summary { padding: 10px !important; }
 }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 #scan-btn:hover:not(:disabled) { background: #00dc5a !important; color: #000 !important; }
@@ -18621,6 +18663,17 @@ async function loadBetsFeed() {
       var convColor = convScore >= 8 ? '#00dc5a' : convScore >= 5 ? '#ffb400' : '#ff5000';
       var convTooltip = convBreakdown.join('&#10;');  // newline in title attr
 
+      // Compute Kelly criterion metrics for tooltip
+      var _ttPrice = t.price_cents || 50;
+      var _ttWinProb = t.espn_implied || t.win_prob || (_ttPrice / 100);
+      var _ttOdds = (100 - _ttPrice) / Math.max(1, _ttPrice); // decimal odds
+      var _ttKellyFrac = (_ttOdds * _ttWinProb - (1 - _ttWinProb)) / Math.max(0.01, _ttOdds);
+      _ttKellyFrac = Math.max(0, _ttKellyFrac);
+      // EV per contract after 7% Kalshi fee
+      var _ttEVraw = (_ttWinProb * (100 - _ttPrice) - (1 - _ttWinProb) * _ttPrice) / 100;
+      var _ttFee = 0.07 * _ttPrice / 100;
+      var _ttEV = _ttEVraw - _ttFee;
+
       // Build tooltip data for hover — store as JSON in a single data attribute
       var _ttObj = {
         title: t.title || t.ticker || '',
@@ -18632,7 +18685,10 @@ async function loadBetsFeed() {
         edge: (t.edge_reasons && t.edge_reasons.length > 0) ? t.edge_reasons.join(' | ') : (t.espn_edge ? 'ESPN edge: +' + (t.espn_edge * 100).toFixed(1) + '%' : ''),
         score: (scoreMap[t.ticker] && scoreMap[t.ticker].display) ? scoreMap[t.ticker].display : '',
         time: fmtTime(t.time),
-        side: t.side || 'yes'
+        side: t.side || 'yes',
+        kelly: (_ttKellyFrac * 100).toFixed(1),
+        ev: (_ttEV * 100).toFixed(1),
+        winProb: (_ttWinProb * 100).toFixed(0)
       };
       // Encode as HTML-safe base64 to avoid attribute escaping issues
       var _ttJson = btoa(unescape(encodeURIComponent(JSON.stringify(_ttObj))));
@@ -18734,22 +18790,36 @@ function _attachBetRowHandlers(container) {
       var detail = row.querySelector('[id^="edge-"]');
       if (detail) detail.style.display = detail.style.display === 'none' ? 'block' : 'none';
     });
-    // Hover tooltip
+    // Build tooltip HTML from row data
+    function _buildTooltipHTML(raw) {
+      var d = JSON.parse(decodeURIComponent(escape(atob(raw))));
+      var html = '<div class="tt-header">' + (d.title || '').replace(/</g, '&lt;') + '</div>';
+      if (d.score) html += '<div class="tt-row"><span class="tt-label">Live Score</span><span class="tt-val" style="color:#00d4ff">' + d.score + '</span></div>';
+      html += '<div class="tt-row"><span class="tt-label">Our Bet</span><span class="tt-val" style="color:' + (d.side === 'yes' ? '#00dc5a' : '#ff5000') + '">' + d.bet + '</span></div>';
+      html += '<div class="tt-row"><span class="tt-label">Stake</span><span class="tt-val">' + d.stake + '</span></div>';
+      html += '<div class="tt-row"><span class="tt-label">If We Win</span><span class="tt-val" style="color:#00dc5a">' + d.profit + '</span></div>';
+      html += '<div class="tt-row"><span class="tt-label">Strategy</span><span class="tt-val">' + d.strategy + '</span></div>';
+      html += '<div class="tt-row"><span class="tt-label">Conviction</span><span class="tt-val">' + d.conv + '/10</span></div>';
+      html += '<div class="tt-row"><span class="tt-label">Placed</span><span class="tt-val">' + d.time + '</span></div>';
+      // Kelly criterion section
+      if (d.kelly || d.ev || d.winProb) {
+        html += '<div class="tt-edge" style="margin-top:8px">';
+        html += '<div style="display:flex;justify-content:space-between;margin-bottom:4px"><span class="tt-label">Win Probability</span><span class="tt-val">' + (d.winProb || '?') + '%</span></div>';
+        var kellyColor = parseFloat(d.kelly) >= 3 ? '#00dc5a' : (parseFloat(d.kelly) >= 1 ? '#ffb400' : '#ff5000');
+        html += '<div style="display:flex;justify-content:space-between;margin-bottom:4px"><span class="tt-label">Kelly Criterion</span><span class="tt-val" style="color:' + kellyColor + '">' + (d.kelly || '0') + '% of bankroll</span></div>';
+        var evColor = parseFloat(d.ev) > 0 ? '#00dc5a' : '#ff5000';
+        html += '<div style="display:flex;justify-content:space-between"><span class="tt-label">EV (post-fee)</span><span class="tt-val" style="color:' + evColor + '">' + (parseFloat(d.ev) > 0 ? '+' : '') + (d.ev || '0') + 'c/contract</span></div>';
+        html += '</div>';
+      }
+      if (d.edge) html += '<div class="tt-edge"><strong style="color:#ffb400">Edge:</strong> ' + d.edge.replace(/</g, '&lt;') + '</div>';
+      return html;
+    }
+    // Hover tooltip (desktop)
     row.addEventListener('mouseenter', function(e) {
       try {
         var raw = row.getAttribute('data-tt');
         if (!raw) return;
-        var d = JSON.parse(decodeURIComponent(escape(atob(raw))));
-        var html = '<div class="tt-header">' + (d.title || '').replace(/</g, '&lt;') + '</div>';
-        if (d.score) html += '<div class="tt-row"><span class="tt-label">Live Score</span><span class="tt-val" style="color:#00d4ff">' + d.score + '</span></div>';
-        html += '<div class="tt-row"><span class="tt-label">Our Bet</span><span class="tt-val" style="color:' + (d.side === 'yes' ? '#00dc5a' : '#ff5000') + '">' + d.bet + '</span></div>';
-        html += '<div class="tt-row"><span class="tt-label">Stake</span><span class="tt-val">' + d.stake + '</span></div>';
-        html += '<div class="tt-row"><span class="tt-label">If We Win</span><span class="tt-val" style="color:#00dc5a">' + d.profit + '</span></div>';
-        html += '<div class="tt-row"><span class="tt-label">Strategy</span><span class="tt-val">' + d.strategy + '</span></div>';
-        html += '<div class="tt-row"><span class="tt-label">Conviction</span><span class="tt-val">' + d.conv + '/10</span></div>';
-        html += '<div class="tt-row"><span class="tt-label">Placed</span><span class="tt-val">' + d.time + '</span></div>';
-        if (d.edge) html += '<div class="tt-edge"><strong style="color:#ffb400">Edge:</strong> ' + d.edge.replace(/</g, '&lt;') + '</div>';
-        tooltip.innerHTML = html;
+        tooltip.innerHTML = _buildTooltipHTML(raw);
         tooltip.classList.add('visible');
         _positionTooltip(tooltip, e);
       } catch(err) { console.warn('Tooltip error:', err); }
@@ -18760,9 +18830,32 @@ function _attachBetRowHandlers(container) {
     row.addEventListener('mouseleave', function() {
       tooltip.classList.remove('visible');
     });
+    // Touch tooltip (mobile) — tap to show, tap elsewhere to dismiss
+    row.addEventListener('touchstart', function(e) {
+      try {
+        var raw = row.getAttribute('data-tt');
+        if (!raw) return;
+        // If already visible on this row, hide it
+        if (tooltip.classList.contains('visible') && tooltip._activeRow === row) {
+          tooltip.classList.remove('visible');
+          tooltip._activeRow = null;
+          return;
+        }
+        tooltip.innerHTML = _buildTooltipHTML(raw);
+        tooltip.classList.add('visible');
+        tooltip._activeRow = row;
+        _positionTooltip(tooltip, e);
+      } catch(err) {}
+    }, {passive: true});
   });
 }
 function _positionTooltip(tip, e) {
+  // On mobile (< 480px), tooltip is a fixed bottom sheet via CSS — no positioning needed
+  if (window.innerWidth <= 480) {
+    tip.style.left = '';
+    tip.style.top = '';
+    return;
+  }
   var x = e.clientX + 16, y = e.clientY - 10;
   if (x + 350 > window.innerWidth) x = e.clientX - 360;
   if (y + tip.offsetHeight > window.innerHeight) y = window.innerHeight - tip.offsetHeight - 10;
@@ -19690,6 +19783,15 @@ function _initPerfTooltip() {
 }
 // Init tooltip bindings after DOM is ready and on first chart draw
 document.addEventListener('DOMContentLoaded', _initPerfTooltip);
+// Dismiss bet tooltip on tap outside (mobile)
+document.addEventListener('touchstart', function(e) {
+  var tip = document.getElementById('bet-tooltip');
+  if (!tip || !tip.classList.contains('visible')) return;
+  if (!e.target.closest('.bet-row') && !e.target.closest('#bet-tooltip')) {
+    tip.classList.remove('visible');
+    tip._activeRow = null;
+  }
+}, {passive: true});
 
 function drawPLChart(trades) {
   const canvas = document.getElementById('pl-chart');
