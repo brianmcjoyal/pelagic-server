@@ -68,7 +68,7 @@ BOT_CONFIG = {
     "enabled": True,  # default ON — safety floor will auto-disable if needed
     "max_bet_usd": 25.0,          # max $25 per single trade — let Kelly size up on high-edge bets
     "max_daily_usd": 125.0,        # max $125/day — 25% of $500 bankroll across all strategies
-    "min_balance_usd": 250.0,     # SAFETY FLOOR: stop all trading if cash below $250
+    "min_balance_usd": 50.0,      # SAFETY FLOOR: stop all trading if cash below $50
     "min_cash_reserve_pct": 0.05, # keep 5% of portfolio in cash — legacy positions skew ratio
     "max_open_positions": 150,    # no hard cap — quality is controlled by conviction + edge gates, not position count
     "min_deviation": 0.08,        # 8% mispricing — catch more edges
@@ -2239,8 +2239,10 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
     if not headers:
         return {"error": "No API key"}
 
-    # Adaptive fill pricing: +1c for liquid markets, +2c for thin markets
-    bump = 1  # default: +1c
+    # Adaptive fill pricing: +2c for liquid markets, +3c for thin markets
+    # IOC orders need to cross the spread to fill — being aggressive avoids
+    # the 0% fill rate problem caused by stale ask prices in market data.
+    bump = 2  # default: +2c
     if aggressive and orderbook_hint and isinstance(orderbook_hint, dict):
         spread = orderbook_hint.get("spread", 0)
         liquidity = orderbook_hint.get("liquidity_score", 50)
@@ -2249,8 +2251,11 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
         total_depth = bid_depth + ask_depth
         # Thin market: wide spread (>5c) or low total depth (<20 contracts)
         if spread > 5 or total_depth < 20 or liquidity < 25:
-            bump = 2  # thin market — bump by 2c for better fill probability
-            print(f"[ORDER] Adaptive pricing: +2c bump (spread={spread}, depth={total_depth}, liq={liquidity})")
+            bump = 3  # thin market — bump by 3c for better fill probability
+            print(f"[ORDER] Adaptive pricing: +3c bump (spread={spread}, depth={total_depth}, liq={liquidity})")
+        elif spread <= 2 and total_depth > 50:
+            bump = 1  # tight spread + deep book — 1c is enough
+            print(f"[ORDER] Tight market: +1c bump (spread={spread}, depth={total_depth})")
 
     # Bump price above ask to ensure fills
     fill_price = price_cents
@@ -19560,8 +19565,12 @@ function filterPerfData() {
   else if (_perfChartRange === '7d') cutoff = new Date(now - 7 * 86400000);
   // 'all' = no cutoff
   if (!cutoff) return _perfChartData;
-  var cutStr = cutoff.toISOString();
-  return _perfChartData.filter(function(p) { return p.ts >= cutStr; });
+  // Parse timestamps properly — string comparison breaks with timezone offsets
+  var cutMs = cutoff.getTime();
+  return _perfChartData.filter(function(p) {
+    var d = new Date(p.ts);
+    return !isNaN(d.getTime()) && d.getTime() >= cutMs;
+  });
 }
 
 function drawPerfLineChart() {
