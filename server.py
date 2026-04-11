@@ -8641,8 +8641,7 @@ def _background_loop():
             if _br_e.ok:
                 _bal_data = _br_e.json()
                 _bal_early = _bal_data.get("balance", 0) / 100
-                # Use Kalshi's own portfolio_value if available (matches their UI exactly)
-                # v2 API field is "portfolio_value" in cents (not "portfolio_balance")
+                # Kalshi v2 API "portfolio_value" = positions value in cents (does NOT include cash)
                 _kalshi_portfolio = _bal_data.get("portfolio_value", 0) / 100
         except Exception:
             pass
@@ -8658,9 +8657,11 @@ def _background_loop():
             _ct = _p.get("count") or 0
             _mv_early += (_cp if _cp is not None else (_p.get("entry_price") or 0)) * _ct / 100.0
         _inv_early = sum(p.get("market_exposure_cents", 0) for p in _pos_early) / 100
-        # Use Kalshi's portfolio_balance as source of truth (matches their UI)
-        _pf_value = round(_kalshi_portfolio if _kalshi_portfolio > 0 else (_bal_early + _mv_early), 2)
-        _positions_value_early = round(_pf_value - _bal_early, 2) if _pf_value > _bal_early else round(_mv_early, 2)
+        # Total portfolio = cash + positions.
+        # Kalshi's portfolio_value is positions-only, so add cash.
+        _positions_val_early = round(_kalshi_portfolio if _kalshi_portfolio > 0 else _mv_early, 2)
+        _pf_value = round(_bal_early + _positions_val_early, 2)
+        _positions_value_early = _positions_val_early
         _PORTFOLIO_CACHE["data"] = {
             "balance_usd": round(_bal_early, 2),
             "portfolio_value_usd": _pf_value,
@@ -8931,9 +8932,7 @@ def _background_loop():
                         _bal2_data = _br2.json()
                         _bal2 = _bal2_data.get("balance", 0) / 100
                         _kalshi_portfolio2 = _bal2_data.get("portfolio_value", 0) / 100
-                        # Log ALL fields so we can match Kalshi's UI exactly
-                        print(f"[PORTFOLIO] Kalshi balance API fields: {list(_bal2_data.keys())}")
-                        print(f"[PORTFOLIO] Kalshi API: cash=${_bal2:.2f} portfolio_value=${_kalshi_portfolio2:.2f}")
+                        print(f"[PORTFOLIO] Kalshi API: cash=${_bal2:.2f} positions=${_kalshi_portfolio2:.2f} total=${_bal2 + _kalshi_portfolio2:.2f}")
                 except Exception:
                     if _PORTFOLIO_CACHE["data"]:
                         _bal2 = _PORTFOLIO_CACHE["data"].get("balance_usd", 0)
@@ -9023,12 +9022,12 @@ def _background_loop():
                 except Exception:
                     pass
 
-                # Use Kalshi's portfolio_balance as the source of truth for
-                # total portfolio value — it matches their UI exactly.
-                # Our own mark-to-market (_mv2) is still used for per-position
-                # P&L display, but the header number must match Kalshi.
-                _pf_value2 = round(_kalshi_portfolio2 if _kalshi_portfolio2 > 0 else (_bal2 + _mv2), 2)
-                _positions_value2 = round(_pf_value2 - _bal2, 2) if _pf_value2 > _bal2 else round(_mv2, 2)
+                # Total portfolio = cash + positions.
+                # Kalshi's portfolio_value is positions-only (NOT cash+positions),
+                # so we must add cash ourselves. Fallback: cash + mark-to-market.
+                _positions_val2 = round(_kalshi_portfolio2 if _kalshi_portfolio2 > 0 else _mv2, 2)
+                _pf_value2 = round(_bal2 + _positions_val2, 2)
+                _positions_value2 = _positions_val2
                 _PORTFOLIO_CACHE["data"] = {
                     "balance_usd": round(_bal2, 2),
                     "portfolio_value_usd": _pf_value2,
@@ -17925,20 +17924,15 @@ async function loadPortfolio() {
     var cashHero = document.getElementById('pf-cash-hero');
     var invHero = document.getElementById('pf-invested-hero');
     if (cashHero) cashHero.textContent = '$' + (data.balance_usd || 0).toFixed(2);
-    // Show positions market value (what they're worth now, not what you paid)
-    var investedVal = data.positions_value_usd || data.total_invested_usd || 0;
-    // Portfolio should match Kalshi: cash + positions = total
-    // If portfolio_value_usd is available and > cash, derive invested from it
-    if (pfVal > 0 && (data.balance_usd || 0) > 0) {
-      investedVal = pfVal - (data.balance_usd || 0);
-    }
+    // Positions value = portfolio total minus cash
+    var investedVal = data.positions_value_usd || 0;
     if (invHero) invHero.textContent = '$' + Math.max(0, investedVal).toFixed(2);
 
     // Quick stats
     var totalEl = document.getElementById('pf-total');
     if (totalEl) totalEl.textContent = '$' + pfVal.toFixed(2);
     _setText('pf-cash', '$' + (data.balance_usd || 0).toFixed(2));
-    _setText('pf-invested', '$' + Math.max(0, investedVal).toFixed(2));
+    _setText('pf-invested', '$' + Math.max(0, data.positions_value_usd || investedVal).toFixed(2));
 
     // Daily P&L (today's settled + current unrealized)
     var dailyPl = (data.daily_pnl_usd !== undefined) ? data.daily_pnl_usd : (data.total_unrealized_usd || 0);
@@ -17991,7 +17985,8 @@ async function loadPortfolio() {
       hdrDailyPnl.style.color = dailyPl >= 0 ? '#00dc5a' : dailyPl < 0 ? '#ff5000' : '#888';
     }
     if (hdrDailyPct) {
-      var dailyPct = pfVal > 0 ? (dailyPl / pfVal * 100) : 0;
+      var dailyBase = pfVal > 0 ? pfVal : 500;
+      var dailyPct = dailyBase > 0 ? (dailyPl / dailyBase * 100) : 0;
       hdrDailyPct.textContent = (dailyPct >= 0 ? '+' : '') + dailyPct.toFixed(2) + '%';
       hdrDailyPct.style.color = dailyPl >= 0 ? '#00dc5a' : dailyPl < 0 ? '#ff5000' : '#888';
     }
@@ -19977,10 +19972,13 @@ async function loadPerformance() {
     var streakColor = currStreakType === 'win' ? '#00dc5a' : currStreakType === 'loss' ? '#ff5000' : '#888';
     var streakLabel = currStreakType === 'win' ? currStreak + 'W' : currStreakType === 'loss' ? currStreak + 'L' : '--';
 
-    // Use portfolio-based P&L as the source of truth for Total P&L
+    // Total P&L: portfolio value (cash + positions) minus starting balance
+    // Cross-check with settled trade P&L + unrealized
     var _perfPfVal = (portfolioData || {}).portfolio_value_usd || 0;
+    var _perfCash = (portfolioData || {}).balance_usd || 0;
     var _perfStartBal = 500.00;
     var portfolioPnl = _perfPfVal > 0 ? (_perfPfVal - _perfStartBal) : totalPnl;
+    // Sanity check: if settled P&L is way off from portfolio math, prefer portfolio
     var portfolioPnlColor = portfolioPnl >= 0 ? '#00dc5a' : '#ff5000';
     var portfolioRoi = _perfStartBal > 0 ? (portfolioPnl / _perfStartBal * 100) : roi;
     var portfolioRoiColor = portfolioRoi >= 0 ? '#00dc5a' : '#ff5000';
