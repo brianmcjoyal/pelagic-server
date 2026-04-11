@@ -726,8 +726,23 @@ def _seed_perf_history_from_fills():
         if cv and cv > 0:
             current_value = cv
     if current_value is None:
-        # No portfolio data yet — can't calibrate backfill without real data
-        print("[PERF-SEED] Skipping backfill — portfolio cache not populated yet")
+        # Portfolio cache not populated yet — fetch balance directly from Kalshi
+        try:
+            _bal_h = signed_headers("GET", "/portfolio/balance")
+            if _bal_h:
+                _bal_r = _req.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
+                                  headers=_bal_h, timeout=TIMEOUT)
+                if _bal_r.ok:
+                    _bal_d = _bal_r.json()
+                    _cash = (_bal_d.get("balance") or _bal_d.get("available_balance") or 0) / 100.0
+                    _invested = (_bal_d.get("portfolio_value") or 0) / 100.0
+                    current_value = _cash + _invested if (_cash + _invested) > 0 else None
+                    if current_value:
+                        print(f"[PERF-SEED] Fetched live balance for backfill: ${current_value:.2f}")
+        except Exception as _e:
+            print(f"[PERF-SEED] Balance fetch failed: {_e}")
+    if current_value is None:
+        print("[PERF-SEED] Skipping backfill — no portfolio data available")
         return
 
     total_pnl = current_value - DAY1_VALUE
@@ -3515,6 +3530,7 @@ def live_game_snipe():
                 # ESPN LIVE WIN PROBABILITY VALIDATION
                 # Compare ESPN's model to Kalshi price before betting
                 _snipe_espn_prob = None
+                _snipe_our_prob = None  # will be set if ESPN data available
                 implied_prob_snipe = price / 100.0
                 if _snipe_game and _snipe_game.get("event_id"):
                     _snipe_league = _snipe_game.get("league", "").lower()
@@ -4045,6 +4061,7 @@ def moonshark_snipe():
                 # TRY REAL SPORTSBOOK ODDS FIRST (ESPN moneylines)
                 espn_edge = None
                 espn_implied = 0
+                _ms_our_prob = None  # set when ESPN data available
                 _bet_team_odds = None
                 _game_info = None  # will be populated by _check_blowout later
                 # Try to get live scores for odds check
