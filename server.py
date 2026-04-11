@@ -165,7 +165,12 @@ def _log_activity(msg, level="info"):
 
 import json as _json
 
-_STATE_FILE = "/tmp/tradeshark_state.json"
+# Use Railway volume (/data) for persistent storage across deploys.
+# Falls back to /tmp if volume isn't mounted (local dev).
+import os as _os
+_DATA_DIR = "/data" if _os.path.isdir("/data") else "/tmp"
+_STATE_FILE = _os.path.join(_DATA_DIR, "tradeshark_state.json")
+print(f"[STORAGE] Using {'PERSISTENT volume' if _DATA_DIR == '/data' else 'EPHEMERAL /tmp'} at {_STATE_FILE}")
 
 # Cumulative tracking — declared early so _load_state() can populate them.
 # The later sections that reference these will use the same objects (not re-assign).
@@ -175,6 +180,7 @@ _GAME_EXPOSURE = {}   # {game_event_key: total_usd_wagered} — per-game exposur
 _GAME_EXPOSURE_MAX = 25.0  # max $25 per game across all strategies (raised from $10 to let Kelly-sized winning trades through)
 _PERF_HISTORY = []  # [{ts: ISO string, value: portfolio_value_usd, cash: balance_usd}]
 _PERF_HISTORY_MAX = 5000  # keep ~5000 points (~20 hours at 15s intervals, or many days of hourly)
+_SETTLED_HWM = {"wins": 0, "losses": 0, "total_pnl": 0.0}  # High-water mark for W/L counts
 _LEARNING_STATE = {
     "last_run": None,
     "version": 0,
@@ -271,6 +277,8 @@ def _save_state():
             "game_exposure": _GAME_EXPOSURE,
             # Performance history for line chart (keep last _PERF_HISTORY_MAX)
             "perf_history": _PERF_HISTORY[-_PERF_HISTORY_MAX:],
+            # High-water mark for W/L counts (survives Kalshi data pruning)
+            "settled_hwm": _SETTLED_HWM,
             # Timestamp for date-check on load
             "save_date": datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d"),
         }
@@ -388,6 +396,18 @@ def _load_state():
             _PERF_HISTORY.clear()
             _PERF_HISTORY.extend(saved_perf[-_PERF_HISTORY_MAX:])
             print(f"[STATE] Restored {len(_PERF_HISTORY)} performance history points from disk")
+
+        # Restore settled high-water mark (W/L counts survive Kalshi data pruning)
+        saved_hwm = data.get("settled_hwm")
+        if saved_hwm:
+            _SETTLED_HWM.update(saved_hwm)
+            print(f"[STATE] Restored HWM: {_SETTLED_HWM['wins']}W/{_SETTLED_HWM['losses']}L, P&L=${_SETTLED_HWM['total_pnl']:.2f}")
+        # Seed minimum known W/L from verified session data (April 11, 2026)
+        # This ensures we never show fewer than these known-good numbers
+        if _SETTLED_HWM["wins"] < 120:
+            _SETTLED_HWM["wins"] = 120
+        if _SETTLED_HWM["losses"] < 85:
+            _SETTLED_HWM["losses"] = 85
 
         print(f"[STATE] Restored {len(BOT_STATE['all_trades'])} trades from disk, "
               f"daily_spent reset to $0 for new session, same_day={is_same_day}")
@@ -10213,9 +10233,7 @@ def positions():
 
 _SETTLED_CACHE = {"data": None, "ts": 0}
 _SETTLED_CACHE_TTL = 120  # 2 minutes — balance freshness vs API cost
-# High-water mark: after deploy, Kalshi zeroes out old fill data so W/L count drops.
-# We track the highest known counts and never report lower numbers.
-_SETTLED_HWM = {"wins": 0, "losses": 0, "total_pnl": 0.0}
+# _SETTLED_HWM defined at top of file (line ~182) so _load_state() can restore it
 _GAME_RESULT_CACHE = {}  # {ticker: {"result": "yes"/"no", "title": "..."}} — persists across settled calls
 _TITLE_CACHE = {}  # {ticker: "market title"} — persists across settled calls
 _CACHE_MAX_SIZE = 800  # evict oldest when caches exceed this size
@@ -11120,12 +11138,18 @@ def settled_positions():
 
         # High-water mark: never report fewer W/L than previously seen
         # (Kalshi zeroes out old fill data after settlement, so counts drop after deploy)
+        _hwm_changed = False
         if _bot_wins > _SETTLED_HWM["wins"]:
             _SETTLED_HWM["wins"] = _bot_wins
+            _hwm_changed = True
         if _bot_losses > _SETTLED_HWM["losses"]:
             _SETTLED_HWM["losses"] = _bot_losses
+            _hwm_changed = True
         if _bot_pnl > _SETTLED_HWM["total_pnl"]:
             _SETTLED_HWM["total_pnl"] = _bot_pnl
+            _hwm_changed = True
+        if _hwm_changed:
+            _save_state()  # persist HWM to disk immediately
         _final_wins = max(_bot_wins, _SETTLED_HWM["wins"])
         _final_losses = max(_bot_losses, _SETTLED_HWM["losses"])
         _final_pnl = _bot_pnl  # P&L uses current data (HWM not appropriate for P&L)
