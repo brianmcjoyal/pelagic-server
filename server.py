@@ -9038,6 +9038,19 @@ def _background_loop():
                 _positions_val2 = round(_kalshi_portfolio2 if _kalshi_portfolio2 > 0 else _mv2, 2)
                 _pf_value2 = round(_bal2 + _positions_val2, 2)
                 _positions_value2 = _positions_val2
+
+                # Guard against API hiccups: if cash returned 0 but we had good data
+                # before, keep the old value instead of flashing a $400 swing
+                _prev_data = _PORTFOLIO_CACHE.get("data")
+                if _bal2 < 0.01 and _prev_data and _prev_data.get("balance_usd", 0) > 10:
+                    _bal2 = _prev_data["balance_usd"]
+                    _pf_value2 = round(_bal2 + _positions_val2, 2)
+                    print(f"[PORTFOLIO] API returned $0 cash — using cached ${_bal2:.2f}")
+                if _pf_value2 < 50 and _prev_data and _prev_data.get("portfolio_value_usd", 0) > 100:
+                    # Extreme drop (>80% in 10s) — almost certainly an API glitch
+                    print(f"[PORTFOLIO] Suspicious drop ${_prev_data.get('portfolio_value_usd',0):.2f} → ${_pf_value2:.2f} — keeping previous")
+                    continue  # skip this cache update entirely
+
                 _PORTFOLIO_CACHE["data"] = {
                     "balance_usd": round(_bal2, 2),
                     "portfolio_value_usd": _pf_value2,
@@ -9981,6 +9994,9 @@ def positions():
 
 _SETTLED_CACHE = {"data": None, "ts": 0}
 _SETTLED_CACHE_TTL = 120  # 2 minutes — balance freshness vs API cost
+# High-water mark: after deploy, Kalshi zeroes out old fill data so W/L count drops.
+# We track the highest known counts and never report lower numbers.
+_SETTLED_HWM = {"wins": 0, "losses": 0, "total_pnl": 0.0}
 _GAME_RESULT_CACHE = {}  # {ticker: {"result": "yes"/"no", "title": "..."}} — persists across settled calls
 _TITLE_CACHE = {}  # {ticker: "market title"} — persists across settled calls
 _CACHE_MAX_SIZE = 800  # evict oldest when caches exceed this size
@@ -10673,13 +10689,26 @@ def settled_positions():
         _bot_pnl = round(sum(s.get("pnl_usd", 0) for s in _bot_settled), 2)
         _bot_total = _bot_wins + _bot_losses
 
+        # High-water mark: never report fewer W/L than previously seen
+        # (Kalshi zeroes out old fill data after settlement, so counts drop after deploy)
+        if _bot_wins > _SETTLED_HWM["wins"]:
+            _SETTLED_HWM["wins"] = _bot_wins
+        if _bot_losses > _SETTLED_HWM["losses"]:
+            _SETTLED_HWM["losses"] = _bot_losses
+        if _bot_pnl > _SETTLED_HWM["total_pnl"]:
+            _SETTLED_HWM["total_pnl"] = _bot_pnl
+        _final_wins = max(_bot_wins, _SETTLED_HWM["wins"])
+        _final_losses = max(_bot_losses, _SETTLED_HWM["losses"])
+        _final_pnl = _bot_pnl  # P&L uses current data (HWM not appropriate for P&L)
+        _final_total = _final_wins + _final_losses
+
         result = {
             "settled": settled,
-            "wins": _bot_wins,
-            "losses": _bot_losses,
+            "wins": _final_wins,
+            "losses": _final_losses,
             "breakeven": breakeven,
-            "win_rate": round(_bot_wins / max(1, _bot_total) * 100, 1),
-            "total_pnl_usd": _bot_pnl,
+            "win_rate": round(_final_wins / max(1, _final_total) * 100, 1),
+            "total_pnl_usd": _final_pnl,
             "wins_all": wins,
             "losses_all": losses,
             "total_pnl_all_usd": round(total_pnl, 2),
