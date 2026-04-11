@@ -17156,6 +17156,32 @@ def position_monitor():
     })
 
 
+@app.route("/debug/positions-raw")
+def debug_positions_raw():
+    """Diagnostic: raw Kalshi API response for positions."""
+    path = "/portfolio/positions"
+    headers = signed_headers("GET", path)
+    if not headers:
+        return jsonify({"error": "signed_headers returned empty"})
+    try:
+        resp = requests.get(
+            KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
+            headers=headers,
+            params={"limit": 5},
+            timeout=10,
+        )
+        return jsonify({
+            "status_code": resp.status_code,
+            "response_keys": list(resp.json().keys()) if resp.ok else None,
+            "market_positions_count": len(resp.json().get("market_positions", [])) if resp.ok else 0,
+            "first_3_positions": resp.json().get("market_positions", [])[:3] if resp.ok else None,
+            "has_cursor": bool(resp.json().get("cursor")) if resp.ok else None,
+            "raw_text_preview": resp.text[:500] if not resp.ok else None,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
 @app.route("/")
 def dashboard():
     return DASHBOARD_HTML
