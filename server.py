@@ -282,10 +282,21 @@ def _save_state():
             # Timestamp for date-check on load
             "save_date": datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d"),
         }
-        with open(_STATE_FILE, "w") as f:
+        # Atomic write: write to temp file, then rename (prevents corruption on crash)
+        _tmp_path = _STATE_FILE + ".tmp"
+        with open(_tmp_path, "w") as f:
             _json.dump(data, f)
+            f.flush()
+            _os.fsync(f.fileno())
+        _os.replace(_tmp_path, _STATE_FILE)
     except Exception as e:
         print(f"[STATE] Save error: {e}")
+        # Clean up temp file if it exists
+        try:
+            if _os.path.exists(_STATE_FILE + ".tmp"):
+                _os.remove(_STATE_FILE + ".tmp")
+        except OSError:
+            pass
 
 def _load_state():
     """Restore trade data from disk, then hydrate from Kalshi fills API."""
@@ -4037,7 +4048,9 @@ def moonshark_snipe():
                         else:
                             espn_implied = 0
                         if espn_implied > 0:
-                            espn_edge = espn_implied - implied_prob
+                            # For NO bets, our win prob is 1 - team's win prob
+                            _ms_our_prob = (1 - espn_implied) if side == "no" else espn_implied
+                            espn_edge = _ms_our_prob - implied_prob
                             # SKIP unless ESPN gives at least the adaptive minimum edge
                             # over Kalshi price. Floor mode relaxes further.
                             _ms_min_edge = _adaptive_get("min_edge_moonshark", 0.05)
@@ -4246,7 +4259,7 @@ def moonshark_snipe():
                 # Use real edge if available — SKIP if no ESPN data (no guessing)
                 if espn_edge is not None and espn_edge > 0:
                     edge_estimate = espn_edge
-                    win_prob = min(espn_implied, 0.45)  # use sportsbook probability
+                    win_prob = min(_ms_our_prob, 0.45)  # use sportsbook probability (adjusted for NO side)
                 else:
                     # No real edge data — skip this trade instead of guessing
                     _ms_reasons["no_espn_edge"] = _ms_reasons.get("no_espn_edge", 0) + 1
@@ -4254,7 +4267,7 @@ def moonshark_snipe():
 
                 # Minimum EV filter — edge must exceed Kalshi fee drag
                 _kalshi_fee = PLATFORM_FEES.get("kalshi", 0.07)
-                _win_prob_est = espn_implied if espn_implied else (price / 100.0)
+                _win_prob_est = _ms_our_prob if _ms_our_prob else (price / 100.0)
                 _ev_per_contract = (_win_prob_est * (100 - price) - (1 - _win_prob_est) * price) / 100.0
                 _ev_after_fees = _ev_per_contract - (_kalshi_fee * price / 100.0)
                 if _ev_after_fees < 0.015:  # Less than 1.5 cents EV per contract after fees — not worth the risk
@@ -4778,7 +4791,9 @@ def closegame_snipe():
                         elif _cg_game["away_abbrev"] == underdog:
                             espn_win_prob_cg = _cg_odds.get("away_implied", 0)
                         if espn_win_prob_cg and espn_win_prob_cg > 0:
-                            espn_edge_cg = espn_win_prob_cg - kalshi_implied
+                            # For NO bets, our win prob is 1 - team's win prob
+                            _cg_our_prob = (1 - espn_win_prob_cg) if side == "no" else espn_win_prob_cg
+                            espn_edge_cg = _cg_our_prob - kalshi_implied
                 except Exception:
                     pass
 
@@ -4793,7 +4808,9 @@ def closegame_snipe():
                             _our_spread_cg = _cg_spread_f if _is_home_cg else -_cg_spread_f
                             _spread_implied_cg = 0.50 + (_our_spread_cg * -0.02)
                             _spread_implied_cg = max(0.10, min(0.90, _spread_implied_cg))
-                            _cg_spread_edge = _spread_implied_cg - kalshi_implied
+                            # For NO bets, our win prob is 1 - team's spread-implied win prob
+                            _spread_our_prob_cg = (1 - _spread_implied_cg) if side == "no" else _spread_implied_cg
+                            _cg_spread_edge = _spread_our_prob_cg - kalshi_implied
                 except (ValueError, TypeError):
                     pass
 
@@ -4809,7 +4826,9 @@ def closegame_snipe():
 
                 if _cg_live_prob is not None:
                     # Use live win prob as PRIMARY edge signal
-                    live_edge_cg = _cg_live_prob - kalshi_implied
+                    # For NO bets, our win prob is 1 - team's win prob
+                    _cg_live_our_prob = (1 - _cg_live_prob) if side == "no" else _cg_live_prob
+                    live_edge_cg = _cg_live_our_prob - kalshi_implied
                     _log_activity(
                         f"CLOSEGAME ESPN LIVE: {ticker} — live_prob={_cg_live_prob:.1%} vs Kalshi={kalshi_implied:.0%} live_edge={live_edge_cg:+.1%}",
                         "info"
@@ -4822,7 +4841,7 @@ def closegame_snipe():
                         continue
                     # Override moneyline edge with live edge
                     espn_edge_cg = live_edge_cg
-                    espn_win_prob_cg = _cg_live_prob
+                    espn_win_prob_cg = _cg_live_our_prob
 
                 # Cross-signal stale odds detection — compare ESPN moneyline vs live model
                 if _cg_live_prob is not None and espn_win_prob_cg is not None and _cg_live_prob != espn_win_prob_cg:
@@ -10255,7 +10274,9 @@ def settled_positions():
         return jsonify({"settled": [], "error": "No API key"})
     try:
         # Get ALL positions (settled + unsettled) with realized P&L
+        # Handle 429 rate-limits gracefully — return cached data instead of failing
         positions_list = []
+        _rate_limited = False
         for _status in ["settled", "unsettled"]:
             cursor = None
             for _ in range(10):
@@ -10267,12 +10288,20 @@ def settled_positions():
                     KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
                     headers=h, params=params, timeout=TIMEOUT,
                 )
+                if resp.status_code == 429:
+                    print(f"[SETTLED] 429 rate-limited on {_status} positions — returning cached data")
+                    _rate_limited = True
+                    break
                 resp.raise_for_status()
                 page = resp.json()
                 positions_list.extend(page.get("market_positions", []))
                 cursor = page.get("cursor")
                 if not cursor:
                     break
+            if _rate_limited:
+                break
+        if _rate_limited and _SETTLED_CACHE.get("data"):
+            return jsonify(_SETTLED_CACHE["data"])
 
         # Debug: count positions by status
         _settled_count = sum(1 for p in positions_list if p.get("settlement_status") == "settled")
@@ -18232,11 +18261,14 @@ function switchTab(name) {
 }
 
 const API = window.location.origin;
+const DAY1_STARTING_BALANCE = 500.00;  // Starting balance (April 3, 2026) — single source of truth
 
 // Safe DOM helpers — prevent null reference crashes when elements are missing
 function _el(id) { return document.getElementById(id); }
 function _setText(id, val) { var e = document.getElementById(id); if (e) e.textContent = val; }
 function _setHTML(id, val) { var e = document.getElementById(id); if (e) e.innerHTML = val; }
+// XSS protection — escape untrusted API strings before inserting into innerHTML
+function _esc(s) { if (!s) return ''; var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
 // Sports classification is now done server-side via is_sports field
 function isSports(pick) {
@@ -18321,7 +18353,7 @@ function renderHeroCard(p, idx) {
   h += '</div>';
 
   h += '<div class="hero-footer">';
-  h += '<button class="hero-execute" onclick="executePickTrade(this, ' + p._globalIdx + ')">Buy ' + sideWord + ' · $' + cost + '</button>';
+  h += '<button class="hero-execute" data-ticker="' + _esc(p.kalshi_ticker) + '" onclick="executePickTrade(this, ' + p._globalIdx + ')">Buy ' + sideWord + ' · $' + cost + '</button>';
   h += '</div>';
   h += '</div>';
   return h;
@@ -18505,8 +18537,7 @@ async function loadPortfolio() {
     if (progBalance) progBalance.textContent = '$' + totalVal.toFixed(2);
 
     // All-time P&L — Day 1 = March 16, 2026
-    var DAY1_BALANCE = 500.00;  // Starting balance (April 3, 2026)
-    var totalPnl = pfVal - DAY1_BALANCE;
+    var totalPnl = pfVal - DAY1_STARTING_BALANCE;
     var changeEl = document.getElementById('pf-change');
     if (changeEl) {
       var daysSinceStart = Math.max(1, Math.floor((Date.now() - new Date('2026-03-16T00:00:00').getTime()) / 86400000));
@@ -18583,8 +18614,7 @@ async function loadPortfolio() {
       hdrDailyPct.style.color = dailyPl >= 0 ? '#00dc5a' : dailyPl < 0 ? '#ff5000' : '#888';
     }
     // All-Time P&L — use actual portfolio value vs starting balance (most accurate)
-    var DAY1_BAL = 500.00;
-    var allTimePl = pfVal - DAY1_BAL;  // real P&L = current portfolio - starting balance
+    var allTimePl = pfVal - DAY1_STARTING_BALANCE;  // real P&L = current portfolio - starting balance
     var hdrTotalPnl = document.getElementById('hdr-total-pnl');
     var hdrTotalPct = document.getElementById('hdr-total-pct');
     if (hdrTotalPnl) {
@@ -18592,7 +18622,7 @@ async function loadPortfolio() {
       hdrTotalPnl.style.color = allTimePl >= 0 ? '#00dc5a' : allTimePl < 0 ? '#ff5000' : '#888';
     }
     if (hdrTotalPct) {
-      var totalPct = DAY1_BAL > 0 ? (allTimePl / DAY1_BAL * 100) : 0;
+      var totalPct = DAY1_STARTING_BALANCE > 0 ? (allTimePl / DAY1_STARTING_BALANCE * 100) : 0;
       hdrTotalPct.textContent = (totalPct >= 0 ? '+' : '') + totalPct.toFixed(2) + '%';
       hdrTotalPct.style.color = allTimePl >= 0 ? '#00dc5a' : allTimePl < 0 ? '#ff5000' : '#888';
     }
@@ -18621,7 +18651,7 @@ async function loadPortfolio() {
     }
 
     var wlEl = document.getElementById('pf-wl');
-    wlEl.innerHTML = '<span style="color:#00dc5a">' + w + 'W</span> / <span style="color:#ff5000">' + l + 'L</span>';
+    if (wlEl) wlEl.innerHTML = '<span style="color:#00dc5a">' + w + 'W</span> / <span style="color:#ff5000">' + l + 'L</span>';
 
     // Positions table (filter out old bot junk)
     var allPos = data.open_positions || [];
@@ -19351,7 +19381,7 @@ function renderPickCard(p, idx, prefix) {
   var ct = Math.max(1, Math.floor(500 / p.price_cents));
   var cost = (p.price_cents * ct / 100).toFixed(2);
   var sideWord = p.signal === 'buy_yes' ? 'YES' : 'NO';
-  h += '<button class="pick-execute" onclick="executePickTrade(this, ' + p._globalIdx + ')">Buy ' + sideWord + ' · $' + cost + '</button>';
+  h += '<button class="pick-execute" data-ticker="' + _esc(p.kalshi_ticker) + '" onclick="executePickTrade(this, ' + p._globalIdx + ')">Buy ' + sideWord + ' · $' + cost + '</button>';
   h += '</div>';
   h += '</div>';
   return h;
@@ -19478,7 +19508,7 @@ function renderGSTile(p, idx) {
   h += '</div>';
 
   // Action button
-  h += '<button class="hero-execute" style="width:100%;padding:8px;font-size:10px;font-weight:700" onclick="executePickTrade(this, ' + p._globalIdx + ')">EXECUTE ' + side + ' &#x2022; $' + cost + ' &#x2022; +$' + profit + ' potential</button>';
+  h += '<button class="hero-execute" style="width:100%;padding:8px;font-size:10px;font-weight:700" data-ticker="' + _esc(p.kalshi_ticker) + '" onclick="executePickTrade(this, ' + p._globalIdx + ')">EXECUTE ' + side + ' &#x2022; $' + cost + ' &#x2022; +$' + profit + ' potential</button>';
   h += '</div>';
   return h;
 }
@@ -19526,6 +19556,14 @@ async function loadTopPicks() {
 
 async function executePickTrade(btn, idx) {
   const m = _picksData[idx];
+  if (!m) { btn.textContent = 'STALE'; btn.style.color = '#ff5000'; return; }
+  // Guard against stale index: store ticker on button at render, verify it still matches
+  var expectedTicker = btn.getAttribute('data-ticker');
+  if (expectedTicker && expectedTicker !== m.kalshi_ticker) {
+    btn.textContent = 'STALE'; btn.style.color = '#ff5000';
+    showToast('Data refreshed — please try again', 'error');
+    return;
+  }
   btn.disabled = true;
   btn.textContent = 'PLACING...';
   btn.style.borderColor = '#ffb400';
@@ -19818,7 +19856,6 @@ function drawPerfLineChart() {
     return;
   }
 
-  var DAY1 = 500.00;
   var vals = pts.map(function(p) { return p.value; });
   var minV = Math.min.apply(null, vals);
   var maxV = Math.max.apply(null, vals);
@@ -19844,16 +19881,16 @@ function drawPerfLineChart() {
   }
 
   // Starting balance reference line
-  if (DAY1 >= minV && DAY1 <= maxV) {
+  if (DAY1_STARTING_BALANCE >= minV && DAY1_STARTING_BALANCE <= maxV) {
     ctx.strokeStyle = '#333';
     ctx.setLineDash([4, 4]);
     ctx.lineWidth = 1;
-    var day1Y = yPos(DAY1);
+    var day1Y = yPos(DAY1_STARTING_BALANCE);
     ctx.beginPath(); ctx.moveTo(pad.left, day1Y); ctx.lineTo(w - pad.right, day1Y); ctx.stroke();
     ctx.setLineDash([]);
     ctx.fillStyle = '#555';
     ctx.textAlign = 'left';
-    ctx.fillText('$500 start', pad.left + 4, day1Y - 4);
+    ctx.fillText('$' + DAY1_STARTING_BALANCE.toFixed(0) + ' start', pad.left + 4, day1Y - 4);
   }
 
   // Determine color based on overall change
@@ -19935,6 +19972,8 @@ function drawPerfLineChart() {
   canvas._perfPad = pad;
   canvas._perfW = w;
   canvas._perfH = h;
+  // Snapshot the rendered chart so mousemove can restore without full redraw
+  try { canvas._perfSnapshot = ctx.getImageData(0, 0, canvas.width, canvas.height); } catch(e) {}
 
   // Ensure tooltip bindings are attached
   _initPerfTooltip();
@@ -19983,12 +20022,15 @@ function _initPerfTooltip() {
     tooltip.style.left = Math.min(tx + 10, canvas._perfW - 140) + 'px';
     tooltip.style.top = Math.max(ty - 50, 0) + 'px';
 
-    // Redraw with crosshair
-    drawPerfLineChart();
+    // Restore saved chart image (avoids full redraw on every mouse move)
     var ctx = canvas.getContext('2d');
     var dpr = window.devicePixelRatio || 1;
+    if (canvas._perfSnapshot) {
+      ctx.putImageData(canvas._perfSnapshot, 0, 0);
+    }
     ctx.save();
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // Draw crosshair
     ctx.strokeStyle = '#444';
     ctx.lineWidth = 0.5;
     ctx.setLineDash([2, 2]);
@@ -20130,7 +20172,7 @@ function renderTodayTable(picks, containerId, badgeId) {
     html += '<td style="color:#ffb400;font-weight:700">' + p.time_left + '</td>';
     html += '<td class="result-win">+$' + p.potential_profit_usd.toFixed(2) + '</td>';
     var todaySide = p.signal === 'buy_yes' ? 'YES' : 'NO';
-    html += '<td><button class="trade-btn" onclick="executeTodayTrade(this,' + p._globalIdx + ')">Buy ' + todaySide + ' · $' + cost + '</button></td>';
+    html += '<td><button class="trade-btn" data-ticker="' + _esc(p.kalshi_ticker) + '" onclick="executeTodayTrade(this,' + p._globalIdx + ')">Buy ' + todaySide + ' · $' + cost + '</button></td>';
     html += '</tr>';
   });
   html += '</table>';
@@ -20155,6 +20197,13 @@ async function loadTodayPicks() {
 
 async function executeTodayTrade(btn, idx) {
   const m = _todayData[idx];
+  if (!m) { btn.textContent = 'STALE'; btn.style.color = '#ff5000'; return; }
+  var expectedTicker = btn.getAttribute('data-ticker');
+  if (expectedTicker && expectedTicker !== m.kalshi_ticker) {
+    btn.textContent = 'STALE'; btn.style.color = '#ff5000';
+    showToast('Data refreshed — please try again', 'error');
+    return;
+  }
   btn.disabled = true;
   btn.textContent = 'PLACING...';
   try {
@@ -20396,7 +20445,7 @@ async function loadSettled() {
     const streak = data.streak || 0;
     const streakType = data.streak_type || 'none';
     const totalBets = filtered.length;
-    const balance = window._currentBalance || 73.61;
+    const balance = window._currentBalance || 200;
     const pnlColor = pnl >= 0 ? '#00dc5a' : '#ff5000';
     const wrColor = wr >= 60 ? '#00dc5a' : wr >= 40 ? '#ffb400' : '#ff5000';
     const roiColor = roi >= 0 ? '#00dc5a' : '#ff5000';
@@ -20423,7 +20472,7 @@ async function loadSettled() {
     html += statBox('Best Win', '+$' + bigW.toFixed(2), '#00dc5a');
     html += statBox('Worst Loss', '-$' + Math.abs(bigL).toFixed(2), '#ff5000');
     html += statBox('Total Bets', totalBets, '#ffb400');
-    el.innerHTML = html;
+    if (el) el.innerHTML = html;
 
     // Update bottom progress bar
     var progFill = document.getElementById('progress-fill');
@@ -20478,7 +20527,7 @@ async function loadSettled() {
     var settled = filtered;
     var hiddenCount = allSettled.length - filtered.length;
     if (settled.length === 0) {
-      tableEl.innerHTML = '<div style="color:#555;font-size:10px;padding:8px">No settled positions yet. Place some bets and we will track every result here.</div>';
+      if (tableEl) tableEl.innerHTML = '<div style="color:#555;font-size:10px;padding:8px">No settled positions yet. Place some bets and we will track every result here.</div>';
     } else {
       // Server already sorts: past close_times first (newest), future at bottom
       // No client-side re-sort needed
@@ -20523,7 +20572,7 @@ async function loadSettled() {
       if (hiddenCount > 0) {
         tbl += '<div style="color:#555;font-size:9px;padding:6px 4px">' + hiddenCount + ' old penny bot trades hidden (uncheck toggle to show all)</div>';
       }
-      tableEl.innerHTML = tbl;
+      if (tableEl) tableEl.innerHTML = tbl;
     }
   } catch(e) {
     var ss = document.getElementById('settled-stats');
@@ -20632,19 +20681,18 @@ async function loadPerformance() {
     // Cross-check with settled trade P&L + unrealized
     var _perfPfVal = (portfolioData || {}).portfolio_value_usd || 0;
     var _perfCash = (portfolioData || {}).balance_usd || 0;
-    var _perfStartBal = 500.00;
-    var portfolioPnl = _perfPfVal > 0 ? (_perfPfVal - _perfStartBal) : totalPnl;
+    var portfolioPnl = _perfPfVal > 0 ? (_perfPfVal - DAY1_STARTING_BALANCE) : totalPnl;
     // Sanity check: if settled P&L is way off from portfolio math, prefer portfolio
     var portfolioPnlColor = portfolioPnl >= 0 ? '#00dc5a' : '#ff5000';
-    var portfolioRoi = _perfStartBal > 0 ? (portfolioPnl / _perfStartBal * 100) : roi;
+    var portfolioRoi = DAY1_STARTING_BALANCE > 0 ? (portfolioPnl / DAY1_STARTING_BALANCE * 100) : roi;
     var portfolioRoiColor = portfolioRoi >= 0 ? '#00dc5a' : '#ff5000';
     var _dailyPl = (portfolioData || {}).daily_pnl_usd || (portfolioData || {}).total_unrealized_usd || 0;
 
     var khtml = '';
     // Row 1: Core trading metrics
-    khtml += kpi('Total P&L', (portfolioPnl >= 0 ? '+$' : '-$') + Math.abs(portfolioPnl).toFixed(2), portfolioPnlColor, total > 0 ? wins + 'W / ' + losses + 'L' : 'portfolio vs $' + _perfStartBal.toFixed(0) + ' start');
+    khtml += kpi('Total P&L', (portfolioPnl >= 0 ? '+$' : '-$') + Math.abs(portfolioPnl).toFixed(2), portfolioPnlColor, total > 0 ? wins + 'W / ' + losses + 'L' : 'portfolio vs $' + DAY1_STARTING_BALANCE.toFixed(0) + ' start');
     khtml += kpi('Win Rate', total > 0 ? winRate.toFixed(1) + '%' : '--', total > 0 ? wrColor : '#888', total > 0 ? total + ' settled' : 'no settled trades yet');
-    khtml += kpi('ROI', portfolioRoi.toFixed(1) + '%', portfolioRoiColor, '$' + _perfStartBal.toFixed(0) + ' starting balance');
+    khtml += kpi('ROI', portfolioRoi.toFixed(1) + '%', portfolioRoiColor, '$' + DAY1_STARTING_BALANCE.toFixed(0) + ' starting balance');
     khtml += kpi('Daily P&L', (_dailyPl >= 0 ? '+$' : '-$') + Math.abs(_dailyPl).toFixed(2), _dailyPl >= 0 ? '#00dc5a' : '#ff5000', 'unrealized today');
     khtml += kpi('Expectancy', total > 0 ? ((expectancy >= 0 ? '+$' : '-$') + Math.abs(expectancy).toFixed(2)) : '--', total > 0 ? expColor : '#888', total > 0 ? 'per trade' : '');
 
@@ -20970,18 +21018,18 @@ async function loadQuantPicks() {
 
     // Update banner
     var bannerEl = document.getElementById('quant-banner-text');
-    bannerEl.textContent = data.count + ' mispriced markets found';
+    if (bannerEl) bannerEl.textContent = data.count + ' mispriced markets found';
     var wrEl = document.getElementById('quant-winrate-text');
-    wrEl.textContent = stats.total_bets > 0 ? stats.win_rate + '% win rate (' + stats.wins + 'W/' + stats.losses + 'L)' : '';
+    if (wrEl) wrEl.textContent = stats.total_bets > 0 ? stats.win_rate + '% win rate (' + stats.wins + 'W/' + stats.losses + 'L)' : '';
     var prEl = document.getElementById('quant-profit-text');
-    if (stats.total_bets > 0) {
+    if (stats.total_bets > 0 && prEl) {
       var pc = stats.profit >= 0 ? '#00dc5a' : '#ff5000';
       prEl.innerHTML = '<span style="color:' + pc + '">' + (stats.profit >= 0 ? '+' : '') + '$' + stats.profit.toFixed(2) + ' profit</span>';
     }
 
     var cardsEl = document.getElementById('quant-cards');
     if (picks.length === 0) {
-      cardsEl.innerHTML = '<div style="color:#555;text-align:center;padding:40px;grid-column:1/-1">No strong mispricings right now. Check back soon.</div>';
+      if (cardsEl) cardsEl.innerHTML = '<div style="color:#555;text-align:center;padding:40px;grid-column:1/-1">No strong mispricings right now. Check back soon.</div>';
       return;
     }
 
@@ -21051,11 +21099,11 @@ async function loadQuantPicks() {
       html += '</div>';
       html += '</div>';
     });
-    cardsEl.innerHTML = html;
+    if (cardsEl) cardsEl.innerHTML = html;
 
     // Render trade history below cards
     var trades = stats.trades || [];
-    if (trades.length > 0) {
+    if (trades.length > 0 && cardsEl) {
       var histHtml = '<div style="margin-top:20px;background:#0d1117;border:1px solid #1a3050;border-radius:10px;padding:14px">';
       histHtml += '<div style="color:#00d4ff;font-size:13px;font-weight:700;margin-bottom:10px">Quant Trade History</div>';
       histHtml += '<table style="width:100%;border-collapse:collapse;font-size:10px">';
@@ -21187,6 +21235,7 @@ function spinWheel() {
       drawWheel(_wheelOpps, winner);
       var pick = _wheelOpps[winner];
       var resultEl = document.getElementById('wheel-result');
+      if (!resultEl) return;
       resultEl.innerHTML = '<div style="background:#002a3a;border:1px solid #00d4ff;border-radius:8px;padding:12px;margin-top:4px">' +
         '<div style="color:#00d4ff;font-weight:700;font-size:14px">🎯 ' + pick.title + '</div>' +
         '<div style="color:#ffb400;font-size:12px;margin-top:6px">' + pick.side.toUpperCase() + ' @ ' + pick.price + '¢ · ' + pick.win_prob + '% implied · $' + pick.payout + ' potential payout</div>' +
@@ -21538,6 +21587,7 @@ async function loadMoonshark() {
 
     // Settings
     var setContainer = document.getElementById('mshark-settings');
+    if (!setContainer) return;
     setContainer.innerHTML = ''
       + '<div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap">'
       + '<div style="display:flex;gap:16px;flex-wrap:wrap">'
@@ -21766,8 +21816,9 @@ async function loadNewsFeed(forceRefresh) {
   }
 }
 
-// Legacy — kept for backward compat
-async function loadTrends() {
+// loadTrends — REMOVED: DOM elements (trends-list, trends-params, etc.) no longer exist
+async function loadTrends() { /* no-op */ }
+/* ORIGINAL loadTrends removed to eliminate dead code — was:
   try {
     var data = await fetch(API + '/trends').then(function(r){ return r.json(); });
     // Version
@@ -21837,7 +21888,7 @@ async function loadTrends() {
   } catch(e) {
     _setHTML('trends-list', '<div style="color:#ff5000;font-size:11px">Error: ' + e.message + '</div>');
   }
-}
+} */
 
 // --- Brain Tab (learning engine / supervisor / smart exit view) ---
 var _brainLoadedAt = 0;
@@ -22116,8 +22167,10 @@ async function loadBrain(force) {
   }
 }
 
-// --- Analytics Tab ---
-async function loadAnalytics() {
+// loadAnalytics — REMOVED: DOM elements (analytics-insights, analytics-sport, etc.) no longer exist
+async function loadAnalytics() { /* no-op */ }
+/* ORIGINAL loadAnalytics removed to eliminate dead code — was:
+async function _loadAnalytics_DEAD() {
   try {
     // Use both the /analytics endpoint and settled data
     var data = await fetch(API + '/analytics').then(r => r.json());
@@ -22269,20 +22322,26 @@ async function loadAnalytics() {
     console.error('Analytics load error', e);
     _setHTML('analytics-insights', '<div style="color:#ff5000;font-size:12px">Error loading analytics: ' + e.message + '</div>');
   }
-}
+} */
 
 // Load everything on page load — all in parallel for fast first paint
+// Staggered init load — avoid bombarding /settled 4x simultaneously
+// Phase 1: critical dashboard data (fast)
 Promise.all([
-  loadTicker(), loadSeventyFivers(), loadQuantPicks(),
-  loadStatus(), loadActivity(), loadBetsFeed(), loadAllBets(),
-  loadPortfolio(), loadTopPicks(), loadTodayPicks(),
-  loadPositions(), loadSettled(), loadMispriced(),
-  loadTrades(), loadMoonshark(), loadPerfHistory(),
-  loadPerformance(), loadClosingSoon()
-]).catch(function(e){ console.warn('Init load partial fail:', e); });
+  loadStatus(), loadActivity(), loadPortfolio(), loadPositions(),
+  loadBetsFeed(), loadTopPicks(), loadTodayPicks(), loadClosingSoon()
+]).catch(function(e){ console.warn('Init phase 1 partial fail:', e); });
+// Phase 2: slower/expensive endpoints (staggered to avoid 429s)
+setTimeout(function() {
+  Promise.all([
+    loadSettled(), loadPerfHistory(), loadPerformance(),
+    loadTicker(), loadSeventyFivers(), loadQuantPicks(),
+    loadAllBets(), loadMispriced(), loadTrades(), loadMoonshark()
+  ]).catch(function(e){ console.warn('Init phase 2 partial fail:', e); });
+}, 3000);
 // Auto-refresh intervals — tiered by data freshness needs
 // FAST (10s): live status, activity feed, today's bets — changes frequently
-setInterval(() => { loadStatus(); loadActivity(); loadBetsFeed(); loadPortfolio(); checkForNotifications(); }, 10000);
+setInterval(() => { loadStatus(); loadActivity(); loadBetsFeed(); loadPortfolio(); }, 10000);
 // MEDIUM (30s): positions, trades, closing soon — changes with market activity
 setInterval(() => { loadPositions(); loadTrades(); loadClosingSoon(); loadTopPicks(); loadTodayPicks(); checkNotifications(); }, 30000);
 // SLOW (60s): settled stats, perf history, analytics — expensive + rarely changes
@@ -22381,7 +22440,7 @@ function checkNotifications() {
 
 // Initial check
 setTimeout(checkNotifications, 3000);
-setInterval(checkNotifications, 15000);
+// checkNotifications is already in the 30s interval — no duplicate needed
 
 // --- Closing Soon Panel ---
 async function loadClosingSoon() {
