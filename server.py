@@ -2867,7 +2867,7 @@ _similarity_local = _threading.local()
 # Cached balance fetcher — avoids redundant API calls within a cycle
 # ---------------------------------------------------------------------------
 _balance_cache = {"balance": 0, "ts": 0}
-_BALANCE_CACHE_LOCK = threading.Lock()
+_BALANCE_CACHE_LOCK = _threading.Lock()
 
 def _get_cached_balance(max_age=10):
     """Get Kalshi balance with caching to avoid redundant API calls within a cycle.
