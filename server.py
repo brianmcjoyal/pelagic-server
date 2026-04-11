@@ -17272,7 +17272,7 @@ a:hover { color: #7da5f5; }
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
       <div style="display:flex;align-items:center;gap:10px">
         <span style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Portfolio Performance</span>
-        <span id="perf-chart-change-header" style="font-size:11px;font-weight:700;color:#666">--</span>
+        <span id="perf-chart-change-header" style="font-size:13px;font-weight:800;color:#666;letter-spacing:0.3px">--</span>
       </div>
       <div style="display:flex;gap:6px" id="perf-chart-range">
         <button onclick="setPerfRange('1h')" class="refresh-btn perf-range-btn" data-range="1h" style="font-size:9px;padding:2px 8px">1H</button>
