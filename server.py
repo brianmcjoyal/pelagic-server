@@ -2431,14 +2431,19 @@ def _parse_kalshi_position(pos):
     return 0, "yes"
 
 
+_positions_cache = {"data": [], "enriched": [], "ts": 0}
+
 def check_position_prices():
     """Check current market prices for all open positions.
-    Returns list of positions with current price, entry price, P&L."""
+    Returns list of positions with current price, entry price, P&L.
+    Handles 429 rate-limits by returning cached data."""
+    global _positions_cache
+    import time as _time_mod
     path = "/portfolio/positions"
     headers = signed_headers("GET", path)
     if not headers:
         print("[POSITIONS] signed_headers returned empty — auth may be broken")
-        return []
+        return _positions_cache.get("enriched") or []
     try:
         # Paginate through all positions (cursor-based)
         positions_list = []
@@ -2454,6 +2459,10 @@ def check_position_prices():
                 params=_params,
                 timeout=TIMEOUT,
             )
+            if resp.status_code == 429:
+                _age = _time_mod.time() - _positions_cache.get("ts", 0)
+                print(f"[POSITIONS] 429 rate-limited — returning cached data ({len(_positions_cache.get('enriched',[]))} positions, {_age:.0f}s old)")
+                return _positions_cache.get("enriched") or []
             resp.raise_for_status()
             _body = resp.json()
             _page_positions = _body.get("market_positions", [])
@@ -2695,11 +2704,20 @@ def check_position_prices():
             })
         if _skipped_zero > 0:
             print(f"[POSITIONS] Skipped {_skipped_zero} positions with count=0 (total API returned: {len(positions_list)}, enriched: {len(enriched)})")
+        # Cache successful result for 429 fallback
+        if enriched:
+            _positions_cache["enriched"] = enriched
+            _positions_cache["ts"] = _time_mod.time()
         return enriched
     except Exception as e:
         print(f"[MONITOR] Error: {e}")
         import traceback
         traceback.print_exc()
+        # Return cached data on any error instead of empty list
+        if _positions_cache.get("enriched"):
+            _age = _time_mod.time() - _positions_cache.get("ts", 0)
+            print(f"[POSITIONS] Returning cached {len(_positions_cache['enriched'])} positions ({_age:.0f}s old) after error")
+            return _positions_cache["enriched"]
         return []
 
 
@@ -9064,38 +9082,21 @@ def _background_loop():
                 _mv2 = _mv2_marks
                 if _mv2_fallback_count:
                     print(f"[PORTFOLIO] {_mv2_fallback_count} positions fell back to entry_price (no Kalshi mark)")
-                # Fetch settled positions for win/loss stats
+                # Use _SETTLED_CACHE (refreshed by separate /settled endpoint) instead of
+                # making 2 MORE Kalshi API calls per cycle that caused 429 rate-limits.
                 _wins2 = _losses2 = 0
                 _realized2 = 0.0
                 _settled_list2 = []
-                try:
-                    for _sf2 in ["settled", "unsettled"]:
-                        _sh2 = signed_headers("GET", "/portfolio/positions")
-                        _sr2 = requests.get(
-                            KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/positions",
-                            headers=_sh2, params={"limit": 200, "settlement_status": _sf2},
-                            timeout=10,
-                        )
-                        if _sr2.ok:
-                            for _sp2 in _sr2.json().get("market_positions", []):
-                                _pnl2 = _parse_kalshi_dollars(_sp2.get("realized_pnl_dollars") or _sp2.get("realized_pnl"))
-                                _pnl2_usd = _pnl2 / 100
-                                if _sf2 == "unsettled" and abs(_pnl2_usd) < 0.005:
-                                    continue
-                                _realized2 += _pnl2_usd
-                                if _pnl2_usd > 0.005:
-                                    _wins2 += 1
-                                    _settled_list2.append({"ticker": _sp2.get("ticker", ""), "pnl_usd": round(_pnl2_usd, 2), "won": True})
-                                elif _pnl2_usd < -0.005:
-                                    _losses2 += 1
-                                    _settled_list2.append({"ticker": _sp2.get("ticker", ""), "pnl_usd": round(_pnl2_usd, 2), "won": False})
-                except Exception:
-                    # Fall back to cached values
-                    if _PORTFOLIO_CACHE["data"]:
-                        _wins2 = _PORTFOLIO_CACHE["data"].get("wins", 0)
-                        _losses2 = _PORTFOLIO_CACHE["data"].get("losses", 0)
-                        _realized2 = _PORTFOLIO_CACHE["data"].get("total_realized_usd", 0)
-                        _settled_list2 = _PORTFOLIO_CACHE["data"].get("settled_history", [])
+                if _SETTLED_CACHE.get("data"):
+                    _wins2 = _SETTLED_CACHE["data"].get("wins", 0)
+                    _losses2 = _SETTLED_CACHE["data"].get("losses", 0)
+                    _realized2 = _SETTLED_CACHE["data"].get("total_pnl_usd", 0)
+                    _settled_list2 = _SETTLED_CACHE["data"].get("settled", [])[-20:]
+                elif _PORTFOLIO_CACHE.get("data"):
+                    _wins2 = _PORTFOLIO_CACHE["data"].get("wins", 0)
+                    _losses2 = _PORTFOLIO_CACHE["data"].get("losses", 0)
+                    _realized2 = _PORTFOLIO_CACHE["data"].get("total_realized_usd", 0)
+                    _settled_list2 = _PORTFOLIO_CACHE["data"].get("settled_history", [])
                 _wr2 = round(_wins2 / max(1, _wins2 + _losses2) * 100, 1)
 
                 # Day 1+ win rate (only count trades from March 16, 2026 onwards)
