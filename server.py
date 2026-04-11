@@ -11156,6 +11156,7 @@ def settled_positions():
         _final_losses = max(_bot_losses, _SETTLED_HWM["losses"])
         _final_pnl = _bot_pnl  # P&L uses current data (HWM not appropriate for P&L)
         _final_total = _final_wins + _final_losses
+        print(f"[SETTLED] bot={_bot_wins}W/{_bot_losses}L, HWM={_SETTLED_HWM}, final={_final_wins}W/{_final_losses}L, all={wins}W/{losses}L, settled_list={len(settled)}")
 
         result = {
             "settled": settled,
