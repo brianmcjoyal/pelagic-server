@@ -125,8 +125,9 @@ def _send_discord(msg, color=0x00dc5a):
 def _require_auth():
     """Check API secret for POST endpoints. Returns error response or None if OK."""
     if not API_SECRET:
-        return None  # No secret configured — allow (dev mode)
-    token = request.headers.get("X-API-Secret") or request.args.get("api_secret") or ""
+        return None  # No secret configured — allow (dashboard same-origin requests)
+    # Only accept secret via header (not query string — URLs leak in logs/referer)
+    token = request.headers.get("X-API-Secret") or ""
     if token != API_SECRET:
         return jsonify({"error": "Unauthorized"}), 401
     return None
@@ -232,6 +233,10 @@ def _save_state():
     single deployment (e.g. dyno restarts).  On fresh deploy, _hydrate_from_kalshi()
     and _rebuild_journal_from_kalshi() rebuild from the Kalshi API as source of truth.
     """
+    # Use lock if available (not available during early startup before threading import)
+    _lock = globals().get("_STATE_FILE_LOCK")
+    if _lock:
+        _lock.acquire()
     try:
         # Cap all_trades to prevent unbounded memory growth
         if len(BOT_STATE["all_trades"]) > 1000:
@@ -297,6 +302,9 @@ def _save_state():
                 _os.remove(_STATE_FILE + ".tmp")
         except OSError:
             pass
+    finally:
+        if _lock:
+            _lock.release()
 
 def _load_state():
     """Restore trade data from disk, then hydrate from Kalshi fills API."""
@@ -3005,6 +3013,7 @@ _TRADE_JOURNAL_LOCK = _threading.Lock()  # protects _TRADE_JOURNAL append/iterat
 _SKIP_REASONS_LOCK = _threading.Lock()   # protects _SKIP_REASONS_TODAY from background + learning thread races
 _LEARNING_STATE_LOCK = _threading.Lock() # protects _LEARNING_STATE updates from the dedicated learning thread
 _PERF_HISTORY_LOCK = _threading.Lock()   # protects _PERF_HISTORY from concurrent read/write
+_STATE_FILE_LOCK = _threading.Lock()     # protects _save_state() from concurrent writes (bg thread + request handlers)
 _EVENTS_BET_TODAY = set()  # shared across all strategies
 _similarity_local = _threading.local()
 
