@@ -306,6 +306,9 @@ def _save_state():
         if _lock:
             _lock.release()
 
+# Save state on graceful shutdown (SIGTERM from Railway)
+atexit.register(_save_state)
+
 def _load_state():
     """Restore trade data from disk, then hydrate from Kalshi fills API."""
     global _TRADE_JOURNAL, _CATEGORY_STATS
@@ -709,18 +712,23 @@ def _seed_perf_history_from_fills():
 
     if not sorted_dates:
         # No fills at all — just add Day 1 anchor
-        _PERF_HISTORY.insert(0, {"ts": "2026-03-31T09:00:00-07:00", "value": 500.00, "cash": 500.00})
+        with _PERF_HISTORY_LOCK:
+            _PERF_HISTORY.insert(0, {"ts": "2026-03-31T09:00:00-07:00", "value": 500.00, "cash": 500.00})
         print("[PERF-SEED] No fills found, added Day 1 anchor only")
         _save_state()
         return
 
     # Current portfolio value for calibration
     DAY1_VALUE = 500.00
-    current_value = 598.64  # fallback
+    current_value = None
     if _PORTFOLIO_CACHE.get("data"):
         cv = _PORTFOLIO_CACHE["data"].get("portfolio_value_usd")
         if cv and cv > 0:
             current_value = cv
+    if current_value is None:
+        # No portfolio data yet — can't calibrate backfill without real data
+        print("[PERF-SEED] Skipping backfill — portfolio cache not populated yet")
+        return
 
     total_pnl = current_value - DAY1_VALUE
     num_days = max(1, len(sorted_dates))
@@ -762,7 +770,7 @@ def _seed_perf_history_from_fills():
             _frac = progress_start + (progress_end - progress_start) * (_hi / len(_hours))
             _val = round(DAY1_VALUE + total_pnl * _frac, 2)
             historical_points.append({
-                "ts": f"{date_str}T{_hr:02d}:00:00-07:00",
+                "ts": datetime.datetime.strptime(f"{date_str} {_hr:02d}:00", "%Y-%m-%d %H:%M").replace(tzinfo=_PACIFIC).isoformat(),
                 "value": _val,
                 "cash": _val,
             })
@@ -771,14 +779,13 @@ def _seed_perf_history_from_fills():
         print("[PERF-SEED] No historical points generated")
         return
 
-    # Merge: prepend historical points before existing real-time data
-    existing_real = list(_PERF_HISTORY)
-    _PERF_HISTORY.clear()
-    _PERF_HISTORY.extend(historical_points)
-    _PERF_HISTORY.extend(existing_real)
-
-    # Trim to max
+    # Merge: prepend historical points before existing real-time data (under lock)
     with _PERF_HISTORY_LOCK:
+        existing_real = list(_PERF_HISTORY)
+        _PERF_HISTORY.clear()
+        _PERF_HISTORY.extend(historical_points)
+        _PERF_HISTORY.extend(existing_real)
+        # Trim to max
         if len(_PERF_HISTORY) > _PERF_HISTORY_MAX:
             _PERF_HISTORY[:] = _PERF_HISTORY[-_PERF_HISTORY_MAX:]
 
@@ -8944,13 +8951,13 @@ def _background_loop():
             _now_pt = datetime.datetime.now(tz=_PACIFIC)
             # If history is empty after deploy, seed with Day 1 anchor + current
             # so the chart renders immediately instead of showing "Waiting for data"
-            if len(_PERF_HISTORY) < 2:
-                _PERF_HISTORY.insert(0, {
-                    "ts": "2026-03-31T09:00:00-07:00",
-                    "value": 500.00,
-                    "cash": 500.00,
-                })
             with _PERF_HISTORY_LOCK:
+                if len(_PERF_HISTORY) < 2:
+                    _PERF_HISTORY.insert(0, {
+                        "ts": "2026-03-31T09:00:00-07:00",
+                        "value": 500.00,
+                        "cash": 500.00,
+                    })
                 _PERF_HISTORY.append({
                     "ts": _now_pt.isoformat(),
                     "value": round(_chart_value, 2),
