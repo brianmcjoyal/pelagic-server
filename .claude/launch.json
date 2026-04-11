@@ -6,6 +6,12 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["server.py"],
       "port": 8080
+    },
+    {
+      "name": "poppy-dev",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "echo poppy-already-running-on-5173; sleep 999999"],
+      "port": 5173
     }
   ]
 }

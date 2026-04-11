@@ -2437,16 +2437,31 @@ def check_position_prices():
     path = "/portfolio/positions"
     headers = signed_headers("GET", path)
     if not headers:
+        print("[POSITIONS] signed_headers returned empty — auth may be broken")
         return []
     try:
-        resp = requests.get(
-            KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
-            headers=headers,
-            params={"limit": 100, "settlement_status": "unsettled"},
-            timeout=TIMEOUT,
-        )
-        resp.raise_for_status()
-        positions_list = resp.json().get("market_positions", [])
+        # Paginate through all positions (cursor-based)
+        positions_list = []
+        _cursor = None
+        for _page_num in range(20):  # safety cap
+            _params = {"limit": 200}
+            if _cursor:
+                _params["cursor"] = _cursor
+            _ph = signed_headers("GET", path)
+            resp = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + path,
+                headers=_ph,
+                params=_params,
+                timeout=TIMEOUT,
+            )
+            resp.raise_for_status()
+            _body = resp.json()
+            _page_positions = _body.get("market_positions", [])
+            positions_list.extend(_page_positions)
+            _cursor = _body.get("cursor")
+            if not _cursor or not _page_positions:
+                break
+        print(f"[POSITIONS] Kalshi returned {len(positions_list)} unsettled positions")
         enriched = []
 
         # Build market lookup from cache (fast) instead of 57 individual API calls
@@ -2490,10 +2505,14 @@ def check_position_prices():
                     except Exception:
                         pass
 
+        _skipped_zero = 0
         for pos in positions_list:
             ticker = pos.get("ticker", "")
             abs_count, side = _parse_kalshi_position(pos)
             if abs_count == 0:
+                _skipped_zero += 1
+                if _skipped_zero <= 3:
+                    print(f"[POSITIONS] Skipping {ticker}: position_fp={pos.get('position_fp')!r} position={pos.get('position')!r}")
                 continue  # no active position
 
             # Get current market price from lookup (fast)
@@ -2674,6 +2693,8 @@ def check_position_prices():
                 "volatility": vol_score,
                 "placed_by": placed_by,
             })
+        if _skipped_zero > 0:
+            print(f"[POSITIONS] Skipped {_skipped_zero} positions with count=0 (total API returned: {len(positions_list)}, enriched: {len(enriched)})")
         return enriched
     except Exception as e:
         print(f"[MONITOR] Error: {e}")
@@ -8739,7 +8760,8 @@ def _background_loop():
             _cp = _p.get("current_price")
             _ct = _p.get("count") or 0
             _mv_early += (_cp if _cp is not None else (_p.get("entry_price") or 0)) * _ct / 100.0
-        _inv_early = sum(p.get("market_exposure_cents", 0) for p in _pos_early) / 100
+        _inv_early_raw = sum(p.get("market_exposure_cents", 0) for p in _pos_early) / 100
+        _inv_early = _inv_early_raw if _inv_early_raw > 0 else _kalshi_portfolio
         # Total portfolio = cash + positions.
         # Kalshi's portfolio_value is positions-only, so add cash.
         _positions_val_early = round(_kalshi_portfolio if _kalshi_portfolio > 0 else _mv_early, 2)
@@ -9125,6 +9147,19 @@ def _background_loop():
                     print(f"[PORTFOLIO] Suspicious drop ${_prev_data.get('portfolio_value_usd',0):.2f} → ${_pf_value2:.2f} — keeping previous")
                     continue  # skip this cache update entirely
 
+                # If check_position_prices() returned empty but Kalshi balance API
+                # shows positions exist, keep previous cached positions to avoid
+                # "No open positions" flicker. This happens when the positions API
+                # is slow/rate-limited but the balance API still works.
+                if not _pos2 and _kalshi_portfolio2 > 1 and _prev_data and _prev_data.get("open_positions"):
+                    print(f"[PORTFOLIO] Positions API returned 0 but Kalshi shows ${_kalshi_portfolio2:.2f} in positions — keeping cached {len(_prev_data['open_positions'])} positions")
+                    _pos2 = _prev_data["open_positions"]
+
+                # total_invested: prefer sum of market_exposure from positions,
+                # fallback to Kalshi's portfolio_value (which IS total invested for binary contracts)
+                _invested_from_positions = round(sum(p.get("market_exposure_cents", 0) for p in _pos2) / 100, 2)
+                _total_invested2 = _invested_from_positions if _invested_from_positions > 0 else round(_kalshi_portfolio2, 2)
+
                 _PORTFOLIO_CACHE["data"] = {
                     "balance_usd": round(_bal2, 2),
                     "portfolio_value_usd": _pf_value2,
@@ -9132,7 +9167,7 @@ def _background_loop():
                     "kalshi_portfolio_balance_raw": round(_kalshi_portfolio2, 2),
                     "open_positions": _pos2,
                     "open_count": len(_pos2),
-                    "total_invested_usd": round(sum(p.get("market_exposure_cents", 0) for p in _pos2) / 100, 2),
+                    "total_invested_usd": _total_invested2,
                     "total_unrealized_usd": _total_unrealized,
                     "daily_pnl_usd": _daily_pnl,
                     # Use /settled cache as single source of truth for W/L/P&L
@@ -17103,8 +17138,16 @@ def sell_all_losers():
 
 @app.route("/position-monitor")
 def position_monitor():
-    """Get all open positions with current prices and P&L."""
-    positions = check_position_prices()
+    """Get all open positions with current prices and P&L.
+    Returns cached data from background loop (refreshed every ~30s) to avoid
+    duplicate Kalshi API calls and rate-limit issues that caused 0-position bugs."""
+    # Use cached positions from the background portfolio refresh loop
+    cached = _PORTFOLIO_CACHE.get("data")
+    if cached and cached.get("open_positions"):
+        positions = cached["open_positions"]
+    else:
+        # Fallback: live API call (only if cache not warmed yet)
+        positions = check_position_prices()
     return jsonify({
         "positions": positions,
         "auto_exit_enabled": BOT_CONFIG.get("enabled", False),
