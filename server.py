@@ -20557,9 +20557,10 @@ async function loadPerformance() {
       dailyPnls[day] += pnl;
     });
 
-    // If client-side recount found 0 wins but endpoint disagrees, use endpoint values
-    // This handles cases where the `won` field doesn't survive JSON serialization
-    if (wins === 0 && losses === 0 && settledData.wins > 0) {
+    // Always use endpoint's authoritative W/L counts — they include HWM protection
+    // against Kalshi pruning old data, and match the header display.
+    // Client-side recount from settled list can under-count when data is pruned.
+    if (settledData.wins > 0 || settledData.losses > 0) {
       wins = settledData.wins || 0;
       losses = settledData.losses || 0;
     }
