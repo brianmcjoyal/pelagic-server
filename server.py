@@ -717,8 +717,9 @@ def _seed_perf_history_from_fills():
     _PERF_HISTORY.extend(existing_real)
 
     # Trim to max
-    if len(_PERF_HISTORY) > _PERF_HISTORY_MAX:
-        _PERF_HISTORY[:] = _PERF_HISTORY[-_PERF_HISTORY_MAX:]
+    with _PERF_HISTORY_LOCK:
+        if len(_PERF_HISTORY) > _PERF_HISTORY_MAX:
+            _PERF_HISTORY[:] = _PERF_HISTORY[-_PERF_HISTORY_MAX:]
 
     print(f"[PERF-SEED] Success! Added {len(historical_points)} historical points across {len(sorted_dates)} trading days. Total history: {len(_PERF_HISTORY)} pts")
     _save_state()
@@ -915,7 +916,12 @@ def _rebuild_journal_from_kalshi():
 # Kalshi auth helpers
 # ---------------------------------------------------------------------------
 
+_CACHED_PRIVATE_KEY = None
+
 def load_private_key():
+    global _CACHED_PRIVATE_KEY
+    if _CACHED_PRIVATE_KEY is not None:
+        return _CACHED_PRIVATE_KEY
     pem = PRIVATE_KEY_PEM.strip()
     if not pem:
         print("KALSHI_PRIVATE_KEY environment variable is not set")
@@ -931,7 +937,8 @@ def load_private_key():
         lines = [raw[i:i+64] for i in range(0, len(raw), 64)]
         pem = "-----BEGIN RSA PRIVATE KEY-----\n" + "\n".join(lines) + "\n-----END RSA PRIVATE KEY-----"
     try:
-        return serialization.load_pem_private_key(pem.encode(), password=None, backend=default_backend())
+        _CACHED_PRIVATE_KEY = serialization.load_pem_private_key(pem.encode(), password=None, backend=default_backend())
+        return _CACHED_PRIVATE_KEY
     except Exception as e:
         print(f"Key load error: {e}")
         return None
@@ -2860,6 +2867,7 @@ _BOT_STATE_LOCK = _threading.Lock()
 _TRADE_JOURNAL_LOCK = _threading.Lock()  # protects _TRADE_JOURNAL append/iterate from cross-thread RuntimeError
 _SKIP_REASONS_LOCK = _threading.Lock()   # protects _SKIP_REASONS_TODAY from background + learning thread races
 _LEARNING_STATE_LOCK = _threading.Lock() # protects _LEARNING_STATE updates from the dedicated learning thread
+_PERF_HISTORY_LOCK = _threading.Lock()   # protects _PERF_HISTORY from concurrent read/write
 _EVENTS_BET_TODAY = set()  # shared across all strategies
 _similarity_local = _threading.local()
 
@@ -8201,9 +8209,10 @@ def check_settlements_and_reinvest():
             # Trigger immediate rescan to reinvest
             return new_settlements
 
-        # Cap known_settled to prevent memory bloat
+        # Cap known_settled to prevent memory bloat — keep most recent entries
         if len(_known_settled) > 500:
-            _known_settled.clear()
+            _to_keep = set(list(_known_settled)[-300:])
+            _known_settled.intersection_update(_to_keep)
 
         return []
     except Exception as e:
@@ -8757,13 +8766,14 @@ def _background_loop():
                     "value": 500.00,
                     "cash": 500.00,
                 })
-            _PERF_HISTORY.append({
-                "ts": _now_pt.isoformat(),
-                "value": round(_chart_value, 2),
-                "cash": round(_bal_early, 2),
-            })
-            if len(_PERF_HISTORY) > _PERF_HISTORY_MAX:
-                _PERF_HISTORY[:] = _PERF_HISTORY[-_PERF_HISTORY_MAX:]
+            with _PERF_HISTORY_LOCK:
+                _PERF_HISTORY.append({
+                    "ts": _now_pt.isoformat(),
+                    "value": round(_chart_value, 2),
+                    "cash": round(_bal_early, 2),
+                })
+                if len(_PERF_HISTORY) > _PERF_HISTORY_MAX:
+                    _PERF_HISTORY[:] = _PERF_HISTORY[-_PERF_HISTORY_MAX:]
         print(f"[BG] Early cache warm: ${_bal_early:.2f} cash, {len(_pos_early)} positions, P&L ${_early_realized:+.2f}, chart pts={len(_PERF_HISTORY)}")
         # Pre-warm settled cache so Performance tab loads instantly
         try:
@@ -9014,7 +9024,7 @@ def _background_loop():
                 # Calculate true daily P&L: today's settled results + current unrealized
                 _daily_pnl = _total_unrealized
                 try:
-                    _today_str = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+                    _today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
                     for _jt in _TRADE_JOURNAL:
                         if _jt.get("result") is not None and str(_jt.get("settlement_time") or "")[:10] == _today_str:
                             _daily_pnl += float(_jt.get("pnl") or 0)
@@ -9059,13 +9069,14 @@ def _background_loop():
                 _now_perf_ts = datetime.datetime.now(tz=_PACIFIC).isoformat()[:18]
                 _chart_val2 = _pf_value2 if _pf_value2 > 0 else _bal2
                 if _now_perf_ts != _last_perf_ts and _chart_val2 > 0:
-                    _PERF_HISTORY.append({
-                        "ts": datetime.datetime.now(tz=_PACIFIC).isoformat(),
-                        "value": round(_chart_val2, 2),
-                        "cash": round(_bal2, 2),
-                    })
-                    if len(_PERF_HISTORY) > _PERF_HISTORY_MAX:
-                        _PERF_HISTORY[:] = _PERF_HISTORY[-_PERF_HISTORY_MAX:]
+                    with _PERF_HISTORY_LOCK:
+                        _PERF_HISTORY.append({
+                            "ts": datetime.datetime.now(tz=_PACIFIC).isoformat(),
+                            "value": round(_chart_val2, 2),
+                            "cash": round(_bal2, 2),
+                        })
+                        if len(_PERF_HISTORY) > _PERF_HISTORY_MAX:
+                            _PERF_HISTORY[:] = _PERF_HISTORY[-_PERF_HISTORY_MAX:]
             except Exception:
                 pass
             # Auto-exit DISABLED — all positions settle naturally at $0 or $1
@@ -9084,10 +9095,21 @@ def _background_loop():
         _time.sleep(_sleep_time)
 
 _bg_thread = None
+_cg_thread_ref = None
+_learn_thread_ref = None
 
 def _ensure_bg_thread():
-    global _bg_thread
+    global _bg_thread, _cg_thread_ref, _learn_thread_ref, _closegame_loop_fn, _learning_loop_fn
     if _bg_thread is not None and _bg_thread.is_alive():
+        # Main thread alive — check secondary threads
+        if _cg_thread_ref is not None and not _cg_thread_ref.is_alive():
+            print("[WATCHDOG] Close-Game thread died — restarting")
+            _cg_thread_ref = threading.Thread(target=_closegame_loop_fn, daemon=True)
+            _cg_thread_ref.start()
+        if _learn_thread_ref is not None and not _learn_thread_ref.is_alive():
+            print("[WATCHDOG] Learning thread died — restarting")
+            _learn_thread_ref = threading.Thread(target=_learning_loop_fn, daemon=True)
+            _learn_thread_ref.start()
         return
     _bg_thread = threading.Thread(target=_background_loop, daemon=True)
     _bg_thread.start()
@@ -9124,8 +9146,9 @@ def _ensure_bg_thread():
                 print(f"[CLOSEGAME] Error: {e}")
             _time.sleep(10)
 
-    _cg_thread = threading.Thread(target=_closegame_loop, daemon=True)
-    _cg_thread.start()
+    _closegame_loop_fn = _closegame_loop
+    _cg_thread_ref = threading.Thread(target=_closegame_loop, daemon=True)
+    _cg_thread_ref.start()
     print("[STARTUP] Close-Game Sniper thread started (10s)")
 
     # Dedicated learning thread — runs independently so a stuck trading loop
@@ -9155,9 +9178,10 @@ def _ensure_bg_thread():
                 print(f"[LEARNING] Error: {_le}")
             _time.sleep(600)  # 10 minutes — was 3min, too frequent and blocked strategy threads
 
-    _learn_thread = threading.Thread(target=_learning_loop, daemon=True)
-    _learn_thread.start()
-    print("[STARTUP] Dedicated learning thread started (3 min)")
+    _learning_loop_fn = _learning_loop
+    _learn_thread_ref = threading.Thread(target=_learning_loop, daemon=True)
+    _learn_thread_ref.start()
+    print("[STARTUP] Dedicated learning thread started (10 min)")
 
     # Start keep-alive watchdog (only once)
     global _keepalive_thread
@@ -9959,6 +9983,7 @@ _SETTLED_CACHE = {"data": None, "ts": 0}
 _SETTLED_CACHE_TTL = 120  # 2 minutes — balance freshness vs API cost
 _GAME_RESULT_CACHE = {}  # {ticker: {"result": "yes"/"no", "title": "..."}} — persists across settled calls
 _TITLE_CACHE = {}  # {ticker: "market title"} — persists across settled calls
+_CACHE_MAX_SIZE = 800  # evict oldest when caches exceed this size
 
 @app.route("/settled")
 def settled_positions():
@@ -10461,6 +10486,15 @@ def settled_positions():
                             _title_cache[tk] = title
                     except Exception:
                         pass
+                # Evict oldest entries if caches grow too large
+                if len(_GAME_RESULT_CACHE) > _CACHE_MAX_SIZE:
+                    _to_del = sorted(_GAME_RESULT_CACHE.keys())[:len(_GAME_RESULT_CACHE) - _CACHE_MAX_SIZE + 100]
+                    for _dk in _to_del:
+                        _GAME_RESULT_CACHE.pop(_dk, None)
+                if len(_TITLE_CACHE) > _CACHE_MAX_SIZE:
+                    _to_del2 = sorted(_TITLE_CACHE.keys())[:len(_TITLE_CACHE) - _CACHE_MAX_SIZE + 100]
+                    for _dk2 in _to_del2:
+                        _TITLE_CACHE.pop(_dk2, None)
             print(f"[SETTLED] Parallel-fetched {len(_uncached_tickers)} market results, cache now has {len(_GAME_RESULT_CACHE)} entries")
 
         _debug_logged = 0
@@ -12067,7 +12101,8 @@ def performance_history():
     # Optional query params for filtering
     since = request.args.get("since", "")  # ISO date string e.g. "2026-04-05"
     limit = int(request.args.get("limit", "0") or "0")
-    pts = _PERF_HISTORY
+    with _PERF_HISTORY_LOCK:
+        pts = list(_PERF_HISTORY)  # snapshot under lock
     if since:
         pts = [p for p in pts if p["ts"][:10] >= since]
     if limit and limit > 0:
@@ -13337,6 +13372,12 @@ def _get_espn_win_prob(event_id, league, home_team=True):
                     return prob
     except Exception:
         pass
+    # Evict expired entries periodically
+    if len(_win_prob_cache) > 500:
+        _exp_cutoff = now - _WIN_PROB_TTL * 2
+        _expired = [k for k, v in _win_prob_cache.items() if v["ts"] < _exp_cutoff]
+        for _ek in _expired:
+            _win_prob_cache.pop(_ek, None)
     return None  # Caller should fall back to _lookup_win_prob
 
 
@@ -14839,7 +14880,7 @@ def seventy_fivers_stats():
 @app.route("/moonshark")
 def moonshark_stats():
     """Return MoonShark strategy stats: today's trades, daily spend, lifetime stats, active positions, and full trade history including manually placed low-price bets."""
-    today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+    today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
 
     # Today's MoonShark trades
     todays_trades = BOT_STATE.get("moonshark_trades_today", [])
@@ -17622,9 +17663,10 @@ function fmtTimeSec(ts) {
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
   document.querySelectorAll('.tab-content').forEach(function(t) { t.classList.remove('active'); });
-  document.getElementById('tab-' + name).classList.add('active');
+  var tabEl = document.getElementById('tab-' + name);
+  if (tabEl) tabEl.classList.add('active');
   var tabs = document.querySelectorAll('.tab');
-  tabs.forEach(function(t) { if (t.getAttribute('onclick').indexOf(name) >= 0) t.classList.add('active'); });
+  tabs.forEach(function(t) { var oc = t.getAttribute('onclick'); if (oc && oc.indexOf(name) >= 0) t.classList.add('active'); });
   // Lazy-load tab data
   if (name === 'positions') { loadActivityDash(); loadBetsFeedDash(); }
   if (name === 'moonshark') loadMoonshark();
@@ -17948,13 +17990,11 @@ async function loadPortfolio() {
 
     var uPnl = data.total_unrealized_usd || 0;
     var uEl = document.getElementById('pf-unrealized');
-    uEl.textContent = (uPnl >= 0 ? '+$' : '-$') + Math.abs(uPnl).toFixed(2);
-    uEl.style.color = uPnl >= 0 ? '#00dc5a' : '#ff5000';
+    if (uEl) { uEl.textContent = (uPnl >= 0 ? '+$' : '-$') + Math.abs(uPnl).toFixed(2); uEl.style.color = uPnl >= 0 ? '#00dc5a' : '#ff5000'; }
 
     var rPnl = data.total_realized_usd || 0;
     var rEl = document.getElementById('pf-realized');
-    rEl.textContent = (rPnl >= 0 ? '+$' : '-$') + Math.abs(rPnl).toFixed(2);
-    rEl.style.color = rPnl >= 0 ? '#00dc5a' : '#ff5000';
+    if (rEl) { rEl.textContent = (rPnl >= 0 ? '+$' : '-$') + Math.abs(rPnl).toFixed(2); rEl.style.color = rPnl >= 0 ? '#00dc5a' : '#ff5000'; }
 
     // Use /settled endpoint for accurate win rate (same source as scorecard)
     // Use AbortController for 15s timeout — /settled can be slow after deploy
@@ -18011,8 +18051,7 @@ async function loadPortfolio() {
       totalPlEl.style.color = allTimePl >= 0 ? '#00dc5a' : '#ff5000';
     }
     var wrEl = document.getElementById('pf-winrate');
-    wrEl.textContent = wr.toFixed(0) + '%';
-    wrEl.style.color = wr >= 60 ? '#00dc5a' : wr >= 40 ? '#ffb400' : '#ff5000';
+    if (wrEl) { wrEl.textContent = wr.toFixed(0) + '%'; wrEl.style.color = wr >= 60 ? '#00dc5a' : wr >= 40 ? '#ffb400' : '#ff5000'; }
     var wr7d = document.getElementById('pf-winrate-7d');
     if (wr7d) {
       // Show Day 1+ wins/losses from /settled (already fetched above)
