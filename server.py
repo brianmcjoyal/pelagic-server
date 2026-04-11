@@ -10665,13 +10665,24 @@ def settled_positions():
             c["win_rate"] = round(c["wins"] / max(1, c["wins"] + c["losses"]) * 100, 1)
             c["pnl_usd"] = round(c["pnl_usd"], 2)
 
+        # Bot-only filtered stats (excludes manual, moonshark_manual, wta_wheel, quant, kalshi_fill)
+        _bot_exclude = {'manual', 'moonshark_manual', 'wta_wheel', 'quant'}
+        _bot_settled = [s for s in settled if s.get("strategy", "") not in _bot_exclude and s.get("source") != "kalshi_fill"]
+        _bot_wins = sum(1 for s in _bot_settled if s.get("won") is True)
+        _bot_losses = sum(1 for s in _bot_settled if s.get("won") is False)
+        _bot_pnl = round(sum(s.get("pnl_usd", 0) for s in _bot_settled), 2)
+        _bot_total = _bot_wins + _bot_losses
+
         result = {
             "settled": settled,
-            "wins": wins,
-            "losses": losses,
+            "wins": _bot_wins,
+            "losses": _bot_losses,
             "breakeven": breakeven,
-            "win_rate": round(wins / max(1, wins + losses) * 100, 1),
-            "total_pnl_usd": round(total_pnl, 2),
+            "win_rate": round(_bot_wins / max(1, _bot_total) * 100, 1),
+            "total_pnl_usd": _bot_pnl,
+            "wins_all": wins,
+            "losses_all": losses,
+            "total_pnl_all_usd": round(total_pnl, 2),
             "total_wagered_usd": round(total_wagered, 2),
             "roi_pct": roi,
             "biggest_win_usd": round(biggest_win, 2),
