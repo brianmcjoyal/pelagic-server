@@ -590,13 +590,24 @@ def _seed_perf_history_from_fills():
     import requests as _req
     import traceback
 
-    # Skip if we already have multi-day history
-    if len(_PERF_HISTORY) >= 2:
+    # Skip if we already have dense multi-day history (no gaps > 1 day between points)
+    if len(_PERF_HISTORY) >= 10:
         try:
-            first_date = _PERF_HISTORY[0].get("ts", "")[:10]
-            last_date = _PERF_HISTORY[-1].get("ts", "")[:10]
-            if first_date and last_date and first_date != last_date:
-                print(f"[PERF-SEED] Already have multi-day history ({first_date} to {last_date}, {len(_PERF_HISTORY)} pts), skipping")
+            _gap_ok = True
+            for _gi in range(1, min(len(_PERF_HISTORY), 50)):
+                _t1 = _PERF_HISTORY[_gi - 1].get("ts", "")[:10]
+                _t2 = _PERF_HISTORY[_gi].get("ts", "")[:10]
+                if _t1 and _t2:
+                    _d1 = datetime.datetime.strptime(_t1, "%Y-%m-%d")
+                    _d2 = datetime.datetime.strptime(_t2, "%Y-%m-%d")
+                    if abs((_d2 - _d1).days) > 1:
+                        _gap_ok = False
+                        print(f"[PERF-SEED] Found {abs((_d2 - _d1).days)}-day gap between {_t1} and {_t2} — re-running backfill")
+                        break
+            if _gap_ok:
+                first_date = _PERF_HISTORY[0].get("ts", "")[:10]
+                last_date = _PERF_HISTORY[-1].get("ts", "")[:10]
+                print(f"[PERF-SEED] Already have dense history ({first_date} to {last_date}, {len(_PERF_HISTORY)} pts), skipping")
                 return
         except Exception:
             pass
@@ -684,27 +695,36 @@ def _seed_perf_history_from_fills():
     })
 
     today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+    # Also fill in non-trading dates between first and last trading date
+    # so the chart has continuous data for all time ranges
+    if len(sorted_dates) >= 2:
+        _first_d = datetime.datetime.strptime(sorted_dates[0], "%Y-%m-%d")
+        _last_d = datetime.datetime.strptime(today_str, "%Y-%m-%d")
+        _all_days = []
+        _d = _first_d
+        while _d <= _last_d:
+            _all_days.append(_d.strftime("%Y-%m-%d"))
+            _d += datetime.timedelta(days=1)
+        sorted_dates = _all_days
+        num_days = max(1, len(sorted_dates))
+
     for i, date_str in enumerate(sorted_dates):
         # Skip today — real-time data covers it
         if date_str == today_str:
             continue
         progress_start = i / num_days
         progress_end = (i + 1) / num_days
-        val_morning = round(DAY1_VALUE + total_pnl * progress_start, 2)
-        val_evening = round(DAY1_VALUE + total_pnl * progress_end, 2)
 
-        # Morning point
-        historical_points.append({
-            "ts": f"{date_str}T09:00:00-07:00",
-            "value": val_morning,
-            "cash": val_morning,
-        })
-        # Evening point
-        historical_points.append({
-            "ts": f"{date_str}T22:00:00-07:00",
-            "value": val_evening,
-            "cash": val_evening,
-        })
+        # Generate 4 points per day (every 4 hours from 8am-8pm) for smoother chart
+        _hours = [8, 12, 16, 20]
+        for _hi, _hr in enumerate(_hours):
+            _frac = progress_start + (progress_end - progress_start) * (_hi / len(_hours))
+            _val = round(DAY1_VALUE + total_pnl * _frac, 2)
+            historical_points.append({
+                "ts": f"{date_str}T{_hr:02d}:00:00-07:00",
+                "value": _val,
+                "cash": _val,
+            })
 
     if not historical_points:
         print("[PERF-SEED] No historical points generated")
