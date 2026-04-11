@@ -792,25 +792,33 @@ def _rebuild_journal_from_kalshi():
                 trade_map[t["ticker"]] = t
 
         new_count = 0
-        # Fetch market titles in batch (cap at 50 unique to avoid slow startup)
+        # Fetch market titles + results in parallel (needed for zero-PnL reconstruction)
         unique_tickers = list(set(
             p.get("ticker", "") for p in positions_list
             if p.get("ticker", "") not in existing_tickers
         ))
         title_map = {}
-        for tk in unique_tickers[:50]:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        def _fetch_mkt_info(tk):
             try:
                 mkt_path = f"/markets/{tk}"
                 mkt_h = signed_headers("GET", mkt_path)
                 mkt_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + mkt_path, headers=mkt_h, timeout=5)
                 if mkt_r.ok:
                     mkt = mkt_r.json().get("market", {})
-                    title_map[tk] = {
-                        "title": mkt.get("title", tk),
-                        "close_time": mkt.get("close_time", ""),
-                    }
+                    return (tk, mkt.get("title", tk), mkt.get("close_time", ""), mkt.get("result", ""))
             except Exception:
                 pass
+            return (tk, tk, "", "")
+        with ThreadPoolExecutor(max_workers=15) as executor:
+            _mkt_futs = {executor.submit(_fetch_mkt_info, tk): tk for tk in unique_tickers[:200]}
+            for future in as_completed(_mkt_futs, timeout=60):
+                try:
+                    tk, title, close_time, result = future.result()
+                    title_map[tk] = {"title": title, "close_time": close_time, "result": result}
+                except Exception:
+                    pass
+        print(f"[JOURNAL-REBUILD] Fetched market info for {len(title_map)}/{len(unique_tickers)} tickers")
 
         # Rebuild category stats from scratch using ALL settled positions
         _CATEGORY_STATS.clear()
@@ -830,20 +838,6 @@ def _rebuild_journal_from_kalshi():
             else:
                 title = ticker
 
-            # Update category stats for ALL settled positions
-            cat = classify_market_category(title, ticker)
-            if cat not in _CATEGORY_STATS:
-                _CATEGORY_STATS[cat] = {"wins": 0, "losses": 0, "pnl": 0.0}
-            if won:
-                _CATEGORY_STATS[cat]["wins"] += 1
-            else:
-                _CATEGORY_STATS[cat]["losses"] += 1
-            _CATEGORY_STATS[cat]["pnl"] += pnl_usd
-
-            # Add to journal if not already present
-            if ticker in existing_tickers:
-                continue
-
             # Build journal entry from settled position data
             side = pos.get("side", "")
             count = 0
@@ -851,19 +845,65 @@ def _rebuild_journal_from_kalshi():
                 count = int(float(str(pos.get("total_count_fp") or pos.get("total_count") or 0)))
             except Exception:
                 pass
-            entry_cents = 0
+            _avg_yes_d = 0.0
+            _avg_no_d = 0.0
             try:
-                if side == "yes":
-                    entry_cents = int(round(float(str(
-                        pos.get("average_yes_price_dollars") or pos.get("average_yes_price") or 0
-                    )) * 100))
-                else:
-                    entry_cents = int(round(float(str(
-                        pos.get("average_no_price_dollars") or pos.get("average_no_price") or 0
-                    )) * 100))
+                _avg_yes_d = float(str(pos.get("average_yes_price_dollars") or pos.get("average_yes_price") or 0))
             except Exception:
                 pass
+            try:
+                _avg_no_d = float(str(pos.get("average_no_price_dollars") or pos.get("average_no_price") or 0))
+            except Exception:
+                pass
+            # Determine side from average prices if not set
+            if not side:
+                if _avg_yes_d > 0 and _avg_no_d == 0:
+                    side = "yes"
+                elif _avg_no_d > 0 and _avg_yes_d == 0:
+                    side = "no"
+                elif ticker in trade_map:
+                    side = trade_map[ticker].get("side") or "yes"
+                else:
+                    side = "yes"
+            entry_cents = 0
+            try:
+                if side == "yes" and _avg_yes_d > 0:
+                    entry_cents = int(round(_avg_yes_d * 100))
+                elif side == "no" and _avg_no_d > 0:
+                    entry_cents = int(round(_avg_no_d * 100))
+            except Exception:
+                pass
+            # Fall back to trade data for entry price
+            if entry_cents == 0 and ticker in trade_map:
+                entry_cents = trade_map[ticker].get("price_cents", 0) or 0
+                if count == 0:
+                    count = trade_map[ticker].get("count", 0) or 0
             cost_usd = (entry_cents * count) / 100
+
+            # --- Reconstruct P&L from market result if Kalshi zeroed it ---
+            if abs(pnl_usd) < 0.005 and count > 0 and entry_cents > 0:
+                _mkt_result = title_map.get(ticker, {}).get("result", "")
+                if _mkt_result in ("yes", "no"):
+                    if _mkt_result == "yes":
+                        pnl_cents = (100 - entry_cents) * count if side == "yes" else -entry_cents * count
+                    else:
+                        pnl_cents = -entry_cents * count if side == "yes" else (100 - entry_cents) * count
+                    pnl_usd = pnl_cents / 100
+                    won = pnl_usd > 0.005
+
+            # Update category stats for ALL settled positions
+            cat = classify_market_category(title, ticker)
+            if cat not in _CATEGORY_STATS:
+                _CATEGORY_STATS[cat] = {"wins": 0, "losses": 0, "pnl": 0.0}
+            if pnl_usd > 0.005:
+                _CATEGORY_STATS[cat]["wins"] += 1
+            elif pnl_usd < -0.005:
+                _CATEGORY_STATS[cat]["losses"] += 1
+            _CATEGORY_STATS[cat]["pnl"] += pnl_usd
+
+            # Add to journal if not already present
+            if ticker in existing_tickers:
+                continue
 
             # Determine bot version from trade history
             trade_rec = trade_map.get(ticker, {})
@@ -888,7 +928,7 @@ def _rebuild_journal_from_kalshi():
                 "entry_hour": _extract_hour_from_timestamp(created or close_time or ""),
                 "entry_day": "",
                 "entry_date": (created or "")[:10] if created else "",
-                "result": "win" if won else ("loss" if pnl_usd < -0.005 else "even"),
+                "result": "win" if pnl_usd > 0.005 else ("loss" if pnl_usd < -0.005 else "even"),
                 "pnl_usd": round(pnl_usd, 2),
                 "settlement_time": close_time or "",
                 "hold_duration_mins": None,
@@ -10656,6 +10696,216 @@ def settled_positions():
             _fills_added += 1
         if _fills_added:
             print(f"[SETTLED] Added {_fills_added} settled results from trade data + market results")
+
+        # ---------- Stage 3: Reconstruct zero-PnL settled positions ----------
+        # Kalshi zeroes realized_pnl on old settled positions.  Stages 1 & 2 may
+        # miss them if fills/trade data is also unavailable.  Here we iterate over
+        # ALL settled positions from the Kalshi positions API and reconstruct any
+        # that are still missing, using the position's own average-price / count
+        # fields (which Kalshi preserves) plus the market result.
+        _settled_tickers = {s["ticker"] for s in settled}
+        _zero_pnl_candidates = [
+            p for p in positions_list
+            if p.get("settlement_status") == "settled"
+            and p.get("ticker", "") not in _settled_tickers
+            and p.get("ticker", "") not in _seen_tickers
+            and abs(_parse_kalshi_dollars(p.get("realized_pnl_dollars") or p.get("realized_pnl"))) < 1
+        ]
+        _reconstructed = 0
+        if _zero_pnl_candidates:
+            # Build trade-data lookup for fallback side / price / strategy
+            _zp_trade_map = {}
+            for _at in BOT_STATE.get("all_trades", []):
+                _tk = _at.get("ticker", "")
+                if _tk and _at.get("action", "buy") == "buy" and _tk not in _zp_trade_map:
+                    _zp_trade_map[_tk] = _at
+            for _jt in _TRADE_JOURNAL:
+                _tk = _jt.get("ticker", "")
+                if _tk and _tk not in _zp_trade_map and (_jt.get("count", 0) or 0) > 0:
+                    _zp_trade_map[_tk] = _jt
+
+            # Batch-fetch market results for uncached tickers
+            _zp_tickers = list(set(p.get("ticker", "") for p in _zero_pnl_candidates if p.get("ticker")))
+            _zp_uncached = [t for t in _zp_tickers if t not in _GAME_RESULT_CACHE]
+            if _zp_uncached:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                def _fetch_zp_result(tk):
+                    try:
+                        _h = signed_headers("GET", f"/markets/{tk}")
+                        _r = requests.get(
+                            KALSHI_BASE_URL + KALSHI_API_PREFIX + f"/markets/{tk}",
+                            headers=_h, timeout=5,
+                        )
+                        if _r.ok:
+                            _m = _r.json().get("market", {})
+                            return (tk, _m.get("result", ""), _m.get("title", tk))
+                    except Exception:
+                        pass
+                    return (tk, "", tk)
+                with ThreadPoolExecutor(max_workers=15) as executor:
+                    _zfuts = {executor.submit(_fetch_zp_result, tk): tk for tk in _zp_uncached[:200]}
+                    for future in as_completed(_zfuts, timeout=45):
+                        try:
+                            tk, result, title = future.result()
+                            if result:
+                                _GAME_RESULT_CACHE[tk] = {"result": result, "title": title}
+                                _title_cache[tk] = title
+                        except Exception:
+                            pass
+                print(f"[SETTLED] Stage 3: fetched {len(_zp_uncached)} market results for zero-PnL positions")
+
+            for pos in _zero_pnl_candidates:
+                ticker = pos.get("ticker", "")
+                if not ticker:
+                    continue
+                # Date filter
+                _zp_trade_date = _trade_dates.get(ticker, "")
+                if _zp_trade_date and _zp_trade_date < _day1_cutoff:
+                    continue
+                # Market result required
+                _mr = _GAME_RESULT_CACHE.get(ticker, {}).get("result", "")
+                if _mr not in ("yes", "no"):
+                    continue
+
+                # --- Determine side, count, entry_cents from position data ---
+                _zp_side = ""
+                _zp_count = 0
+                try:
+                    _zp_count = int(float(str(pos.get("total_count_fp") or pos.get("total_count") or 0)))
+                except Exception:
+                    pass
+                _zp_avg_yes = 0.0
+                _zp_avg_no = 0.0
+                try:
+                    _zp_avg_yes = float(str(pos.get("average_yes_price_dollars") or pos.get("average_yes_price") or 0))
+                except Exception:
+                    pass
+                try:
+                    _zp_avg_no = float(str(pos.get("average_no_price_dollars") or pos.get("average_no_price") or 0))
+                except Exception:
+                    pass
+                if _zp_avg_yes > 0 and _zp_avg_no == 0:
+                    _zp_side = "yes"
+                elif _zp_avg_no > 0 and _zp_avg_yes == 0:
+                    _zp_side = "no"
+
+                # Fall back to trade data
+                _zp_strategy = "unknown"
+                _zp_entry_time = ""
+                _zp_td = _zp_trade_map.get(ticker)
+                if _zp_td:
+                    if not _zp_side:
+                        _zp_side = _zp_td.get("side") or _zp_side
+                    _zp_strategy = _zp_td.get("strategy") or "unknown"
+                    _zp_entry_time = _zp_td.get("timestamp", "") or _zp_td.get("entry_time", "")
+                    if _zp_count == 0:
+                        try:
+                            _zp_count = int(float(str(_zp_td.get("count", 0) or 0)))
+                        except Exception:
+                            pass
+                # Check all_trades for strategy if still unknown
+                if _zp_strategy == "unknown" or not _zp_side:
+                    for _t in BOT_STATE.get("all_trades", []):
+                        if _t.get("ticker") == ticker:
+                            _zp_strategy = _t.get("strategy") or _zp_strategy
+                            if not _zp_side:
+                                _zp_side = _t.get("side") or _zp_side
+                            break
+                if not _zp_side:
+                    _zp_side = "yes"  # last resort default
+
+                # Compute entry_cents
+                _zp_entry_cents = 0
+                if _zp_side == "yes" and _zp_avg_yes > 0:
+                    _zp_entry_cents = int(round(_zp_avg_yes * 100))
+                elif _zp_side == "no" and _zp_avg_no > 0:
+                    _zp_entry_cents = int(round(_zp_avg_no * 100))
+                # Fall back to trade data
+                if _zp_entry_cents == 0 and _zp_td:
+                    try:
+                        _zp_entry_cents = int(float(str(_zp_td.get("price_cents", 0) or _zp_td.get("price_at_entry", 0) or 0)))
+                    except Exception:
+                        pass
+                    if _zp_count == 0:
+                        try:
+                            _zp_count = int(float(str(_zp_td.get("count", 0) or 0)))
+                        except Exception:
+                            pass
+
+                if _zp_count == 0 or _zp_entry_cents == 0:
+                    continue  # Can't reconstruct without count and entry price
+
+                # Compute P&L from market result + side + entry
+                if _mr == "yes":
+                    _zp_pnl_cents = (100 - _zp_entry_cents) * _zp_count if _zp_side == "yes" else -_zp_entry_cents * _zp_count
+                else:  # "no"
+                    _zp_pnl_cents = -_zp_entry_cents * _zp_count if _zp_side == "yes" else (100 - _zp_entry_cents) * _zp_count
+
+                _zp_pnl = _zp_pnl_cents / 100
+                _zp_won = None
+                _zp_cost = (_zp_entry_cents * _zp_count) / 100
+                total_pnl += _zp_pnl
+                total_wagered += _zp_cost
+                if _zp_pnl > 0.005:
+                    wins += 1
+                    _zp_won = True
+                    biggest_win = max(biggest_win, _zp_pnl)
+                elif _zp_pnl < -0.005:
+                    losses += 1
+                    _zp_won = False
+                    biggest_loss = min(biggest_loss, _zp_pnl)
+                else:
+                    breakeven += 1
+
+                _zp_title = _get_title(ticker)
+                _zp_cat = classify_market_category(_zp_title, ticker)
+
+                # Enrich from trade journal
+                _zp_edge = []
+                _zp_espn = None
+                _zp_conv = 0
+                _zp_gs = ""
+                for _jrec in _TRADE_JOURNAL:
+                    if _jrec.get("ticker") == ticker:
+                        _zp_strategy = _jrec.get("strategy", _zp_strategy)
+                        _zp_entry_time = _jrec.get("entry_time", _zp_entry_time)
+                        if _jrec.get("espn_edge"):
+                            try:
+                                _zp_espn = float(_jrec["espn_edge"])
+                                _zp_edge.append(f"ESPN edge: +{_zp_espn:.1%}")
+                            except (ValueError, TypeError):
+                                pass
+                        if _jrec.get("game_state") == "in":
+                            _zp_gs = "live"
+                        elif _jrec.get("game_state") == "post":
+                            _zp_gs = "post"
+                        break
+                if not _zp_edge:
+                    _zp_edge.append(f"Entry at {_zp_entry_cents}c (reconstructed)")
+
+                settled.append({
+                    "ticker": ticker,
+                    "title": _zp_title,
+                    "pnl_usd": round(_zp_pnl, 2),
+                    "won": _zp_won,
+                    "total_traded": round(_zp_cost, 2),
+                    "category": _zp_cat,
+                    "strategy": _zp_strategy,
+                    "side": _zp_side,
+                    "count": _zp_count,
+                    "entry_cents": _zp_entry_cents,
+                    "trade_date": _zp_trade_date or "",
+                    "settle_time": "",
+                    "edge_reasons": _zp_edge,
+                    "espn_edge": round(_zp_espn, 4) if _zp_espn else None,
+                    "conviction": _zp_conv,
+                    "game_state_at_entry": _zp_gs,
+                    "entry_time": _zp_entry_time,
+                })
+                _reconstructed += 1
+                _included += 1
+
+            print(f"[SETTLED] Stage 3: reconstructed {_reconstructed}/{len(_zero_pnl_candidates)} zero-PnL settled positions")
 
         # Sort by trade_date descending (most recently placed first)
         # Note: settle_time uses market close_time which can be far-future (2099 etc), so not reliable for sort
@@ -21302,28 +21552,28 @@ async function loadBrain(force) {
     if (adaptiveEl) {
       var STRAT_INFO = {
         'live_sniper': {
-          tagline: 'High-probability favorites in live sports',
-          body: 'Targets 70-90c favorites in LIVE sports markets (NBA, NFL, NHL, soccer). Only takes vetted markets with real volume. High win rate with a small per-trade edge, earning roughly 10-30c per contract at settlement. Adaptive conviction and edge gates tighten after losses and loosen after wins.'
+          tagline: 'Exploit high-implied-probability contracts in live markets',
+          body: 'Identifies contracts priced between 70-90c on live sporting events where the implied probability exceeds the market price by a measurable edge. Executes only in validated, liquid markets. Yields a high win rate with consistent 10-30c profit per contract. Conviction and edge thresholds adjust dynamically based on recent performance.'
         },
         'moonshark': {
-          tagline: 'Cheap longshots on live sports underdogs',
-          body: 'Lottery-ticket strategy. Small bets on 10-30c underdog outcomes in liquid, closing-soon live sports markets. Win rate is low but each winner pays 70-90c per contract. Hard daily spend and trade-count caps keep variance bounded.'
+          tagline: 'Asymmetric payoff capture on underpriced outcomes',
+          body: 'Acquires low-cost contracts (10-30c) on underdog outcomes in liquid live markets nearing expiry. Designed for asymmetric returns \u2014 low hit rate offset by 70-90c payouts per winner. Position sizing and daily exposure are hard-capped to manage tail risk.'
         },
         'closegame': {
-          tagline: 'Buy underdogs late in close games',
-          body: 'Kalshi prices lag live action. When a team is down by 5 or fewer in Q4 at around 35c, the true win probability is often 40-45%. This strategy only fires when the game is BOTH tight AND late, targeting that lag-driven mispricing.'
+          tagline: 'Late-game mispricing in contested matchups',
+          body: 'Targets a known latency gap between live game state and market pricing. In contests where the trailing team is within 5 points during the final period, implied probabilities tend to underprice comeback odds. Executes only when both conditions \u2014 close margin and late stage \u2014 are met simultaneously.'
         },
         'floor': {
-          tagline: 'Safety-net quota strategy',
-          body: 'Backup that activates only when the daily bet count drops below DAILY_BET_FLOOR. Uses relaxed filters to guarantee a minimum activity level so the trade journal and learning engine always have fresh data. Every floor bet is small and journaled.'
+          tagline: 'Minimum activity threshold strategy',
+          body: 'Activates only when daily trade volume falls below a configured floor. Ensures consistent data flow for the learning engine by placing small, filtered positions during low-activity periods. All executions are logged and size-constrained.'
         },
         'momentum_swing': {
-          tagline: 'Fade momentum overreactions in NBA / NCAAB / NHL',
-          body: 'Uses the ESPN live win-probability model as ground truth. When Kalshi has the trailing team priced well below what ESPN thinks, that is usually an overreaction to a recent run. The strategy buys the undervalued side and holds for the mean-reversion swing.'
+          tagline: 'Mean-reversion on live probability divergence',
+          body: 'Compares Kalshi contract prices against ESPN real-time win probability models. When scoring runs cause the market to overshoot the model-implied fair value, the strategy takes the contrarian side and holds for reversion. Executes across NBA, NCAAB, and NHL markets.'
         },
         'goalie_pulled': {
-          tagline: 'NHL endgame fade when a goalie is (likely) pulled',
-          body: 'NHL period-3 games within 2 goals and under 3 minutes remaining are in goalie-pull territory. When the ESPN live win model diverges from Kalshi by the edge threshold, the strategy buys the mispriced side. Rare but high-edge setups.'
+          tagline: 'NHL empty-net scenario exploitation',
+          body: 'Targets a structural mispricing that occurs when NHL games enter likely goalie-pull situations \u2014 period 3, deficit within 2 goals, under 3 minutes remaining. Compares ESPN model output against Kalshi pricing to isolate edge. Low frequency but high expected value per trade.'
         }
       };
 
