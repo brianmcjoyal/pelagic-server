@@ -17270,7 +17270,10 @@ a:hover { color: #7da5f5; }
   <!-- Performance Line Chart -->
   <div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:14px;margin-bottom:12px;position:relative">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-      <div style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Portfolio Performance</div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Portfolio Performance</span>
+        <span id="perf-chart-change-header" style="font-size:11px;font-weight:700;color:#666">--</span>
+      </div>
       <div style="display:flex;gap:6px" id="perf-chart-range">
         <button onclick="setPerfRange('1h')" class="refresh-btn perf-range-btn" data-range="1h" style="font-size:9px;padding:2px 8px">1H</button>
         <button onclick="setPerfRange('6h')" class="refresh-btn perf-range-btn" data-range="6h" style="font-size:9px;padding:2px 8px">6H</button>
@@ -19052,6 +19055,8 @@ function drawPerfLineChart() {
     if (startLabel) startLabel.textContent = '--';
     if (endLabel) endLabel.textContent = '--';
     if (changeLabel) { changeLabel.textContent = 'Waiting for data'; changeLabel.style.color = '#666'; }
+    var _hc = document.getElementById('perf-chart-change-header');
+    if (_hc) { _hc.textContent = '--'; _hc.style.color = '#666'; }
     return;
   }
 
@@ -19153,9 +19158,16 @@ function drawPerfLineChart() {
   if (endLabel) endLabel.textContent = fmtTime(pts[pts.length - 1].ts);
   var chg = lastVal - firstVal;
   var chgPct = firstVal > 0 ? (chg / firstVal * 100) : 0;
+  var chgText = (chg >= 0 ? '+$' : '-$') + Math.abs(chg).toFixed(2) + ' (' + (chgPct >= 0 ? '+' : '') + chgPct.toFixed(2) + '%)';
+  var chgColor = isUp ? '#00dc5a' : '#ff5000';
   if (changeLabel) {
-    changeLabel.textContent = (chg >= 0 ? '+$' : '-$') + Math.abs(chg).toFixed(2) + ' (' + (chgPct >= 0 ? '+' : '') + chgPct.toFixed(2) + '%)';
-    changeLabel.style.color = isUp ? '#00dc5a' : '#ff5000';
+    changeLabel.textContent = chgText;
+    changeLabel.style.color = chgColor;
+  }
+  var headerChg = document.getElementById('perf-chart-change-header');
+  if (headerChg) {
+    headerChg.textContent = chgText;
+    headerChg.style.color = chgColor;
   }
 
   // Store for hover
