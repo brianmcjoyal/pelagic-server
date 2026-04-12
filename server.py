@@ -3225,6 +3225,48 @@ def _sport_cap_ok(ticker, proposed_cost_usd):
     return True, current, cap_usd
 
 
+# ─── Temporal correlation guard ───
+# Limits simultaneous bets on the same sport within a short window.
+# If we already bet 3+ games in the same sport in the last 30 minutes,
+# require higher conviction to add more — prevents correlated blowups.
+_MAX_CONCURRENT_SAME_SPORT = 3  # after this many, require conviction >= 5
+
+def _concurrent_sport_bets(sport, window_minutes=30):
+    """Count how many bets in `sport` were placed in the last `window_minutes`."""
+    if not sport:
+        return 0
+    import time as _t
+    cutoff_iso = (datetime.datetime.now(tz=_PACIFIC) - datetime.timedelta(minutes=window_minutes)).isoformat()
+    count = 0
+    for bucket in ["snipe_trades_today", "moonshark_trades_today", "closegame_trades_today",
+                    "swing_trades_today", "goalie_trades_today", "floor_trades_today"]:
+        for t in BOT_STATE.get(bucket, []) or []:
+            t_sport = _sport_from_ticker(t.get("ticker") or "")
+            if t_sport != sport:
+                continue
+            t_time = t.get("timestamp") or t.get("time") or ""
+            if t_time and t_time >= cutoff_iso:
+                count += 1
+    return count
+
+
+def _correlation_check_ok(ticker, conviction=0):
+    """Return True if adding another bet on this sport is safe.
+    After _MAX_CONCURRENT_SAME_SPORT bets in 30min, require conviction >= 5.
+    """
+    sport = _sport_from_ticker(ticker)
+    if not sport:
+        return True
+    recent = _concurrent_sport_bets(sport)
+    if recent >= _MAX_CONCURRENT_SAME_SPORT and conviction < 5:
+        _log_activity(
+            f"CORRELATION GUARD: {ticker} — {recent} {sport.upper()} bets in last 30min, "
+            f"need conviction >= 5 (have {conviction})", "info"
+        )
+        return False
+    return True
+
+
 def _floor_mode_active():
     """True if we should relax filters because we're behind the daily floor.
 
@@ -3709,6 +3751,10 @@ def live_game_snipe():
                 except Exception:
                     pass
 
+                # Temporal correlation guard — too many same-sport bets in short window
+                if not _correlation_check_ok(ticker, conviction):
+                    continue
+
                 result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_snipe_ob_pre)
                 success = "error" not in result
 
@@ -3763,8 +3809,9 @@ def live_game_snipe():
                             _snipe_ob = analyze_orderbook(ticker)
                         except Exception:
                             pass
+                        _snipe_edge_for_journal = {"espn_implied": _snipe_our_prob, "espn_edge": (_snipe_our_prob - implied_prob_snipe) if _snipe_our_prob else None, "provider": "espn"} if _snipe_our_prob is not None else None
                         _journal_trade(ticker, title, side, price, filled, actual_cost, "live_sniper", is_live=True, close_time=mkt.get("close_time", ""), orderbook_data=_snipe_ob,
-                                       conviction=conviction, conviction_reasons=list(reasons) if reasons else [])
+                                       espn_edge_data=_snipe_edge_for_journal, conviction=conviction, conviction_reasons=list(reasons) if reasons else [])
                         _log_activity(
                             f"🎯 SNIPED! {side.upper()} {ticker} @ {price}c x{filled} "
                             f"= ${actual_cost:.2f} (potential +${potential:.2f}) | {title[:40]}",
@@ -4296,7 +4343,7 @@ def moonshark_snipe():
                 # Use real edge if available — SKIP if no ESPN data (no guessing)
                 if espn_edge is not None and espn_edge > 0:
                     edge_estimate = espn_edge
-                    win_prob = min(_ms_our_prob, 0.45)  # use sportsbook probability (adjusted for NO side)
+                    win_prob = min(_ms_our_prob, 0.60)  # cap at 60% — longshots rarely have legit higher prob
                 else:
                     # No real edge data — skip this trade instead of guessing
                     _ms_reasons["no_espn_edge"] = _ms_reasons.get("no_espn_edge", 0) + 1
@@ -4466,6 +4513,10 @@ def moonshark_snipe():
                         continue
                 except Exception:
                     pass
+
+                # Temporal correlation guard — too many same-sport bets in short window
+                if not _correlation_check_ok(ticker, ms_conviction):
+                    continue
 
                 result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob)
                 success = "error" not in result
@@ -4954,7 +5005,7 @@ def closegame_snipe():
                 profit_if_win = (100 - price) / 100.0
                 odds_decimal = profit_if_win / (price / 100.0)
                 kelly_usd = kelly_bet_size(bal, estimated_win_prob, odds_decimal)
-                bet_usd = max(3.0, min(kelly_usd, remaining / max(1, CLOSEGAME_MAX_TRADES - len(BOT_STATE.get("closegame_trades_today", []))), remaining))
+                bet_usd = min(kelly_usd, remaining / max(1, CLOSEGAME_MAX_TRADES - len(BOT_STATE.get("closegame_trades_today", []))), remaining)
                 bet_usd = min(bet_usd, BOT_CONFIG["max_bet_usd"], remaining)
                 count = max(1, int(bet_usd * 100 / price))
                 cost_usd = (price * count) / 100.0
@@ -5002,6 +5053,11 @@ def closegame_snipe():
                         if _cg_ob_imb > 0.5 and edge < 0.05:
                             _log_activity(f"CLOSEGAME SKIP: {ticker} — Orderbook opposes trade — likely stale odds (imb={_cg_ob_imb:+.2f}, edge={edge:.1%})", "info")
                             continue
+
+                # Temporal correlation guard
+                _cg_conv_est = 3 + (1 if edge >= 0.08 else 0) + (1 if edge >= 0.12 else 0)
+                if not _correlation_check_ok(ticker, _cg_conv_est):
+                    continue
 
                 result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_cg_ob)
                 success = "error" not in result
@@ -5660,7 +5716,7 @@ def momentum_swing_snipe():
             profit_if_win = (100 - price) / 100.0
             odds_decimal = profit_if_win / implied
             kelly_usd = kelly_bet_size(bal, live_prob, odds_decimal)
-            bet_usd = min(max(SWING_BET_USD, kelly_usd), remaining_daily, BOT_CONFIG["max_bet_usd"])
+            bet_usd = min(kelly_usd, remaining_daily, BOT_CONFIG["max_bet_usd"])
             if bet_usd < 1.0:
                 continue
             count = max(1, int(bet_usd * 100 / price))
@@ -5682,6 +5738,12 @@ def momentum_swing_snipe():
                 _ob = analyze_orderbook(ticker)
             except Exception:
                 pass
+
+            # Temporal correlation guard
+            _sw_conv_est = 3 + (1 if edge >= 0.10 else 0) + (1 if edge >= 0.15 else 0)
+            if not _correlation_check_ok(ticker, _sw_conv_est):
+                _release_game_exposure(event_key, cost_usd)
+                continue
 
             _log_activity(
                 f"🔄 SWING FADE: {side.upper()} {ticker} @ {price}c x{count} "
@@ -5969,7 +6031,7 @@ def goalie_pulled_snipe():
         profit_if_win = (100 - price) / 100.0
         odds_decimal = profit_if_win / best["implied"]
         kelly_usd = kelly_bet_size(bal, best["our_prob"], odds_decimal)
-        bet_usd = min(max(GOALIE_BET_USD, kelly_usd), remaining, BOT_CONFIG["max_bet_usd"])
+        bet_usd = min(kelly_usd, remaining, BOT_CONFIG["max_bet_usd"])
         if bet_usd < 1.0:
             continue
         count = max(1, int(bet_usd * 100 / price))
@@ -5990,6 +6052,12 @@ def goalie_pulled_snipe():
             _ob = analyze_orderbook(ticker)
         except Exception:
             pass
+
+        # Temporal correlation guard
+        _gl_conv_est = 3 + (1 if edge >= 0.08 else 0) + (1 if edge >= 0.12 else 0)
+        if not _correlation_check_ok(ticker, _gl_conv_est):
+            _release_game_exposure(event_key, cost_usd)
+            continue
 
         _log_activity(
             f"🥅 GOALIE FADE: {side.upper()} {ticker} @ {price}c x{count} "
@@ -6538,13 +6606,39 @@ def enhanced_auto_exit():
         pnl_pct = pos.get("pnl_pct")
         ticker = pos["ticker"]
 
-        # NEVER auto-exit same-day game/match bets — let them settle at $0 or $1
-        # MoonShark buys underdogs; selling mid-game kills the upside
+        # Game bets: only exit if trading >= 93c (near-certain win, lock in profit
+        # rather than risk a late collapse). Otherwise let them settle at $0 or $1.
         _tk = ticker.upper()
         _game_prefixes = ("KXKBL", "KXATP", "KXWTA", "KXNCAA", "KXNBA", "KXNHL",
                           "KXMLB", "KXUFC", "KXMMA", "KXEPL", "KXNFL", "KXMLS",
                           "KXWNBA", "KXSOCCER", "KXPGA", "KXNBA")
-        if any(_tk.startswith(p) for p in _game_prefixes):
+        _is_game = any(_tk.startswith(p) for p in _game_prefixes)
+        if _is_game:
+            _cur_price = pos.get("current_price") or 0
+            # Only sell game bets at 93c+ — guarantees 93%+ of max payout
+            # while protecting against late-game collapses
+            if _cur_price < 93:
+                continue
+            # This is a near-lock — sell at market to lock in ~93c+ profit
+            action = "smart_exit"
+            reason = f"Game bet at {_cur_price}c — locking in profit (>93c threshold)"
+            sell_count = pos.get("count", 0)
+            sell_price = max(1, _cur_price - 1)  # 1c below market for fast fill
+            side_exit = pos.get("side", "yes")
+            try:
+                _exit_result = sell_kalshi_position(ticker, side_exit, sell_price, sell_count)
+                _exit_filled = 0
+                try:
+                    _exit_filled = int(float(str(_exit_result.get("order", {}).get("filled_count_fp") or _exit_result.get("order", {}).get("filled_count") or 0)))
+                except Exception:
+                    pass
+                if _exit_filled > 0:
+                    _entry_p = pos.get("entry_price") or _cur_price
+                    _exit_pnl = (sell_price - _entry_p) * _exit_filled / 100
+                    _log_activity(f"🔒 SMART EXIT: {ticker} SOLD {_exit_filled}x @ {sell_price}c (entry {_entry_p}c) P&L=${_exit_pnl:.2f} — locked in near-settlement profit", "success")
+                    exits.append({"ticker": ticker, "action": "smart_exit", "filled": _exit_filled, "price": sell_price})
+            except Exception as _exit_err:
+                _log_activity(f"Smart exit error {ticker}: {str(_exit_err)[:60]}", "error")
             continue
 
         if pnl_pct is None:
@@ -9315,10 +9409,12 @@ def _background_loop():
                             _PERF_HISTORY[:] = _PERF_HISTORY[-_PERF_HISTORY_MAX:]
             except Exception:
                 pass
-            # Auto-exit DISABLED — all positions settle naturally at $0 or $1
-            # Prediction markets aren't stocks; trailing stops just sell winners early
-            # exits = enhanced_auto_exit()
-            # exits = auto_exit_check()
+            # Smart exit: only sells game bets at 93c+ (near-certain, lock in profit)
+            # Does NOT use trailing stops or stop-losses on game bets
+            try:
+                exits = enhanced_auto_exit()
+            except Exception as _exit_e:
+                print(f"[BG] Smart exit error: {_exit_e}")
         except Exception as e:
             import traceback
             _log_activity(f"Background error: {str(e)[:80]}", "error")
@@ -14090,7 +14186,9 @@ def _get_espn_win_prob(event_id, league, home_team=True):
 # The Odds API — real-time sportsbook odds from 15+ bookmakers
 # ---------------------------------------------------------------------------
 _ODDS_API_CACHE = {}  # sport_key -> {"data": [...], "ts": float}
-_ODDS_API_TTL = 7200  # 2-hour cache — free tier = 500 req/month (~16/day)
+_ODDS_API_TTL = 7200  # 2-hour default cache — overridden dynamically during game hours
+_ODDS_API_TTL_GAME_HOURS = 1800  # 30-min cache during active game hours (10am-11pm PT)
+_ODDS_API_TTL_OFF_HOURS = 7200   # 2-hour cache during off-hours
 _ODDS_API_STATS = {
     "last_fetch": None,
     "total_requests": 0,
@@ -14167,8 +14265,22 @@ def _fetch_odds_api(sport_key):
         return None
 
     now = _t.time()
+    # Dynamic TTL: shorter during game hours for fresher consensus data
+    # Budget-aware: back off to 2h if running low on monthly requests
+    _remaining = _ODDS_API_STATS.get("remaining_requests")
+    try:
+        _now_pt = datetime.datetime.now(tz=_PACIFIC)
+        _is_game_hours = 10 <= _now_pt.hour <= 23
+    except Exception:
+        _is_game_hours = True  # default to shorter TTL if timezone fails
+    if _remaining is not None and _remaining < 50:
+        _effective_ttl = 14400  # 4h — conserve remaining quota
+    elif _is_game_hours:
+        _effective_ttl = _ODDS_API_TTL_GAME_HOURS  # 30min during games
+    else:
+        _effective_ttl = _ODDS_API_TTL_OFF_HOURS    # 2h off-hours
     cached = _ODDS_API_CACHE.get(sport_key)
-    if cached and now - cached["ts"] < _ODDS_API_TTL:
+    if cached and now - cached["ts"] < _effective_ttl:
         return cached["data"]
 
     try:
