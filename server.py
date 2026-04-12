@@ -10263,13 +10263,19 @@ def _background_loop():
                 _last_perf_ts = _PERF_HISTORY[-1]["ts"][:18] if _PERF_HISTORY else ""
                 _now_perf_ts = datetime.datetime.now(tz=_PACIFIC).isoformat()[:18]
                 _chart_val2 = _pf_value2 if _pf_value2 > 0 else _bal2
-                # Reject spikes: if new value jumps >2% from last recorded value,
-                # it's likely a mid-refresh artifact — skip this snapshot
+                # Reject artifacts: only skip if cash is $0 (API hiccup) or value
+                # is wildly impossible (>2x or <0.3x of last). Real game swings of
+                # 5-10% are normal and should be recorded. The client-side median
+                # filter handles any remaining visual noise.
                 _spike_ok = True
                 if _PERF_HISTORY and _chart_val2 > 0:
                     _last_val = _PERF_HISTORY[-1].get("value", 0)
-                    if _last_val > 0 and abs(_chart_val2 - _last_val) / _last_val > 0.02:
-                        _spike_ok = False
+                    if _last_val > 0:
+                        _ratio = _chart_val2 / _last_val
+                        if _ratio > 2.0 or _ratio < 0.3:
+                            _spike_ok = False  # >2x or <30% = clearly impossible
+                    if _bal2 < 0.01:
+                        _spike_ok = False  # $0 cash = API returned garbage
                 if _now_perf_ts != _last_perf_ts and _chart_val2 > 0 and _spike_ok:
                     with _PERF_HISTORY_LOCK:
                         _PERF_HISTORY.append({
