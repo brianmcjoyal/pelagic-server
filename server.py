@@ -286,6 +286,8 @@ def _save_state():
             "perf_history": _PERF_HISTORY[-_PERF_HISTORY_MAX:],
             # High-water mark for W/L counts (survives Kalshi data pruning)
             "settled_hwm": _SETTLED_HWM,
+            # Paper trades (persist across restarts, not day-dependent)
+            "paper_trades": _PAPER_TRADES[-_PAPER_TRADES_MAX:],
             # Timestamp for date-check on load
             "save_date": datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d"),
         }
@@ -422,6 +424,13 @@ def _load_state():
             _PERF_HISTORY.clear()
             _PERF_HISTORY.extend(saved_perf[-_PERF_HISTORY_MAX:])
             print(f"[STATE] Restored {len(_PERF_HISTORY)} performance history points from disk")
+
+        # Restore paper trades (persist across restarts)
+        saved_paper = data.get("paper_trades", [])
+        if saved_paper:
+            _PAPER_TRADES.clear()
+            _PAPER_TRADES.extend(saved_paper[-_PAPER_TRADES_MAX:])
+            print(f"[STATE] Restored {len(_PAPER_TRADES)} paper trades from disk")
 
         # Restore settled high-water mark (W/L counts survive Kalshi data pruning)
         saved_hwm = data.get("settled_hwm")
@@ -8004,6 +8013,314 @@ def _compute_bucket_stats(trades, key_fn):
 # before so they can NEVER happen again undetected.
 # ---------------------------------------------------------------------------
 
+# ══════════════════════════════════════════════════════════════════════════
+# PAPER TRADING SYSTEM — Prove edge before risking real money
+# ══════════════════════════════════════════════════════════════════════════
+# Runs alongside the real bot. Tracks what a pure live-game latency
+# strategy WOULD do, without placing actual orders. Measures CLV
+# (Closing Line Value) to determine if the edge is real.
+
+_PAPER_TRADES = []       # list of paper trade dicts
+_PAPER_TRADES_MAX = 500  # keep last 500
+_PAPER_SEEN = set()      # tickers already paper-traded this cycle (dedup)
+_PAPER_COOLDOWN = {}     # ticker -> timestamp of last paper trade (avoid spam)
+
+def _paper_trade_sniper():
+    """Paper-trade the live game latency signal. No real money.
+
+    Signal: ESPN win prob diverges from Kalshi price by >5% during a live game.
+    This means ESPN sees something (scoring play, momentum shift) that Kalshi
+    hasn't priced in yet.
+    """
+    try:
+        markets = _market_cache.get("data") or []
+        if not markets:
+            return
+
+        espn_scores = _get_espn_scores()
+        if not espn_scores:
+            return
+
+        now = datetime.datetime.now(tz=_PACIFIC)
+        now_ts = _time.time()
+
+        for m in markets:
+            ticker = m.get("ticker") or m.get("id") or ""
+            if not ticker:
+                continue
+
+            # Only game markets
+            t_upper = ticker.upper()
+            if not any(kw in t_upper for kw in LIVE_GAME_SERIES):
+                continue
+
+            # Cooldown: max 1 paper trade per ticker per 10 minutes
+            if ticker in _PAPER_COOLDOWN and now_ts - _PAPER_COOLDOWN[ticker] < 600:
+                continue
+
+            # Get prices
+            yes_ask = None
+            no_ask = None
+            try:
+                _ya = m.get("yes_ask_cents") or m.get("yes_ask") or m.get("yes_price")
+                if _ya:
+                    _yf = float(str(_ya))
+                    yes_ask = int(round(_yf * 100)) if _yf < 1.5 else int(round(_yf))
+                _na = m.get("no_ask_cents") or m.get("no_ask") or m.get("no_price")
+                if _na:
+                    _nf = float(str(_na))
+                    no_ask = int(round(_nf * 100)) if _nf < 1.5 else int(round(_nf))
+            except Exception:
+                continue
+
+            # Price must be in sweet spot: 20-60c (value range, not favorites)
+            side = None
+            price = None
+            if yes_ask and 20 <= yes_ask <= 60:
+                side = "yes"
+                price = yes_ask
+            elif no_ask and 20 <= no_ask <= 60:
+                side = "no"
+                price = no_ask
+            if not side:
+                continue
+
+            # Match to ESPN game
+            title = m.get("title", "")
+            _matched_team = None
+            _espn_data = None
+            for team_key, game_data in espn_scores.items():
+                if team_key in ticker.lower() or team_key in title.lower():
+                    _matched_team = team_key
+                    _espn_data = game_data
+                    break
+
+            if not _espn_data:
+                continue
+
+            # Must be LIVE (in-progress)
+            game_state = _espn_data.get("state", "")
+            if game_state != "in":
+                continue
+
+            # Get ESPN win probability
+            try:
+                event_id = _espn_data.get("event_id")
+                league = _espn_data.get("league", "")
+                if not event_id:
+                    continue
+
+                is_home = _espn_data.get("home_abbrev", "").lower() == _matched_team
+                espn_prob = _get_espn_win_prob(event_id, league, home_team=is_home)
+                if espn_prob is None:
+                    continue
+
+                # Adjust for NO side
+                if side == "no":
+                    our_prob = 1.0 - espn_prob
+                else:
+                    our_prob = espn_prob
+
+                kalshi_implied = price / 100.0
+                edge = our_prob - kalshi_implied
+
+                # THE SIGNAL: ESPN diverges from Kalshi by >5%
+                # This means ESPN sees something the market hasn't priced in
+                if edge < 0.05:
+                    continue
+
+                # Calculate theoretical EV (same formula as pretrade gateway)
+                actual_price = price + 3  # assume 3c slippage
+                payout_if_win = 100 - actual_price
+                fee_if_win = 0.07 * payout_if_win
+                pessimistic_prob = max(0.01, our_prob - 0.03)
+                ev_cents = pessimistic_prob * (payout_if_win - fee_if_win) - (1 - pessimistic_prob) * actual_price
+
+                # Only paper-trade if EV is positive (same standard as real trades)
+                if ev_cents <= 0:
+                    continue
+
+                # PAPER TRADE — log it
+                game_info = f"{_espn_data.get('home_abbrev', '?')} {_espn_data.get('home_score', '?')}-{_espn_data.get('away_score', '?')} {_espn_data.get('away_abbrev', '?')}"
+                period = _espn_data.get("period", "?")
+                clock = _espn_data.get("clock", "?")
+
+                paper = {
+                    "ticker": ticker,
+                    "title": title[:60],
+                    "side": side,
+                    "entry_price": price,
+                    "espn_prob": round(our_prob, 3),
+                    "kalshi_implied": round(kalshi_implied, 3),
+                    "edge": round(edge, 3),
+                    "ev_cents": round(ev_cents, 2),
+                    "game_state": f"{game_info} {period} {clock}",
+                    "entry_time": now.isoformat(),
+                    "entry_ts": now_ts,
+                    # CLV tracking — filled in later
+                    "price_5min": None,
+                    "price_15min": None,
+                    "price_30min": None,
+                    "clv_5min": None,
+                    "clv_15min": None,
+                    "clv_30min": None,
+                    "closing_price": None,
+                    "clv_final": None,
+                    "result": None,  # win/loss — filled when market settles
+                    "pnl_cents": None,
+                }
+
+                _PAPER_TRADES.append(paper)
+                _PAPER_COOLDOWN[ticker] = now_ts
+
+                # Keep list bounded
+                if len(_PAPER_TRADES) > _PAPER_TRADES_MAX:
+                    _PAPER_TRADES[:] = _PAPER_TRADES[-_PAPER_TRADES_MAX:]
+
+                print(f"[PAPER] {side.upper()} {ticker} @ {price}c | ESPN={our_prob:.0%} Kalshi={kalshi_implied:.0%} edge={edge:.0%} EV={ev_cents:.1f}c | {game_info}")
+
+            except Exception as e:
+                print(f"[PAPER] Error processing {ticker}: {e}")
+                continue
+    except Exception as e:
+        print(f"[PAPER] Paper trade sniper error: {e}")
+
+
+def _paper_trade_update():
+    """Update CLV data on existing paper trades.
+
+    Check prices at 5min, 15min, 30min after entry to measure
+    whether the market moved in our direction (confirming edge).
+    Also check for settled markets to compute final P&L.
+    """
+    try:
+        if not _PAPER_TRADES:
+            return
+
+        markets = _market_cache.get("data") or []
+        market_map = {}
+        for m in markets:
+            tk = m.get("ticker") or m.get("id") or ""
+            if tk:
+                market_map[tk] = m
+
+        now_ts = _time.time()
+
+        for pt in _PAPER_TRADES:
+            if pt.get("result") is not None:
+                continue  # already settled
+
+            ticker = pt["ticker"]
+            entry_ts = pt.get("entry_ts", 0)
+            elapsed = now_ts - entry_ts
+            side = pt["side"]
+            entry_price = pt["entry_price"]
+
+            m = market_map.get(ticker)
+            if not m:
+                # Market might be settled — check if > 24h old
+                if elapsed > 86400:
+                    pt["result"] = "expired"
+                continue
+
+            # Get current price for our side
+            try:
+                if side == "yes":
+                    _cur = m.get("yes_ask_cents") or m.get("yes_ask") or m.get("yes_price")
+                else:
+                    _cur = m.get("no_ask_cents") or m.get("no_ask") or m.get("no_price")
+                if _cur:
+                    _cf = float(str(_cur))
+                    current_price = int(round(_cf * 100)) if _cf < 1.5 else int(round(_cf))
+                else:
+                    continue
+            except Exception:
+                continue
+
+            # Update CLV at milestones
+            if elapsed >= 300 and pt["price_5min"] is None:
+                pt["price_5min"] = current_price
+                pt["clv_5min"] = current_price - entry_price  # positive = price moved our way
+            if elapsed >= 900 and pt["price_15min"] is None:
+                pt["price_15min"] = current_price
+                pt["clv_15min"] = current_price - entry_price
+            if elapsed >= 1800 and pt["price_30min"] is None:
+                pt["price_30min"] = current_price
+                pt["clv_30min"] = current_price - entry_price
+
+            # Check for settlement (price at 97+ or 3-)
+            status = m.get("status", "")
+            if status in ("settled", "finalized", "closed") or current_price >= 97 or current_price <= 3:
+                won = (side == "yes" and current_price >= 97) or (side == "no" and current_price <= 3)
+                pt["result"] = "win" if won else "loss"
+                pt["closing_price"] = current_price
+                pt["clv_final"] = current_price - entry_price
+                if won:
+                    pt["pnl_cents"] = round((100 - entry_price) * 0.93, 1)  # profit after 7% fee
+                else:
+                    pt["pnl_cents"] = -entry_price
+    except Exception as e:
+        print(f"[PAPER] Update error: {e}")
+
+
+def _paper_trade_stats():
+    """Compute paper trading statistics."""
+    if not _PAPER_TRADES:
+        return {"total": 0, "message": "No paper trades yet — waiting for live game signals"}
+
+    total = len(_PAPER_TRADES)
+    settled = [p for p in _PAPER_TRADES if p.get("result") in ("win", "loss")]
+    wins = [p for p in settled if p["result"] == "win"]
+    losses = [p for p in settled if p["result"] == "loss"]
+    pending = total - len(settled)
+
+    # CLV analysis — the key metric
+    clv_5 = [p["clv_5min"] for p in _PAPER_TRADES if p.get("clv_5min") is not None]
+    clv_15 = [p["clv_15min"] for p in _PAPER_TRADES if p.get("clv_15min") is not None]
+    clv_30 = [p["clv_30min"] for p in _PAPER_TRADES if p.get("clv_30min") is not None]
+
+    avg_clv_5 = round(sum(clv_5) / len(clv_5), 2) if clv_5 else None
+    avg_clv_15 = round(sum(clv_15) / len(clv_15), 2) if clv_15 else None
+    avg_clv_30 = round(sum(clv_30) / len(clv_30), 2) if clv_30 else None
+
+    # P&L
+    total_pnl = sum(p.get("pnl_cents", 0) or 0 for p in settled)
+    avg_edge = round(sum(p.get("edge", 0) for p in _PAPER_TRADES) / total, 3) if total else 0
+
+    win_rate = round(len(wins) / len(settled) * 100, 1) if settled else 0
+
+    # Verdict
+    verdict = "COLLECTING DATA"
+    if len(settled) >= 20:
+        if avg_clv_5 and avg_clv_5 >= 2:
+            verdict = "✅ EDGE CONFIRMED — CLV is positive. Consider going live with small bets."
+        elif avg_clv_5 and avg_clv_5 >= 0:
+            verdict = "⚠️ MARGINAL — CLV near zero. Edge may not survive fees. Keep paper trading."
+        else:
+            verdict = "❌ NO EDGE — CLV is negative. Do NOT go live. The market is smarter than ESPN."
+    elif len(settled) >= 10:
+        verdict = f"EARLY DATA — {len(settled)} settled, need 20+ for confidence"
+
+    return {
+        "total": total,
+        "settled": len(settled),
+        "wins": len(wins),
+        "losses": len(losses),
+        "pending": pending,
+        "win_rate": win_rate,
+        "total_pnl_cents": round(total_pnl, 1),
+        "avg_edge_at_entry": avg_edge,
+        "clv_5min_avg": avg_clv_5,
+        "clv_15min_avg": avg_clv_15,
+        "clv_30min_avg": avg_clv_30,
+        "clv_5min_count": len(clv_5),
+        "verdict": verdict,
+        "trades": _PAPER_TRADES[-20:],  # last 20 for display
+    }
+
+
+# ---------------------------------------------------------------------------
+
 _WATCHDOG_ALERTS = []  # list of active alerts
 
 def _watchdog_check():
@@ -10100,6 +10417,13 @@ def _background_loop():
             # These are the money-makers — run them FIRST and FAST
             _snipe_results = live_game_snipe()
             _ms_results = moonshark_snipe()
+
+            # === PAPER TRADING — prove edge before risking money ===
+            try:
+                _paper_trade_sniper()
+                _paper_trade_update()
+            except Exception as _pe:
+                print(f"[PAPER] Error: {_pe}")
 
             # === NEW EDGE STRATEGIES ===
             # Momentum swing fader — NBA/NCAAB/NHL overreactions
@@ -18633,6 +18957,16 @@ def debug_positions_raw():
         return jsonify({"error": str(e)})
 
 
+@app.route("/paper-trades")
+def paper_trades_api():
+    """Return paper trading stats and recent trades."""
+    try:
+        stats = _paper_trade_stats()
+        return jsonify(stats)
+    except Exception as e:
+        return jsonify({"error": str(e), "total": 0})
+
+
 @app.route("/")
 def dashboard():
     return DASHBOARD_HTML
@@ -19157,6 +19491,7 @@ a:hover { color: #7da5f5; }
   <button class="tab" onclick="switchTab('performance')">Performance</button>
   <button class="tab" onclick="switchTab('brain')" style="color:#00d4ff">&#129504; Brain</button>
   <button class="tab" onclick="switchTab('trends')" style="color:#e040fb">Trends</button>
+  <button class="tab" onclick="switchTab('paper')" style="color:#00dc5a">&#128196; Paper</button>
   <!-- MoonShark tab removed -->
 </div>
 
@@ -19587,6 +19922,73 @@ a:hover { color: #7da5f5; }
   </div>
 </div>
 
+<!-- Paper Trading Tab -->
+<div class="tab-content" id="tab-paper">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+    <div>
+      <div style="color:#00dc5a;font-size:18px;font-weight:800;letter-spacing:0.5px">&#128196; Paper Trading</div>
+      <div style="color:#666;font-size:10px;margin-top:2px">Proving edge with zero risk — ESPN latency signal</div>
+    </div>
+    <button class="refresh-btn" onclick="loadPaperTrades(true)">Refresh</button>
+  </div>
+
+  <!-- Verdict Banner -->
+  <div id="paper-verdict" style="background:#1a1a2e;border:1px solid #333;border-radius:10px;padding:16px;margin-bottom:16px;text-align:center;font-size:16px;font-weight:700;color:#888">
+    Loading...
+  </div>
+
+  <!-- Stats Grid -->
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:16px">
+    <div class="section" style="text-align:center;padding:14px">
+      <div style="color:#666;font-size:10px;text-transform:uppercase;letter-spacing:1px">Total Trades</div>
+      <div id="paper-total" style="font-size:28px;font-weight:800;color:#fff;margin-top:4px">--</div>
+    </div>
+    <div class="section" style="text-align:center;padding:14px">
+      <div style="color:#666;font-size:10px;text-transform:uppercase;letter-spacing:1px">Win Rate</div>
+      <div id="paper-winrate" style="font-size:28px;font-weight:800;color:#fff;margin-top:4px">--</div>
+    </div>
+    <div class="section" style="text-align:center;padding:14px">
+      <div style="color:#666;font-size:10px;text-transform:uppercase;letter-spacing:1px">Paper P&L</div>
+      <div id="paper-pnl" style="font-size:28px;font-weight:800;color:#fff;margin-top:4px">--</div>
+    </div>
+    <div class="section" style="text-align:center;padding:14px">
+      <div style="color:#666;font-size:10px;text-transform:uppercase;letter-spacing:1px">Avg Edge</div>
+      <div id="paper-edge" style="font-size:28px;font-weight:800;color:#fff;margin-top:4px">--</div>
+    </div>
+  </div>
+
+  <!-- CLV Section -->
+  <div class="section" style="margin-bottom:16px;padding:16px">
+    <div style="color:#00d4ff;font-size:14px;font-weight:700;margin-bottom:10px">Closing Line Value (CLV) — The True Edge Metric</div>
+    <div style="color:#888;font-size:11px;margin-bottom:12px">If CLV is positive, the market moved in our direction after entry = real edge. This is what matters.</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+      <div style="background:#111;border-radius:8px;padding:12px;text-align:center">
+        <div style="color:#666;font-size:10px">5 min CLV</div>
+        <div id="paper-clv5" style="font-size:22px;font-weight:700;color:#fff;margin-top:4px">--</div>
+        <div id="paper-clv5-n" style="color:#555;font-size:10px;margin-top:2px">0 trades</div>
+      </div>
+      <div style="background:#111;border-radius:8px;padding:12px;text-align:center">
+        <div style="color:#666;font-size:10px">15 min CLV</div>
+        <div id="paper-clv15" style="font-size:22px;font-weight:700;color:#fff;margin-top:4px">--</div>
+        <div id="paper-clv15-n" style="color:#555;font-size:10px;margin-top:2px">0 trades</div>
+      </div>
+      <div style="background:#111;border-radius:8px;padding:12px;text-align:center">
+        <div style="color:#666;font-size:10px">30 min CLV</div>
+        <div id="paper-clv30" style="font-size:22px;font-weight:700;color:#fff;margin-top:4px">--</div>
+        <div id="paper-clv30-n" style="color:#555;font-size:10px;margin-top:2px">0 trades</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Recent Paper Trades -->
+  <div class="section" style="padding:16px">
+    <div style="color:#ccc;font-size:14px;font-weight:700;margin-bottom:10px">Recent Paper Trades</div>
+    <div id="paper-trades-list" style="max-height:400px;overflow-y:auto">
+      <div style="color:#555;font-size:12px;text-align:center;padding:20px">No paper trades yet — waiting for live games</div>
+    </div>
+  </div>
+</div>
+
 </div><!-- end container -->
 
 <div class="toast-container" id="toast-container"></div>
@@ -19630,6 +20032,7 @@ function switchTab(name) {
   if (name === 'analytics') { loadPerformance(); }  // legacy redirect
   if (name === 'trends') { loadNewsFeed(); }
   if (name === 'brain') { loadBrain(); }
+  if (name === 'paper') { loadPaperTrades(); }
   // Legacy support for hidden tabs
   if (name === 'activity') { loadActivity(); loadBetsFeed(); loadAllBets(); }
 }
@@ -23191,6 +23594,81 @@ async function loadInsights() {
     console.error('Insights load error', e);
     _setHTML('daily-insights-feed', '<div style="color:#ff5000;font-size:12px">Error loading insights: ' + e.message + '</div>');
   }
+}
+
+// --- Paper Trading Tab ---
+var _paperLoadedAt = 0;
+async function loadPaperTrades(force) {
+  if (!force && Date.now() - _paperLoadedAt < 5000) return;
+  _paperLoadedAt = Date.now();
+  try {
+    var data = await fetch(API + '/paper-trades').then(function(r){ return r.json(); });
+    // Update verdict
+    var verdictEl = document.getElementById('paper-verdict');
+    if (data.verdict) {
+      verdictEl.textContent = data.verdict;
+      if (data.verdict.indexOf('CONFIRMED') >= 0) verdictEl.style.color = '#00dc5a';
+      else if (data.verdict.indexOf('NO EDGE') >= 0) verdictEl.style.color = '#ff4444';
+      else if (data.verdict.indexOf('MARGINAL') >= 0) verdictEl.style.color = '#ffb400';
+      else verdictEl.style.color = '#888';
+    } else if (data.message) {
+      verdictEl.textContent = data.message;
+      verdictEl.style.color = '#888';
+    }
+    // Stats
+    document.getElementById('paper-total').textContent = data.total || 0;
+    var wr = data.win_rate;
+    var wrEl = document.getElementById('paper-winrate');
+    wrEl.textContent = wr !== undefined ? wr + '%' : '--';
+    wrEl.style.color = wr >= 55 ? '#00dc5a' : wr >= 45 ? '#ffb400' : wr > 0 ? '#ff4444' : '#fff';
+    var pnl = data.total_pnl_cents;
+    var pnlEl = document.getElementById('paper-pnl');
+    if (pnl !== undefined && pnl !== null) {
+      var pnlDollars = (pnl / 100).toFixed(2);
+      pnlEl.textContent = (pnl >= 0 ? '+$' : '-$') + Math.abs(pnlDollars);
+      pnlEl.style.color = pnl >= 0 ? '#00dc5a' : '#ff4444';
+    } else { pnlEl.textContent = '--'; }
+    var edgeEl = document.getElementById('paper-edge');
+    edgeEl.textContent = data.avg_edge_at_entry ? (data.avg_edge_at_entry * 100).toFixed(1) + '%' : '--';
+    // CLV
+    function setCLV(id, val, nId, count) {
+      var el = document.getElementById(id);
+      var nEl = document.getElementById(nId);
+      if (val !== null && val !== undefined) {
+        el.textContent = (val >= 0 ? '+' : '') + val + 'c';
+        el.style.color = val > 0 ? '#00dc5a' : val < 0 ? '#ff4444' : '#888';
+      } else { el.textContent = '--'; el.style.color = '#888'; }
+      nEl.textContent = (count || 0) + ' trades';
+    }
+    setCLV('paper-clv5', data.clv_5min_avg, 'paper-clv5-n', data.clv_5min_count);
+    setCLV('paper-clv15', data.clv_15min_avg, 'paper-clv15-n', data.clv_15min_count);
+    setCLV('paper-clv30', data.clv_30min_avg, 'paper-clv30-n', data.clv_30min_count);
+    // Recent trades list
+    var trades = data.trades || [];
+    var listEl = document.getElementById('paper-trades-list');
+    if (trades.length === 0) {
+      listEl.innerHTML = '<div style="color:#555;font-size:12px;text-align:center;padding:20px">No paper trades yet \\u2014 waiting for live games with ESPN divergence</div>';
+    } else {
+      var html = '';
+      for (var i = trades.length - 1; i >= 0; i--) {
+        var t = trades[i];
+        var resultColor = t.result === 'win' ? '#00dc5a' : t.result === 'loss' ? '#ff4444' : '#888';
+        var resultText = t.result ? t.result.toUpperCase() : 'PENDING';
+        var pnlText = t.pnl_cents ? ((t.pnl_cents >= 0 ? '+' : '') + (t.pnl_cents / 100).toFixed(2)) : '--';
+        html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #1a1a2e;font-size:12px">';
+        html += '<div style="flex:1"><span style="color:#fff;font-weight:600">' + (t.ticker || 'unknown') + '</span>';
+        html += '<span style="color:#555;margin-left:8px">' + (t.sport || '') + '</span></div>';
+        html += '<div style="flex:0.5;text-align:center"><span style="color:#00d4ff">' + (t.entry_price || '--') + 'c</span>';
+        html += '<span style="color:#666;margin:0 4px">\\u2192</span>';
+        html += '<span style="color:#e040fb">' + ((t.espn_prob * 100).toFixed(0) || '--') + '%</span></div>';
+        html += '<div style="flex:0.4;text-align:center;color:#ffb400">' + ((t.edge * 100).toFixed(1) || '--') + '%</div>';
+        html += '<div style="flex:0.3;text-align:right"><span style="color:' + resultColor + ';font-weight:700">' + resultText + '</span>';
+        if (t.result) html += '<span style="color:#666;margin-left:6px">' + pnlText + '</span>';
+        html += '</div></div>';
+      }
+      listEl.innerHTML = html;
+    }
+  } catch(e) { console.log('[PAPER] Load error:', e); }
 }
 
 // --- Trends Tab ---
