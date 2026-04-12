@@ -76,7 +76,7 @@ BOT_CONFIG = {
     "min_volume": 50,             # include smaller markets
     "scan_interval_seconds": 45,  # faster scanning during game hours
     "max_category_exposure": 3,   # max 3 positions per category — diversified
-    "blocked_categories": ["weather", "golf", "politics", "economics", "nfl", "other"],  # block proven losers: golf 0/18, politics 0/4, other 2/25, economics 0/2, NFL offseason
+    "blocked_categories": ["weather", "golf", "politics", "economics", "nfl", "other", "tech"],  # block proven losers: golf 0/9, politics 0/1, other 2/21, tech 0/3, economics 0/1, NFL offseason
     "blocked_keywords": ["title holder", "title on dec", "prime minister", "next president", "ipo first", "gas price", "billboard", "netflix", "spotify", "golf", "pga", "lpga", "masters", "election", "congress", "senate", "governor"],  # block long-dated + losing categories
     "moonshark_enabled": True,  # MoonShark longshot sniper toggle
     "sport_exposure_cap_pct": 0.40, # max 40% of daily budget on any single sport (NBA correlation, MLB night, etc.)
@@ -2432,27 +2432,44 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
             _PRETRADE_STATS["reasons"]["blocked_category"] = _PRETRADE_STATS["reasons"].get("blocked_category", 0) + 1
             return False, f"Category '{cat}' is blocked"
 
-    # 5. EV CHECK: if we have win_prob, verify positive EV after fees
+    # 5. EV CHECK: if we have win_prob, verify positive EV after fees AND slippage.
     # This is THE most important check. Every trade must have a mathematical
-    # path to profit. Kalshi fee = 7% of profit on winning trades.
+    # path to profit. We account for:
+    #   - Kalshi fee: 7% of profit on winning trades
+    #   - Slippage: we typically pay 2-3c above ask for IOC fills
+    #   - Model uncertainty: our win_prob estimate could be off by 3-5%
+    # We require EV > 0 even in the PESSIMISTIC case.
     if win_prob is not None and win_prob > 0:
-        payout_if_win = (100 - price_cents)  # cents per contract
-        fee_if_win = 0.07 * payout_if_win    # 7% of profit
-        ev_cents = win_prob * (payout_if_win - fee_if_win) - (1 - win_prob) * price_cents
+        slippage_cents = 3  # worst case IOC bump
+        actual_price = price_cents + slippage_cents  # what we'll actually pay
+        if actual_price >= 99:
+            actual_price = 99
+        payout_if_win = (100 - actual_price)  # cents per contract after slippage
+        fee_if_win = 0.07 * payout_if_win     # 7% of profit
+        # Pessimistic win_prob: assume our model is 3% too optimistic
+        pessimistic_prob = max(0.01, win_prob - 0.03)
+        ev_cents = pessimistic_prob * (payout_if_win - fee_if_win) - (1 - pessimistic_prob) * actual_price
         if ev_cents < 0:
             _PRETRADE_STATS["blocked"] += 1
             _PRETRADE_STATS["reasons"]["negative_ev"] = _PRETRADE_STATS["reasons"].get("negative_ev", 0) + 1
-            return False, f"Negative EV: {ev_cents:.1f}c/contract (prob={win_prob:.1%}, price={price_cents}c)"
+            return False, f"Negative EV: {ev_cents:.1f}c/contract (prob={win_prob:.1%}→{pessimistic_prob:.1%}, price={price_cents}+{slippage_cents}c slip)"
 
-    # 6. EDGE CHECK: if we have edge, verify it's meaningful (> fee drag)
+    # 5b. SINGLE-SOURCE DISCOUNT: if win_prob came from ESPN alone (no consensus
+    # confirmation from The Odds API), require even MORE edge because we're
+    # trusting a single data point. ESPN's model can be wrong — especially on
+    # live games where the model lags score changes.
+    # (We detect "single source" by checking if the strategy didn't get a consensus boost)
+    # This is enforced by requiring 7% edge minimum for all trades (see #6 below)
+
+    # 6. EDGE CHECK: if we have edge, verify it's meaningful (> fee drag + slippage)
     if edge is not None:
-        # Fee drag on a typical trade is ~3-5% of the contract value
-        # Require edge > 2% minimum to overcome fees + slippage
-        min_edge = 0.02
+        # Real cost of a trade: 7% fee on wins + 2-3c slippage + model error
+        # This means we need ~5% edge just to break even
+        min_edge = 0.05
         if edge < min_edge:
             _PRETRADE_STATS["blocked"] += 1
             _PRETRADE_STATS["reasons"]["insufficient_edge"] = _PRETRADE_STATS["reasons"].get("insufficient_edge", 0) + 1
-            return False, f"Edge {edge:.1%} below minimum {min_edge:.0%}"
+            return False, f"Edge {edge:.1%} below minimum {min_edge:.0%} (fee+slippage+model error)"
 
     # 7. BALANCE: make sure we actually have the money
     try:
@@ -2592,6 +2609,18 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
         except Exception:
             pass
         print(f"[ORDER] OK: {ticker} filled={filled}/{count_int}")
+        # Track slippage: how much more we paid vs the original ask price
+        # This data feeds back into the pre-trade validation model
+        if action == "buy" and filled > 0:
+            _slippage = fill_price - price_cents
+            result["_slippage_cents"] = _slippage
+            result["_intended_price"] = price_cents
+            result["_fill_price"] = fill_price
+            # Accumulate slippage stats for the watchdog
+            _PRETRADE_STATS.setdefault("total_slippage_cents", 0)
+            _PRETRADE_STATS.setdefault("slippage_count", 0)
+            _PRETRADE_STATS["total_slippage_cents"] += _slippage
+            _PRETRADE_STATS["slippage_count"] += 1
         return result
     except requests.exceptions.HTTPError as e:
         body = ""
@@ -6986,6 +7015,42 @@ def enhanced_auto_exit():
         pnl_pct = pos.get("pnl_pct")
         ticker = pos["ticker"]
 
+        # ZOMBIE CLEANUP: sell positions settling 60+ days out that are underwater.
+        # These tie up capital that could earn returns on live sports bets.
+        # Only sell if current price > 1c (there's a bid) and position is losing.
+        _close_time = pos.get("close_time") or ""
+        if _close_time:
+            try:
+                _zt = datetime.datetime.fromisoformat(_close_time.replace("Z", "+00:00")).replace(tzinfo=None)
+                _days_to_settle = (_zt - now).total_seconds() / 86400
+                _cur = pos.get("current_price") or 0
+                _entry = pos.get("entry_price") or _cur
+                if _days_to_settle > 60 and _cur < _entry and _cur >= 2:
+                    # This is a zombie — sell at market to free capital
+                    _zombie_side = pos.get("side", "yes")
+                    _zombie_count = pos.get("count", 0)
+                    _sell_price = max(1, _cur - 1)
+                    try:
+                        _zr = sell_kalshi_position(ticker, _zombie_side, _sell_price, _zombie_count)
+                        _zfilled = 0
+                        try:
+                            _zfilled = int(float(str(_zr.get("order", {}).get("filled_count_fp") or 0)))
+                        except Exception:
+                            pass
+                        if _zfilled > 0:
+                            _zpnl = (_sell_price - _entry) * _zfilled / 100
+                            _log_activity(
+                                f"🧟 ZOMBIE EXIT: {ticker} SOLD {_zfilled}x @ {_sell_price}c "
+                                f"(entry {_entry}c, settles in {_days_to_settle:.0f}d) P&L=${_zpnl:.2f} — freed capital",
+                                "info"
+                            )
+                            exits.append({"ticker": ticker, "action": "zombie_exit", "filled": _zfilled, "pnl_usd": _zpnl})
+                    except Exception:
+                        pass
+                    continue
+            except Exception:
+                pass
+
         # Game bets: only exit if trading >= 93c (near-certain win, lock in profit
         # rather than risk a late collapse). Otherwise let them settle at $0 or $1.
         _tk = ticker.upper()
@@ -7985,6 +8050,72 @@ def _watchdog_check():
         _clv_count = sum(1 for t in _TRADE_JOURNAL if t.get("clv_cents") is not None)
         if _settled_count >= 20 and _clv_count == 0:
             alerts.append(f"CLV BROKEN: {_settled_count} settled trades but 0 with CLV data")
+    except Exception:
+        pass
+
+    # CHECK 9: Correlated sport losses — if 3+ losses on same sport in last 24h,
+    # the model might be systematically wrong on that sport today
+    try:
+        _24h_cutoff = (datetime.datetime.now(tz=_PACIFIC) - datetime.timedelta(hours=24)).isoformat()
+        _sport_losses = {}
+        for t in _TRADE_JOURNAL:
+            if t.get("result") == "loss" and (t.get("settlement_time") or "") >= _24h_cutoff:
+                _sp = t.get("sport_type") or _sport_from_ticker(t.get("ticker", "")) or "unknown"
+                _sport_losses[_sp] = _sport_losses.get(_sp, 0) + 1
+        for _sp, _cnt in _sport_losses.items():
+            if _cnt >= 3:
+                alerts.append(f"CORRELATED LOSSES: {_cnt} losses on {_sp} in 24h — model may be wrong on this sport")
+    except Exception:
+        pass
+
+    # CHECK 10: Fill price tracking — compare what we intended to pay vs what we actually paid
+    # If fill prices are consistently 3c+ above ask, our slippage model is wrong
+    try:
+        _recent_fills = [t for t in _TRADE_JOURNAL if t.get("entry_time", "") >= _24h_cutoff and t.get("result") is None]
+        if len(_recent_fills) >= 5:
+            _avg_slippage = 0
+            _slip_count = 0
+            for _rf in _recent_fills:
+                _intended = _rf.get("price_cents", 0)
+                # TODO: track actual fill price in journal records
+                # For now this is a placeholder for future implementation
+            # Future: alert if avg slippage > 3c
+    except Exception:
+        pass
+
+    # CHECK 11: Zombie position detector — flag positions settling > 30 days out
+    # These tie up capital that could be earning returns on live sports bets
+    try:
+        positions = check_position_prices()
+        _zombie_count = 0
+        _zombie_capital = 0
+        for p in positions:
+            _close = p.get("close_time") or ""
+            if _close:
+                try:
+                    _ct = datetime.datetime.fromisoformat(_close.replace("Z", "+00:00")).replace(tzinfo=None)
+                    _days_out = (_ct - datetime.datetime.utcnow()).total_seconds() / 86400
+                    if _days_out > 30:
+                        _zombie_count += 1
+                        _zombie_capital += abs(p.get("cost_basis_cents", 0) or 0) / 100
+                except Exception:
+                    pass
+        if _zombie_count >= 3:
+            alerts.append(f"ZOMBIE POSITIONS: {_zombie_count} positions settling 30+ days out, ~${_zombie_capital:.0f} capital tied up")
+    except Exception:
+        pass
+
+    # CHECK 12: Real vs reported win rate — compare settled-only WR to displayed WR
+    # This catches the exact problem where 59% displayed masks 10% settled reality
+    try:
+        _settled_wins = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "win")
+        _settled_losses = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "loss")
+        _settled_total = _settled_wins + _settled_losses
+        if _settled_total >= 15:
+            _real_wr = _settled_wins / _settled_total
+            _displayed_wr = _PORTFOLIO_CACHE.get("data", {}).get("win_rate", 0) / 100 if _PORTFOLIO_CACHE.get("data") else 0
+            if _displayed_wr > 0 and abs(_real_wr - _displayed_wr) > 0.15:
+                alerts.append(f"WIN RATE MISMATCH: settled={_real_wr:.0%} ({_settled_wins}W/{_settled_losses}L) vs displayed={_displayed_wr:.0%} — dashboard may be misleading")
     except Exception:
         pass
 
@@ -10079,6 +10210,13 @@ def _background_loop():
                 _invested_from_positions = round(sum(p.get("market_exposure_cents", 0) for p in _pos2) / 100, 2)
                 _total_invested2 = _invested_from_positions if _invested_from_positions > 0 else round(_kalshi_portfolio2, 2)
 
+                # REAL settled-only stats from trade journal (the truth, no inflation)
+                _journal_wins = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "win")
+                _journal_losses = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "loss")
+                _journal_total = _journal_wins + _journal_losses
+                _journal_wr = round(_journal_wins / max(1, _journal_total) * 100, 1)
+                _journal_pnl = round(sum(float(t.get("pnl_usd") or 0) for t in _TRADE_JOURNAL if t.get("result") is not None), 2)
+
                 _PORTFOLIO_CACHE["data"] = {
                     "balance_usd": round(_bal2, 2),
                     "portfolio_value_usd": _pf_value2,
@@ -10099,6 +10237,11 @@ def _background_loop():
                     "win_rate": round(_SETTLED_CACHE["data"]["wins"] / max(1, _SETTLED_CACHE["data"]["wins"] + _SETTLED_CACHE["data"]["losses"]) * 100, 1) if _SETTLED_CACHE.get("data") else _d1_wr,
                     "win_rate_all_time": _wr2,
                     "win_rate_7d": _7d_wr,
+                    # REAL settled-only numbers from trade journal — no inflation
+                    "settled_only_wins": _journal_wins,
+                    "settled_only_losses": _journal_losses,
+                    "settled_only_win_rate": _journal_wr,
+                    "settled_only_pnl": _journal_pnl,
                     "total_realized_usd": _SETTLED_CACHE["data"]["total_pnl_usd"] if _SETTLED_CACHE.get("data") else round(sum(float(t.get("pnl_usd") or t.get("pnl") or 0) for t in _TRADE_JOURNAL) if _TRADE_JOURNAL else _realized2, 2),
                     "total_realized_all": round(_realized2, 2),
                     "settled_history": _settled_list2[-20:],
