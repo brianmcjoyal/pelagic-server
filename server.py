@@ -2473,6 +2473,35 @@ def sell_kalshi_position(ticker, side, price_cents, count=1, resting=False):
         return {"error": str(e)}
 
 
+def _place_take_profit(ticker, side, entry_price, count, strategy=""):
+    """Place a resting GTC limit sell as a free take-profit after any game bet fills.
+
+    For longshots (entry < 45c): sell at entry + 20c (lock in 20c+ profit if price spikes)
+    For favorites (entry >= 45c): sell at entry + 12c (tighter since upside is capped)
+    For high-price (entry >= 80c): no take-profit (too close to settlement, let it ride)
+    """
+    if entry_price >= 80:
+        return  # near-settlement, just let it settle
+    if ticker in _resting_sells:
+        return  # already have a resting sell
+
+    if entry_price < 45:
+        take_profit_price = min(92, entry_price + 20)
+    else:
+        take_profit_price = min(95, entry_price + 12)
+
+    try:
+        result = sell_kalshi_position(ticker, side, take_profit_price, count, resting=True)
+        if "error" not in result or result.get("skipped"):
+            _resting_sells.add(ticker)
+            _log_activity(
+                f"📋 TAKE-PROFIT set: {ticker} @ {take_profit_price}c (entry={entry_price}c, +{take_profit_price - entry_price}c) [{strategy}]",
+                "info"
+            )
+    except Exception as e:
+        print(f"[TAKE-PROFIT] Error placing resting sell for {ticker}: {e}")
+
+
 def _parse_kalshi_dollars(val):
     """Parse Kalshi v2 dollar string fields (e.g. '19.5500') to cents int."""
     if val is None:
@@ -4203,12 +4232,25 @@ def moonshark_snipe():
                     continue
 
                 # Check for potentially stale ESPN odds
-                # If a game has a large margin (blowout) but ESPN still shows a big edge,
-                # the moneyline is probably a stale pre-game line that hasn't updated
+                # Period-aware: NBA down 10 in Q1 is normal. Down 10 in Q4 with 2 min = over.
                 if espn_edge is not None and _game_info and _game_info.get("state") == "in":
                     _stale_margin = abs(int(_game_info.get("home_score", 0) or 0) - int(_game_info.get("away_score", 0) or 0))
                     _stale_league = (_game_info.get("league") or "").lower()
-                    _stale_threshold = 3 if _stale_league == "mlb" else 10  # MLB: 3 runs, others: 10 pts
+                    _stale_period = str(_game_info.get("clock", "") or _game_info.get("period", "") or "")
+                    # Base thresholds
+                    _stale_threshold = 3 if _stale_league == "mlb" else 10
+                    # Period-aware scaling: tighter thresholds late in the game
+                    if _stale_league in ("nba", "ncaab", "ncaawb"):
+                        if "Q4" in _stale_period or "2H" in _stale_period or "OT" in _stale_period:
+                            _stale_threshold = 6   # down 6 in Q4 = likely over
+                        elif "Q3" in _stale_period:
+                            _stale_threshold = 8   # down 8 in Q3 = still possible but less likely
+                    elif _stale_league == "nhl":
+                        if "P3" in _stale_period or "OT" in _stale_period:
+                            _stale_threshold = 2   # down 2 goals in P3 = very hard to recover
+                    elif _stale_league == "mlb":
+                        if any(f"{i}" in _stale_period for i in range(7, 15)):
+                            _stale_threshold = 2   # down 2 runs in 7th+ = tough
                     if _stale_margin >= _stale_threshold and espn_edge > 0.08:
                         espn_edge = espn_edge * 0.5  # Discount stale edge by 50%
                         if espn_edge < 0.05:
@@ -4647,6 +4689,7 @@ def moonshark_snipe():
                             f"🦈 BET PLACED! {side.upper()} {title[:25]} @ {price}c x{filled} = ${actual_cost:.2f} [{','.join(_conv_reasons[:3])}]",
                             "success"
                         )
+                        _place_take_profit(ticker, side, price, filled, "moonshark")
                         snipes.append({"ticker": ticker, "filled": filled, "cost": actual_cost, "potential": potential})
                         existing_tickers.add(ticker)
                         existing_events.add(event_key)
@@ -5203,6 +5246,7 @@ def closegame_snipe():
                             f"= ${actual_cost:.2f} (potential +${potential:.2f}) | {score_str}",
                             "success"
                         )
+                        _place_take_profit(ticker, side, price, filled, "closegame")
                         snipes.append({"ticker": ticker, "filled": filled, "cost": actual_cost, "potential": potential})
                         existing_tickers.add(ticker)
                         existing_events.add(event_key)
@@ -5907,6 +5951,7 @@ def momentum_swing_snipe():
                 f"🔄 SWING HIT! {side.upper()} {trailing} @ {price}c x{filled} = ${actual_cost:.2f} (potential +${potential:.2f})",
                 "success"
             )
+            _place_take_profit(ticker, side, price, filled, "swing")
             snipes.append({"ticker": ticker, "cost": actual_cost, "edge": edge})
             existing_tickers.add(ticker)
             existing_events.add(event_key)
@@ -6222,6 +6267,7 @@ def goalie_pulled_snipe():
             f"🥅 GOALIE HIT! {side.upper()} {ticker} @ {price}c x{filled} = ${actual_cost:.2f} (potential +${potential:.2f})",
             "success"
         )
+        _place_take_profit(ticker, side, price, filled, "goalie")
         snipes.append({"ticker": ticker, "cost": actual_cost, "edge": edge})
         existing_tickers.add(ticker)
         existing_events.add(event_key)
@@ -7227,7 +7273,8 @@ def analyze_orderbook(ticker):
     """Analyze order book for trading signals.
 
     Returns:
-        dict with liquidity score, imbalance signal, recommended side, spread
+        dict with liquidity score, imbalance signal, recommended side, spread,
+        price-weighted depth, top-level concentration, and adverse selection flag.
     """
     ob = fetch_orderbook(ticker)
     if not ob:
@@ -7241,23 +7288,60 @@ def analyze_orderbook(ticker):
     if total_depth == 0:
         return None
 
-    # Imbalance: if bids >> asks, price likely going up (buy YES)
-    # if asks >> bids, price likely going down (buy NO)
-    imbalance = (bid_depth - ask_depth) / total_depth  # -1 to +1
+    # --- Price-weighted depth ---
+    # Near-touch liquidity matters more than deep book. Weight by 1/distance.
+    yes_bids = ob.get("yes_bids", [])
+    yes_asks = ob.get("yes_asks", [])
+    best_bid = yes_bids[0]["price"] if yes_bids else 50
+    best_ask = yes_asks[0]["price"] if yes_asks else 50
 
-    liquidity_score = min(100, total_depth)  # 0-100
+    weighted_bid = sum(b["qty"] / max(1, best_bid - b["price"] + 1) for b in yes_bids) if yes_bids else 0
+    weighted_ask = sum(a["qty"] / max(1, a["price"] - best_ask + 1) for a in yes_asks) if yes_asks else 0
+    weighted_total = weighted_bid + weighted_ask
+
+    # Price-weighted imbalance (more accurate than raw depth)
+    if weighted_total > 0:
+        weighted_imbalance = (weighted_bid - weighted_ask) / weighted_total
+    else:
+        weighted_imbalance = (bid_depth - ask_depth) / total_depth
+
+    # --- Top-3-level concentration ---
+    # High concentration = fragile book (one cancel changes everything)
+    top3_bid = sum(b["qty"] for b in yes_bids[:3]) if yes_bids else 0
+    top3_ask = sum(a["qty"] for a in yes_asks[:3]) if yes_asks else 0
+    bid_concentration = top3_bid / max(1, bid_depth)
+    ask_concentration = top3_ask / max(1, ask_depth)
+
+    # --- Adverse selection detection ---
+    # If sell-side depth is concentrated at the best ask (smart money exiting), flag it
+    adverse_selection = False
+    if yes_asks and ask_depth > 0:
+        best_ask_qty = yes_asks[0]["qty"]
+        if best_ask_qty / ask_depth > 0.6 and best_ask_qty >= 20:
+            adverse_selection = True  # lots of sellers at current price
+
+    # --- Volume-adjusted imbalance: scale by spread tightness ---
+    spread_factor = max(0.2, 1.0 - spread / 10.0)  # tight spread = more meaningful
+    adj_imbalance = weighted_imbalance * spread_factor
+
+    liquidity_score = min(100, total_depth)
 
     signal = None
-    if imbalance > 0.3 and spread <= 5:
-        signal = "buy_yes"  # strong bid side, price going up
-    elif imbalance < -0.3 and spread <= 5:
-        signal = "buy_no"   # strong ask side, price going down
+    if adj_imbalance > 0.25 and spread <= 6:
+        signal = "buy_yes"
+    elif adj_imbalance < -0.25 and spread <= 6:
+        signal = "buy_no"
 
     return {
         "bid_depth": bid_depth,
         "ask_depth": ask_depth,
         "spread": spread,
-        "imbalance": round(imbalance, 3),
+        "imbalance": round(adj_imbalance, 3),
+        "raw_imbalance": round((bid_depth - ask_depth) / total_depth, 3),
+        "weighted_imbalance": round(weighted_imbalance, 3),
+        "bid_concentration": round(bid_concentration, 2),
+        "ask_concentration": round(ask_concentration, 2),
+        "adverse_selection": adverse_selection,
         "liquidity_score": liquidity_score,
         "signal": signal,
     }
@@ -7634,7 +7718,50 @@ def _learning_engine():
     mtype_weights = _compute_bucket_stats(settled, lambda t: t.get("market_type", "unknown"))
     _LEARNING_STATE["parameters"]["market_type_weights"] = mtype_weights
 
-    # 9. CLV (closing line value) by strategy — strategies with positive CLV
+    # 9a. Hours-to-close bucketing — discover optimal entry timing relative to settlement
+    def _htc_bucket(t):
+        htc = t.get("hours_to_close")
+        if htc is None:
+            return "unknown"
+        if htc < 1:
+            return "<1h"
+        elif htc < 3:
+            return "1-3h"
+        elif htc < 6:
+            return "3-6h"
+        elif htc < 12:
+            return "6-12h"
+        else:
+            return "12h+"
+    htc_trades = [t for t in settled if t.get("hours_to_close") is not None]
+    if len(htc_trades) >= 5:
+        htc_weights = _compute_bucket_stats(htc_trades, _htc_bucket)
+        _LEARNING_STATE["parameters"]["hours_to_close_weights"] = htc_weights
+        best_htc = max(htc_weights.items(), key=lambda x: x[1]["win_rate"], default=(None, None))
+        if best_htc[1] and best_htc[1]["confidence"] >= 0.5:
+            insights.append(f"⏰ Best entry window: {best_htc[0]} before close ({best_htc[1]['win_rate']:.0%} WR)")
+
+    # 9b. Seconds remaining at entry — discover optimal game-time entry windows
+    def _secs_bucket(t):
+        secs = t.get("seconds_remaining_at_entry")
+        if secs is None:
+            return None
+        if secs < 120:
+            return "<2min"
+        elif secs < 300:
+            return "2-5min"
+        elif secs < 600:
+            return "5-10min"
+        elif secs < 1200:
+            return "10-20min"
+        else:
+            return "20min+"
+    secs_trades = [t for t in settled if t.get("seconds_remaining_at_entry") is not None]
+    if len(secs_trades) >= 5:
+        secs_weights = _compute_bucket_stats(secs_trades, lambda t: _secs_bucket(t) or "unknown")
+        _LEARNING_STATE["parameters"]["seconds_remaining_weights"] = secs_weights
+
+    # 9c. CLV (closing line value) by strategy — strategies with positive CLV
     # are genuinely skilled even if variance hides it. Use this as a secondary
     # signal when win rate sample is small.
     clv_by_strat = {}
@@ -7970,6 +8097,35 @@ def _auto_tune_thresholds():
             if reason:
                 _log_activity(f"🧠 AUTO-TUNE: {reason}", "info")
 
+        # Per-sport penalty: if a strategy+sport combo is losing badly, flag it
+        # so the learning multiplier can penalize those specific trades
+        try:
+            _cutoff_7d = (datetime.datetime.utcnow() - datetime.timedelta(days=7)).isoformat() + "Z"
+            _sport_strat_stats = {}
+            with _TRADE_JOURNAL_LOCK:
+                for t in _TRADE_JOURNAL:
+                    if not t.get("result") or (t.get("entry_time", "") or "") < _cutoff_7d:
+                        continue
+                    _ss_key = f"{t.get('strategy', 'unknown')}:{t.get('sport_type', 'other')}"
+                    _ss = _sport_strat_stats.setdefault(_ss_key, {"w": 0, "l": 0})
+                    if t["result"] == "win":
+                        _ss["w"] += 1
+                    elif t["result"] == "loss":
+                        _ss["l"] += 1
+            _sport_penalties = {}
+            for _ss_key, _ss in _sport_strat_stats.items():
+                _total = _ss["w"] + _ss["l"]
+                if _total >= 5 and _ss["w"] / max(1, _total) < 0.10:
+                    _sport_penalties[_ss_key] = 0.3  # heavy penalty for <10% WR on 5+ trades
+                elif _total >= 8 and _ss["w"] / max(1, _total) < 0.20:
+                    _sport_penalties[_ss_key] = 0.5  # moderate penalty
+            adaptive["sport_strategy_penalties"] = _sport_penalties
+            if _sport_penalties:
+                for _sp_key, _sp_val in _sport_penalties.items():
+                    _log_activity(f"🧠 SPORT PENALTY: {_sp_key} → {_sp_val:.0%} multiplier", "warn")
+        except Exception:
+            pass
+
         # Overall snapshot (legacy compat)
         total_recent = sum(s.get("sample_size", 0) for s in stats.values())
         total_wins = sum(s.get("wins", 0) for s in stats.values())
@@ -8059,7 +8215,7 @@ def _adaptive_get(key, default):
         return default
 
 
-def _learning_multiplier(ticker, title, price_cents=None, game_info=None, espn_edge=None):
+def _learning_multiplier(ticker, title, price_cents=None, game_info=None, espn_edge=None, strategy=None, hours_to_close=None):
     """Compute composite bet sizing multiplier from all learned dimensions.
 
     Returns 0.0 (skip) to 3.0 (max confidence). Each dimension contributes
@@ -8120,6 +8276,44 @@ def _learning_multiplier(ticker, title, price_cents=None, game_info=None, espn_e
     if hour_w.get("confidence", 0) >= 0.5:
         # Floor at 0.15 — don't fully block any hour
         multipliers.append(max(hour_w["weight"], 0.15))
+
+    # Per-sport+strategy penalty — if this exact combo is losing badly, penalize
+    if strategy:
+        _sp_penalties = _LEARNING_STATE.get("adaptive", {}).get("sport_strategy_penalties", {})
+        if _sp_penalties:
+            _sp_key = f"{strategy}:{sport}"
+            if _sp_key in _sp_penalties:
+                multipliers.append(_sp_penalties[_sp_key])
+
+    # CLV-weighted sizing — strategies with proven closing line value get a boost
+    if strategy:
+        clv_data = _LEARNING_STATE.get("clv_by_strategy", {}).get(strategy, {})
+        if clv_data.get("sample_size", 0) >= 10:
+            avg_clv = clv_data.get("avg_cents", 0)
+            if avg_clv >= 2.0:
+                multipliers.append(1.4)  # strong CLV+ = 40% boost
+            elif avg_clv >= 1.0:
+                multipliers.append(1.2)  # moderate CLV+ = 20% boost
+            elif avg_clv <= -2.0:
+                multipliers.append(0.5)  # strong CLV- = 50% penalty
+            elif avg_clv <= -1.0:
+                multipliers.append(0.7)  # moderate CLV- = 30% penalty
+
+    # Hours-to-close weight — learned optimal entry windows
+    if hours_to_close is not None:
+        if hours_to_close < 1:
+            _htc_key = "<1h"
+        elif hours_to_close < 3:
+            _htc_key = "1-3h"
+        elif hours_to_close < 6:
+            _htc_key = "3-6h"
+        elif hours_to_close < 12:
+            _htc_key = "6-12h"
+        else:
+            _htc_key = "12h+"
+        htc_w = params.get("hours_to_close_weights", {}).get(_htc_key, {})
+        if htc_w.get("confidence", 0) >= 0.5:
+            multipliers.append(max(htc_w["weight"], 0.2))
 
     # Loss pattern penalty — if dominant loss pattern for this sport/category is
     # stale_edge or blowout, penalize trades matching that profile
@@ -9633,7 +9827,23 @@ def _ensure_bg_thread():
                     print(f"[LEARNING] Heartbeat cycle={_learn_cycle} version={_v} total_tunes={_tunes}")
             except Exception as _le:
                 print(f"[LEARNING] Error: {_le}")
-            _time.sleep(600)  # 10 minutes — was 3min, too frequent and blocked strategy threads
+            # Turbo mode: if any strategy just had 3+ losses in a row, tune faster
+            _turbo = False
+            try:
+                for _turbo_strat in ["live_sniper", "moonshark", "closegame", "momentum_swing", "goalie_pulled"]:
+                    _recent_results = []
+                    with _TRADE_JOURNAL_LOCK:
+                        for t in reversed(_TRADE_JOURNAL):
+                            if t.get("strategy") == _turbo_strat and t.get("result") in ("win", "loss"):
+                                _recent_results.append(t["result"])
+                                if len(_recent_results) >= 3:
+                                    break
+                    if len(_recent_results) >= 3 and all(r == "loss" for r in _recent_results):
+                        _turbo = True
+                        break
+            except Exception:
+                pass
+            _time.sleep(180 if _turbo else 600)  # 3min turbo / 10min normal
 
     _learning_loop_fn = _learning_loop
     _learn_thread_ref = threading.Thread(target=_learning_loop, daemon=True)
@@ -14252,8 +14462,9 @@ _ESPN_SUMMARY_PATHS = {
     "epl": ("soccer", "eng.1"),
 }
 
-_win_prob_cache = {}  # cache_key -> {"prob": float, "ts": float}
+_win_prob_cache = {}  # cache_key -> {"prob": float, "ts": float, "score_hash": str}
 _WIN_PROB_TTL = 15  # 15 second cache — faster updates for live game edge
+_score_hash_cache = {}  # event_id -> "home_score-away_score" (updated from ESPN scores)
 
 
 def _get_espn_win_prob(event_id, league, home_team=True):
@@ -14265,8 +14476,15 @@ def _get_espn_win_prob(event_id, league, home_team=True):
     import time as _t
     now = _t.time()
     cache_key = f"{league}_{event_id}_{home_team}"
-    if cache_key in _win_prob_cache and now - _win_prob_cache[cache_key]["ts"] < _WIN_PROB_TTL:
-        return _win_prob_cache[cache_key]["prob"]
+    cached = _win_prob_cache.get(cache_key)
+    if cached and now - cached["ts"] < _WIN_PROB_TTL:
+        # Invalidate if score has changed since we cached the win prob
+        _current_score_hash = _score_hash_cache.get(str(event_id))
+        _cached_score_hash = cached.get("score_hash")
+        if _current_score_hash and _cached_score_hash and _current_score_hash != _cached_score_hash:
+            pass  # score changed — refetch win prob
+        else:
+            return cached["prob"]
 
     sport_league = _ESPN_SUMMARY_PATHS.get(league.lower())
     if not sport_league or not event_id:
@@ -14277,6 +14495,21 @@ def _get_espn_win_prob(event_id, league, home_team=True):
         resp = requests.get(url, timeout=5)
         if resp.ok:
             data = resp.json()
+            # Extract current score for staleness detection
+            _summary_score_hash = None
+            try:
+                _boxscore = data.get("boxscore", {}) or data.get("header", {})
+                _comps = (_boxscore.get("competition", []) or data.get("header", {}).get("competitions", []))
+                if _comps:
+                    _comp = _comps[0] if isinstance(_comps, list) else _comps
+                    _teams = _comp.get("competitors", [])
+                    if len(_teams) >= 2:
+                        _s0 = _teams[0].get("score", "0")
+                        _s1 = _teams[1].get("score", "0")
+                        _summary_score_hash = f"{_s0}-{_s1}"
+                        _score_hash_cache[str(event_id)] = _summary_score_hash
+            except Exception:
+                pass
             # Try predictor first (more common)
             predictor = data.get("predictor", {})
             if predictor:
@@ -14284,7 +14517,7 @@ def _get_espn_win_prob(event_id, league, home_team=True):
                 if home_proj is not None:
                     home_prob = float(home_proj) / 100
                     prob = home_prob if home_team else (1 - home_prob)
-                    _win_prob_cache[cache_key] = {"prob": prob, "ts": now}
+                    _win_prob_cache[cache_key] = {"prob": prob, "ts": now, "score_hash": _summary_score_hash}
                     return prob
             # Try winprobability array
             wp = data.get("winprobability", [])
@@ -14294,7 +14527,7 @@ def _get_espn_win_prob(event_id, league, home_team=True):
                 if home_wp is not None:
                     home_prob = float(home_wp) / 100
                     prob = home_prob if home_team else (1 - home_prob)
-                    _win_prob_cache[cache_key] = {"prob": prob, "ts": now}
+                    _win_prob_cache[cache_key] = {"prob": prob, "ts": now, "score_hash": _summary_score_hash}
                     return prob
     except Exception:
         pass
