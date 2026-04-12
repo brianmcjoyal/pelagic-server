@@ -19165,7 +19165,7 @@ a:hover { color: #7da5f5; }
       <div style="display:flex;gap:6px" id="perf-chart-range">
         <button onclick="setPerfRange('1h')" class="refresh-btn perf-range-btn" data-range="1h" style="font-size:9px;padding:2px 8px">1H</button>
         <button onclick="setPerfRange('6h')" class="refresh-btn perf-range-btn" data-range="6h" style="font-size:9px;padding:2px 8px">6H</button>
-        <button onclick="setPerfRange('1d')" class="refresh-btn perf-range-btn" data-range="1d" style="font-size:9px;padding:2px 8px">1D</button>
+        <button onclick="setPerfRange('1d')" class="refresh-btn perf-range-btn" data-range="1d" style="font-size:9px;padding:2px 8px">TODAY</button>
         <button onclick="setPerfRange('7d')" class="refresh-btn perf-range-btn" data-range="7d" style="font-size:9px;padding:2px 8px">7D</button>
         <button onclick="setPerfRange('all')" class="refresh-btn perf-range-btn active" data-range="all" style="font-size:9px;padding:2px 8px;background:#00dc5a;color:#000">ALL</button>
       </div>
@@ -21081,16 +21081,56 @@ function filterPerfData() {
   var cutoff = null;
   if (_perfChartRange === '1h') cutoff = new Date(now - 3600000);
   else if (_perfChartRange === '6h') cutoff = new Date(now - 6 * 3600000);
-  else if (_perfChartRange === '1d') cutoff = new Date(now - 86400000);
+  else if (_perfChartRange === '1d') {
+    // "1D" = TODAY since midnight Pacific Time — matches Daily P&L header
+    var ptNow = new Date(now.toLocaleString('en-US', {timeZone: 'America/Los_Angeles'}));
+    cutoff = new Date(ptNow.getFullYear(), ptNow.getMonth(), ptNow.getDate());
+    // Convert back to UTC: get the offset
+    var midnightPT = new Date(now);
+    midnightPT.setHours(midnightPT.getHours() - (now - cutoff) / 3600000);
+    // Simpler: just use hours since midnight PT
+    var hrsSinceMidnight = ptNow.getHours() + ptNow.getMinutes() / 60;
+    cutoff = new Date(now - hrsSinceMidnight * 3600000);
+  }
   else if (_perfChartRange === '7d') cutoff = new Date(now - 7 * 86400000);
-  // 'all' = no cutoff
-  if (!cutoff) return _perfChartData;
+  // 'all' = no cutoff, but still smooth spikes
+  if (!cutoff) {
+    var allPts = _perfChartData.slice();
+    if (allPts.length > 4) {
+      for (var si = 1; si < allPts.length - 1; si++) {
+        var prev = allPts[si - 1].value;
+        var curr = allPts[si].value;
+        var next = allPts[si + 1].value;
+        var avgNeighbor = (prev + next) / 2;
+        var jumpPct = Math.abs(curr - avgNeighbor) / avgNeighbor;
+        if (jumpPct > 0.03) {
+          allPts[si] = {ts: allPts[si].ts, value: Math.round(avgNeighbor * 100) / 100, cash: allPts[si].cash};
+        }
+      }
+    }
+    return allPts;
+  }
   // Parse timestamps properly — string comparison breaks with timezone offsets
   var cutMs = cutoff.getTime();
-  return _perfChartData.filter(function(p) {
+  var filtered = _perfChartData.filter(function(p) {
     var d = new Date(p.ts);
     return !isNaN(d.getTime()) && d.getTime() >= cutMs;
   });
+  // Smooth out outlier spikes (data artifacts from mid-refresh snapshots)
+  // Replace any point that jumps >3% from its neighbors with the average of neighbors
+  if (filtered.length > 4) {
+    for (var si = 1; si < filtered.length - 1; si++) {
+      var prev = filtered[si - 1].value;
+      var curr = filtered[si].value;
+      var next = filtered[si + 1].value;
+      var avgNeighbor = (prev + next) / 2;
+      var jumpPct = Math.abs(curr - avgNeighbor) / avgNeighbor;
+      if (jumpPct > 0.03) {
+        filtered[si] = {ts: filtered[si].ts, value: Math.round(avgNeighbor * 100) / 100, cash: filtered[si].cash};
+      }
+    }
+  }
+  return filtered;
 }
 
 function drawPerfLineChart() {
