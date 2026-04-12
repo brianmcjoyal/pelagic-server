@@ -12678,7 +12678,10 @@ def performance_history():
     Downsamples large datasets to keep response <50KB for fast loads."""
     try:
         since = request.args.get("since", "")
-        limit = int(request.args.get("limit", "0") or "0")
+        try:
+            limit = int(request.args.get("limit", "0") or "0")
+        except (ValueError, TypeError):
+            limit = 0
         with _PERF_HISTORY_LOCK:
             pts = list(_PERF_HISTORY)
         if since:
@@ -12688,13 +12691,22 @@ def performance_history():
         # Downsample to max 500 points — preserves first, last, and evenly-spaced interior
         max_pts = 500
         if len(pts) > max_pts:
-            step = len(pts) / (max_pts - 2)  # -2 for first and last
+            step = max(1, len(pts) / (max_pts - 2))  # -2 for first and last
             sampled = [pts[0]]
             for i in range(1, max_pts - 1):
-                sampled.append(pts[int(i * step)])
+                idx = int(i * step)
+                if idx < len(pts):
+                    sampled.append(pts[idx])
             sampled.append(pts[-1])
             pts = sampled
-        return jsonify({"history": pts, "count": len(pts)})
+        # Ensure all points are JSON-serializable (no datetime objects)
+        clean_pts = []
+        for p in pts:
+            cp = {}
+            for k, v in p.items():
+                cp[k] = str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v
+            clean_pts.append(cp)
+        return jsonify({"history": clean_pts, "count": len(clean_pts)})
     except Exception as e:
         print(f"[PERF-HISTORY] Endpoint error: {e}")
         import traceback; traceback.print_exc()
