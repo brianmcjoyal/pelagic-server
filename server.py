@@ -2400,8 +2400,8 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
         return False, f"Price {price_cents}c below 15c minimum floor"
 
     # GLOBAL MAXIMUM PRICE CEILING — heavy favorites (>65c) have 0% settled win rate
-    # At 65c you risk 65c to win 32.5c (after fee). Above this, risk/reward is terrible.
-    if price_cents > 65:
+    # Exception: arb and hedge strategies buy opposite sides to lock in guaranteed profit
+    if price_cents > 65 and strategy not in ("arb", "hedge"):
         _PRETRADE_STATS["blocked"] += 1
         _PRETRADE_STATS["reasons"]["above_price_ceiling"] = _PRETRADE_STATS["reasons"].get("above_price_ceiling", 0) + 1
         return False, f"Price {price_cents}c above 65c ceiling — heavy favorites lose money"
@@ -2506,8 +2506,11 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
             _PRETRADE_STATS["blocked"] += 1
             _PRETRADE_STATS["reasons"]["learning_blocked"] = _PRETRADE_STATS["reasons"].get("learning_blocked", 0) + 1
             return False, f"Learning engine blocked (multiplier={mult:.2f})"
-    except Exception:
-        pass  # learning engine not ready, allow trade
+    except Exception as _le:
+        # FAIL CLOSED — if learning engine crashes, block the trade (don't let bad bets through)
+        _PRETRADE_STATS["blocked"] += 1
+        _PRETRADE_STATS["reasons"]["learning_error"] = _PRETRADE_STATS["reasons"].get("learning_error", 0) + 1
+        return False, f"Learning engine error: {str(_le)[:50]}"
 
     # ALL CHECKS PASSED
     _PRETRADE_STATS["passed"] += 1
@@ -6916,7 +6919,7 @@ def run_market_maker(all_markets):
             continue
 
         # Place buy order (resting limit)
-        buy_result = place_kalshi_order(ticker, "yes", opp["buy_yes_price"], count=5)
+        buy_result = place_kalshi_order(ticker, "yes", opp["buy_yes_price"], count=5, strategy="market_maker")
         if "error" not in buy_result:
             _market_maker_orders[ticker] = {
                 "buy_price": opp["buy_yes_price"],
@@ -7421,7 +7424,8 @@ def run_quant_strategies(all_markets):
             "info"
         )
 
-        result = place_kalshi_order(ticker, side, price_cents, count=count)
+        result = place_kalshi_order(ticker, side, price_cents, count=count, strategy="quant",
+                                    win_prob=confidence, edge=confidence - (price_cents / 100.0))
         success = "error" not in result
 
         trade_record = {
@@ -15617,13 +15621,13 @@ def _check_arbitrage():
             if max_contracts > 0:
                 try:
                     # Place YES side first with immediate_or_cancel to avoid partial exposure
-                    res_yes = place_kalshi_order(ticker, "yes", yes_ask, count=max_contracts)
+                    res_yes = place_kalshi_order(ticker, "yes", yes_ask, count=max_contracts, strategy="arb")
                     yes_filled = int(float(str(res_yes.get("order", {}).get("filled_count_fp") or 0)))
                     if yes_filled == 0:
                         _log_activity(f"ARB: YES side got 0 fills for {ticker}, skipping NO side", "info")
                     else:
                         # Only place NO side for the amount YES actually filled
-                        res_no = place_kalshi_order(ticker, "no", no_ask, count=yes_filled)
+                        res_no = place_kalshi_order(ticker, "no", no_ask, count=yes_filled, strategy="arb")
                         no_filled = int(float(str(res_no.get("order", {}).get("filled_count_fp") or 0)))
                         filled = min(yes_filled, no_filled)
                         if filled > 0:
@@ -15777,7 +15781,7 @@ def _smart_position_management():
                     _worst_case_fee = 0.07 * max(100 - entry, 100 - _opp_ask)
                     _net_after_fee = _guaranteed_profit_cents - _worst_case_fee
                     if _net_after_fee >= 12 and count >= 1:  # ~13c gross, ~12c net — real profit
-                        _hedge_result = place_kalshi_order(ticker, _opp_side, _opp_ask, count=count)
+                        _hedge_result = place_kalshi_order(ticker, _opp_side, _opp_ask, count=count, strategy="hedge")
                         if "error" not in _hedge_result:
                             _hedge_filled = 0
                             try:
@@ -17372,21 +17376,9 @@ def moonshot_bet():
 
     count = max(1, int(bet_usd * 100 / max(1, price_cents)))
     try:
-        order_h = signed_headers("POST", "/portfolio/orders")
-        order_body = {
-            "ticker": ticker,
-            "action": "buy",
-            "type": "limit",
-            "side": side,
-            "count": count,
-            "yes_price": price_cents if side == "yes" else (100 - price_cents),
-            "expiration_ts": int((datetime.datetime.utcnow() + datetime.timedelta(minutes=2)).timestamp()),
-        }
-        resp = requests.post(
-            KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/orders",
-            headers=order_h, json=order_body, timeout=10,
-        )
-        if resp.ok:
+        # Route through place_kalshi_order so it hits the pretrade gateway
+        resp_data = place_kalshi_order(ticker, side, price_cents, count=count, strategy="moonshot")
+        if "error" not in resp_data:
             actual_cost = (price_cents * count) / 100
             BOT_STATE["moonshot_fund"] = max(0, fund - actual_cost)
             BOT_STATE["moonshot_bets"] = BOT_STATE.get("moonshot_bets", 0) + 1
@@ -17407,7 +17399,7 @@ def moonshot_bet():
             _journal_trade(ticker, ticker, side, price_cents, count, actual_cost, _strategy, is_live=True)
             return jsonify({"success": True, "cost": actual_cost, "count": count, "potential_payout": payout})
         else:
-            return jsonify({"error": resp.text}), 400
+            return jsonify({"error": resp_data.get("error", "Order rejected by gateway")}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
