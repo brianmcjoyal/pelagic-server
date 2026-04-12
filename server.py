@@ -3336,6 +3336,7 @@ _SKIP_REASONS_LOCK = _threading.Lock()   # protects _SKIP_REASONS_TODAY from bac
 _LEARNING_STATE_LOCK = _threading.Lock() # protects _LEARNING_STATE updates from the dedicated learning thread
 _PERF_HISTORY_LOCK = _threading.Lock()   # protects _PERF_HISTORY from concurrent read/write
 _STATE_FILE_LOCK = _threading.Lock()     # protects _save_state() from concurrent writes (bg thread + request handlers)
+_PAPER_TRADES_LOCK = _threading.Lock()   # protects _PAPER_TRADES from concurrent bg thread write + Flask read
 _EVENTS_BET_TODAY = set()  # shared across all strategies
 _similarity_local = _threading.local()
 
@@ -5585,7 +5586,7 @@ def closegame_snipe():
 FLOOR_MAX_DAILY_USD = 30.0  # total cap for the floor strategy per day
 FLOOR_BET_USD = 3.0         # default bet size — small so losses stay small
 FLOOR_MIN_PRICE = 15        # widest allowed range — 15c to 88c (floor at 15c minimum)
-FLOOR_MAX_PRICE = 88
+FLOOR_MAX_PRICE = 65  # aligned with gateway ceiling (was 88, dead code above 65c)
 FLOOR_MIN_EDGE = 0.05       # 5% ESPN edge minimum — same bar as moonshark, no charity bets
 FLOOR_MIN_CONVICTION = 3    # relaxed but not reckless — 2 was too loose
 
@@ -6294,7 +6295,7 @@ GOALIE_MAX_TRADES = 5
 GOALIE_BET_USD = 4.0
 GOALIE_MIN_EDGE = 0.05  # 5% — this is a fast-moving microstructure bet
 GOALIE_MIN_PRICE = 15
-GOALIE_MAX_PRICE = 92
+GOALIE_MAX_PRICE = 65  # aligned with gateway ceiling (was 92, dead code above 65c)
 BOT_STATE.setdefault("goalie_trades_today", [])
 BOT_STATE.setdefault("goalie_daily_spent", 0.0)
 BOT_STATE.setdefault("goalie_date", None)
@@ -6485,7 +6486,7 @@ def goalie_pulled_snipe():
 
         # EV-after-fees filter — skip negative-EV bets
         _gl_ev = edge * (100 - price)  # EV per contract in cents
-        _gl_fee = 0.07 * best["our_prob"] * (100 - price) / 100.0  # expected fee in cents
+        _gl_fee = 0.07 * best["our_prob"] * (100 - price)  # expected fee in cents (was /100 — unit mismatch bug)
         _gl_ev_after_fees = _gl_ev - _gl_fee
         if _gl_ev_after_fees <= 0:
             _log_activity(f"GOALIE SKIP {ticker}: negative EV after fees ({_gl_ev_after_fees:.1f}c)", "info")
@@ -8176,12 +8177,12 @@ def _paper_trade_sniper():
                     "pnl_cents": None,
                 }
 
-                _PAPER_TRADES.append(paper)
+                with _PAPER_TRADES_LOCK:
+                    _PAPER_TRADES.append(paper)
+                    # Keep list bounded
+                    if len(_PAPER_TRADES) > _PAPER_TRADES_MAX:
+                        _PAPER_TRADES[:] = _PAPER_TRADES[-_PAPER_TRADES_MAX:]
                 _PAPER_COOLDOWN[ticker] = now_ts
-
-                # Keep list bounded
-                if len(_PAPER_TRADES) > _PAPER_TRADES_MAX:
-                    _PAPER_TRADES[:] = _PAPER_TRADES[-_PAPER_TRADES_MAX:]
 
                 print(f"[PAPER] {side.upper()} {ticker} @ {price}c | ESPN={our_prob:.0%} Kalshi={kalshi_implied:.0%} edge={edge:.0%} EV={ev_cents:.1f}c | {game_info}")
 
@@ -8212,7 +8213,9 @@ def _paper_trade_update():
 
         now_ts = _time.time()
 
-        for pt in _PAPER_TRADES:
+        with _PAPER_TRADES_LOCK:
+            _pt_snapshot = list(_PAPER_TRADES)
+        for pt in _pt_snapshot:
             if pt.get("result") is not None:
                 continue  # already settled
 
@@ -8274,19 +8277,21 @@ def _paper_trade_update():
 
 def _paper_trade_stats():
     """Compute paper trading statistics."""
-    if not _PAPER_TRADES:
-        return {"total": 0, "message": "No paper trades yet — waiting for live game signals"}
+    with _PAPER_TRADES_LOCK:
+        if not _PAPER_TRADES:
+            return {"total": 0, "message": "No paper trades yet — waiting for live game signals"}
+        _pts = list(_PAPER_TRADES)  # snapshot under lock
 
-    total = len(_PAPER_TRADES)
-    settled = [p for p in _PAPER_TRADES if p.get("result") in ("win", "loss")]
+    total = len(_pts)
+    settled = [p for p in _pts if p.get("result") in ("win", "loss")]
     wins = [p for p in settled if p["result"] == "win"]
     losses = [p for p in settled if p["result"] == "loss"]
     pending = total - len(settled)
 
     # CLV analysis — the key metric
-    clv_5 = [p["clv_5min"] for p in _PAPER_TRADES if p.get("clv_5min") is not None]
-    clv_15 = [p["clv_15min"] for p in _PAPER_TRADES if p.get("clv_15min") is not None]
-    clv_30 = [p["clv_30min"] for p in _PAPER_TRADES if p.get("clv_30min") is not None]
+    clv_5 = [p["clv_5min"] for p in _pts if p.get("clv_5min") is not None]
+    clv_15 = [p["clv_15min"] for p in _pts if p.get("clv_15min") is not None]
+    clv_30 = [p["clv_30min"] for p in _pts if p.get("clv_30min") is not None]
 
     avg_clv_5 = round(sum(clv_5) / len(clv_5), 2) if clv_5 else None
     avg_clv_15 = round(sum(clv_15) / len(clv_15), 2) if clv_15 else None
@@ -8294,7 +8299,7 @@ def _paper_trade_stats():
 
     # P&L
     total_pnl = sum(p.get("pnl_cents", 0) or 0 for p in settled)
-    avg_edge = round(sum(p.get("edge", 0) for p in _PAPER_TRADES) / total, 3) if total else 0
+    avg_edge = round(sum(p.get("edge", 0) for p in _pts) / total, 3) if total else 0
 
     win_rate = round(len(wins) / len(settled) * 100, 1) if settled else 0
 
@@ -8324,7 +8329,7 @@ def _paper_trade_stats():
         "clv_30min_avg": avg_clv_30,
         "clv_5min_count": len(clv_5),
         "verdict": verdict,
-        "trades": _PAPER_TRADES[-20:],  # last 20 for display
+        "trades": _pts[-20:],  # last 20 for display
     }
 
 
@@ -8501,8 +8506,9 @@ def _watchdog_check():
         if _recent_total >= 8:
             _recent_wr = _recent_wins / _recent_total
             if _recent_wr < 0.15:  # less than 15% win rate on last 48h of settled trades
-                if BOT_STATE.get("auto_trade", True):
-                    BOT_STATE["auto_trade"] = False
+                if BOT_CONFIG.get("enabled", False):
+                    BOT_CONFIG["enabled"] = False
+                    BOT_STATE["auto_trade"] = False  # also set for dashboard display
                     alerts.append(f"🛑 AUTO-PAUSED: 48h settled win rate {_recent_wr:.0%} ({_recent_wins}W/{_recent_losses}L) — trading stopped until manually re-enabled")
                     try:
                         _send_discord(f"🛑 **TRADING AUTO-PAUSED**\n48h win rate: {_recent_wr:.0%} ({_recent_wins}W/{_recent_losses}L)\nBot has stopped trading. Re-enable manually when ready.", color=0xff0000)
@@ -8520,7 +8526,16 @@ def _watchdog_check():
             if t.get("result") == "loss" and str(t.get("settlement_time") or "")[:10] == _today_str
         )
         if _today_losses < -20:  # lost more than $20 today on settled trades
-            alerts.append(f"DAILY LOSS LIMIT: ${_today_losses:.2f} realized losses today — consider pausing")
+            if BOT_CONFIG.get("enabled", False):
+                BOT_CONFIG["enabled"] = False
+                BOT_STATE["auto_trade"] = False
+                alerts.append(f"🛑 DAILY LOSS LIMIT HIT: ${_today_losses:.2f} realized losses today — trading auto-paused")
+                try:
+                    _send_discord(f"🛑 **DAILY LOSS LIMIT**\nRealized losses today: ${_today_losses:.2f}\nTrading auto-paused. Re-enable manually.", color=0xff0000)
+                except Exception:
+                    pass
+            else:
+                alerts.append(f"DAILY LOSS LIMIT: ${_today_losses:.2f} realized losses today (already paused)")
     except Exception:
         pass
 
