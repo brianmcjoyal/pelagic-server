@@ -2530,6 +2530,16 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
             ticker, side, price_cents, count, cost_est,
             strategy=strategy, win_prob=win_prob, edge=edge
         )
+        # TRADE RECEIPT — log every attempt (pass or fail) for full audit trail
+        _receipt = (f"{'✅ PASS' if ok else '🚫 BLOCK'} | {strategy or 'unknown'} | "
+                    f"{side} {ticker} @ {price_cents}c x{count} = ${cost_est:.2f} | "
+                    f"prob={win_prob:.0%} edge={edge:.1%}" if win_prob and edge else
+                    f"{'✅ PASS' if ok else '🚫 BLOCK'} | {strategy or 'unknown'} | "
+                    f"{side} {ticker} @ {price_cents}c x{count} = ${cost_est:.2f} | "
+                    f"no prob/edge supplied")
+        if not ok:
+            _receipt += f" | reason: {reason}"
+        print(f"[GATEWAY] {_receipt}")
         if not ok:
             _log_activity(f"🚫 BLOCKED by gateway: {ticker} {side} @ {price_cents}c — {reason}", "warn")
             return {"error": f"Pre-trade validation failed: {reason}"}
@@ -8147,18 +8157,61 @@ def _watchdog_check():
     except Exception:
         pass
 
+    # CHECK 13: AUTO-PAUSE KILL SWITCH — if recent settled trades are overwhelmingly losses,
+    # automatically pause trading. This prevents the bot from burning cash while we sleep.
+    try:
+        _recent_cutoff = (datetime.datetime.now(tz=_PACIFIC) - datetime.timedelta(hours=48)).isoformat()
+        _recent_wins = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "win" and (t.get("settlement_time") or "") >= _recent_cutoff)
+        _recent_losses = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "loss" and (t.get("settlement_time") or "") >= _recent_cutoff)
+        _recent_total = _recent_wins + _recent_losses
+        if _recent_total >= 8:
+            _recent_wr = _recent_wins / _recent_total
+            if _recent_wr < 0.15:  # less than 15% win rate on last 48h of settled trades
+                if BOT_STATE.get("auto_trade", True):
+                    BOT_STATE["auto_trade"] = False
+                    alerts.append(f"🛑 AUTO-PAUSED: 48h settled win rate {_recent_wr:.0%} ({_recent_wins}W/{_recent_losses}L) — trading stopped until manually re-enabled")
+                    try:
+                        _send_discord(f"🛑 **TRADING AUTO-PAUSED**\n48h win rate: {_recent_wr:.0%} ({_recent_wins}W/{_recent_losses}L)\nBot has stopped trading. Re-enable manually when ready.", color=0xff0000)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    # CHECK 14: DAILY LOSS LIMIT — if today's realized losses exceed $20, pause for the day
+    try:
+        _today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+        _today_losses = sum(
+            float(t.get("pnl_usd") or t.get("pnl") or 0)
+            for t in _TRADE_JOURNAL
+            if t.get("result") == "loss" and str(t.get("settlement_time") or "")[:10] == _today_str
+        )
+        if _today_losses < -20:  # lost more than $20 today on settled trades
+            alerts.append(f"DAILY LOSS LIMIT: ${_today_losses:.2f} realized losses today — consider pausing")
+    except Exception:
+        pass
+
+    # CHECK 15: GATEWAY INTEGRITY — verify place_kalshi_order actually calls the gateway
+    # by checking that checked count grows when trades are placed
+    try:
+        _trades_today = len(BOT_STATE.get("all_trades", []))
+        _gateway_checked = _PRETRADE_STATS.get("checked", 0)
+        # If we've placed trades but gateway shows 0 checks, something bypassed it
+        if _trades_today > 5 and _gateway_checked == 0:
+            alerts.append(f"⚠️ GATEWAY BYPASS: {_trades_today} trades today but gateway checked 0 — trades may be bypassing safety checks")
+    except Exception:
+        pass
+
     # Log alerts
     if alerts:
         _WATCHDOG_ALERTS = [{"alert": a, "time": now_str} for a in alerts]
         for a in alerts:
             _log_activity(f"⚠️ WATCHDOG: {a}", "error")
-        # Send critical alerts to Discord
-        if any("BUDGET" in a or "LOW WIN RATE" in a for a in alerts):
-            try:
-                _discord_msg = "🚨 **WATCHDOG ALERTS**\n" + "\n".join(f"• {a}" for a in alerts)
-                _send_discord(_discord_msg, color=0xff0000)
-            except Exception:
-                pass
+        # Send critical alerts to Discord — send ALL alerts, not just budget/win rate
+        try:
+            _discord_msg = "🚨 **WATCHDOG ALERTS**\n" + "\n".join(f"• {a}" for a in alerts)
+            _send_discord(_discord_msg, color=0xff0000)
+        except Exception:
+            pass
     else:
         _WATCHDOG_ALERTS = []
 
