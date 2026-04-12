@@ -3160,10 +3160,14 @@ def _fit_to_game_cap(event_key, price_cents, count):
 DAILY_BET_FLOOR = 3  # minimum bets placed per day — 5 was too aggressive, caused spray-betting
 
 def _total_daily_spent():
-    """Sum daily spending across ALL 7 strategy buckets. Used for global budget enforcement."""
+    """Sum daily spending across all strategy buckets. Used for global budget enforcement.
+
+    NOTE: We use ONLY the per-strategy counters — NOT daily_spent_usd.
+    daily_spent_usd is a legacy global counter that gets set by _hydrate_from_kalshi
+    to ALL today's spending. Adding it to per-strategy spends would double-count.
+    """
     return (
-        BOT_STATE.get("daily_spent_usd", 0)
-        + BOT_STATE.get("snipe_daily_spent", 0)
+        BOT_STATE.get("snipe_daily_spent", 0)
         + BOT_STATE.get("moonshark_daily_spent", 0)
         + BOT_STATE.get("closegame_daily_spent", 0)
         + BOT_STATE.get("floor_daily_spent", 0)
