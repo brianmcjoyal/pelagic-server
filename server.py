@@ -12676,24 +12676,29 @@ _PORTFOLIO_CACHE_TTL = 15  # seconds — serve cached data between refreshes
 def performance_history():
     """Return portfolio value history for the performance line chart.
     Downsamples large datasets to keep response <50KB for fast loads."""
-    since = request.args.get("since", "")
-    limit = int(request.args.get("limit", "0") or "0")
-    with _PERF_HISTORY_LOCK:
-        pts = list(_PERF_HISTORY)
-    if since:
-        pts = [p for p in pts if p["ts"][:10] >= since]
-    if limit and limit > 0:
-        pts = pts[-limit:]
-    # Downsample to max 500 points — preserves first, last, and evenly-spaced interior
-    max_pts = 500
-    if len(pts) > max_pts:
-        step = len(pts) / (max_pts - 2)  # -2 for first and last
-        sampled = [pts[0]]
-        for i in range(1, max_pts - 1):
-            sampled.append(pts[int(i * step)])
-        sampled.append(pts[-1])
-        pts = sampled
-    return jsonify({"history": pts, "count": len(pts)})
+    try:
+        since = request.args.get("since", "")
+        limit = int(request.args.get("limit", "0") or "0")
+        with _PERF_HISTORY_LOCK:
+            pts = list(_PERF_HISTORY)
+        if since:
+            pts = [p for p in pts if p.get("ts", "")[:10] >= since]
+        if limit and limit > 0:
+            pts = pts[-limit:]
+        # Downsample to max 500 points — preserves first, last, and evenly-spaced interior
+        max_pts = 500
+        if len(pts) > max_pts:
+            step = len(pts) / (max_pts - 2)  # -2 for first and last
+            sampled = [pts[0]]
+            for i in range(1, max_pts - 1):
+                sampled.append(pts[int(i * step)])
+            sampled.append(pts[-1])
+            pts = sampled
+        return jsonify({"history": pts, "count": len(pts)})
+    except Exception as e:
+        print(f"[PERF-HISTORY] Endpoint error: {e}")
+        import traceback; traceback.print_exc()
+        return jsonify({"history": [], "count": 0, "error": str(e)})
 
 
 ## seed-perf-history debug endpoint removed — backfill runs automatically on startup
