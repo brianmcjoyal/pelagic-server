@@ -15282,7 +15282,10 @@ def _smart_position_management():
         sell_price = current
 
         # 0. HEDGE CHECK — if we can buy the opposite side for guaranteed profit, do it.
-        # e.g., hold YES at 70c entry, NO ask at 25c → 70+25=95c cost, $1 payout = 5c profit guaranteed
+        # Only worth it if the guaranteed profit is substantial enough to justify
+        # the capital tie-up and fees. Kalshi charges 7% of profit on the winning side,
+        # and the capital is locked until settlement. Require ≥15c guaranteed profit
+        # (15%+ return after fees) to make the opportunity cost worthwhile.
         try:
             _opp_side = "no" if side == "yes" else "yes"
             _hedge_mkt_path = f"/markets/{ticker}"
@@ -15296,8 +15299,9 @@ def _smart_position_management():
                     _opp_ask = int(round(float(str(_opp_ask_raw)) * 100)) if float(str(_opp_ask_raw)) < 1.5 else int(round(float(str(_opp_ask_raw))))
                     _total_cost = entry + _opp_ask
                     _guaranteed_profit_cents = 100 - _total_cost
-                    if _guaranteed_profit_cents >= 3 and count >= 1:  # at least 3c guaranteed profit per contract
-                        # Buy opposite side to lock in guaranteed profit
+                    # After 7% fee on the winning side: net = profit - 0.07 * profit = 0.93 * profit
+                    _net_after_fee = _guaranteed_profit_cents * 0.93
+                    if _net_after_fee >= 12 and count >= 1:  # ~13c gross, ~12c net — real profit
                         _hedge_result = place_kalshi_order(ticker, _opp_side, _opp_ask, count=count)
                         if "error" not in _hedge_result:
                             _hedge_filled = 0
@@ -15306,10 +15310,10 @@ def _smart_position_management():
                             except Exception:
                                 pass
                             if _hedge_filled > 0:
-                                _hedge_profit = _guaranteed_profit_cents * _hedge_filled / 100
+                                _hedge_profit = _net_after_fee * _hedge_filled / 100
                                 _log_activity(
                                     f"🔒 HEDGE LOCK: {ticker} bought {_hedge_filled}x {_opp_side.upper()} @ {_opp_ask}c "
-                                    f"(entry {side.upper()} @ {entry}c) — guaranteed +${_hedge_profit:.2f}",
+                                    f"(entry {side.upper()} @ {entry}c) — guaranteed +${_hedge_profit:.2f} after fees",
                                     "success"
                                 )
                                 continue  # skip normal exit logic, hedge handles it
