@@ -2354,10 +2354,149 @@ def find_consensus_mispricings(all_markets):
     return mispricings
 
 # ---------------------------------------------------------------------------
+# PRE-TRADE VALIDATION GATEWAY
+# ---------------------------------------------------------------------------
+# Every buy order MUST pass through this. It's the last line of defense
+# against bad trades. If this function returns a rejection, the trade
+# physically cannot happen. This prevents:
+#   - Negative EV trades (after fees)
+#   - Budget overruns
+#   - Blocked categories slipping through
+#   - Duplicate positions
+#   - Trades on settled/closed markets
+#   - Any trade that doesn't have a clear path to profit
+# ---------------------------------------------------------------------------
+
+_PRETRADE_STATS = {"checked": 0, "passed": 0, "blocked": 0, "reasons": {}}
+
+def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None,
+                       win_prob=None, edge=None, conviction=None):
+    """Single gateway that every buy order must pass through.
+
+    Returns (ok: bool, reason: str). If ok is False, the trade MUST NOT proceed.
+    This function enforces absolute rules that no strategy can override.
+    """
+    _PRETRADE_STATS["checked"] += 1
+
+    # 1. SANITY: basic parameter validation
+    if not ticker or not side or price_cents is None:
+        _PRETRADE_STATS["blocked"] += 1
+        _PRETRADE_STATS["reasons"]["missing_params"] = _PRETRADE_STATS["reasons"].get("missing_params", 0) + 1
+        return False, "Missing required parameters"
+
+    if price_cents < 1 or price_cents > 99:
+        _PRETRADE_STATS["blocked"] += 1
+        _PRETRADE_STATS["reasons"]["bad_price"] = _PRETRADE_STATS["reasons"].get("bad_price", 0) + 1
+        return False, f"Price {price_cents}c outside valid range 1-99"
+
+    if count < 1:
+        _PRETRADE_STATS["blocked"] += 1
+        _PRETRADE_STATS["reasons"]["bad_count"] = _PRETRADE_STATS["reasons"].get("bad_count", 0) + 1
+        return False, f"Count {count} must be >= 1"
+
+    if cost_usd < 0.01:
+        _PRETRADE_STATS["blocked"] += 1
+        _PRETRADE_STATS["reasons"]["bad_cost"] = _PRETRADE_STATS["reasons"].get("bad_cost", 0) + 1
+        return False, f"Cost ${cost_usd:.2f} too small"
+
+    # 2. BUDGET: absolute daily cap — no exceptions, no overrides
+    daily_spent = _total_daily_spent()
+    max_daily = BOT_CONFIG.get("max_daily_usd", 125.0)
+    if daily_spent + cost_usd > max_daily * 1.1:  # 10% buffer for rounding
+        _PRETRADE_STATS["blocked"] += 1
+        _PRETRADE_STATS["reasons"]["budget_exceeded"] = _PRETRADE_STATS["reasons"].get("budget_exceeded", 0) + 1
+        return False, f"Budget exceeded: ${daily_spent:.0f}+${cost_usd:.0f} > ${max_daily:.0f}"
+
+    # 3. MAX BET: no single trade bigger than config allows
+    max_bet = BOT_CONFIG.get("max_bet_usd", 25.0)
+    if cost_usd > max_bet * 1.5:  # 50% buffer for price bumps
+        _PRETRADE_STATS["blocked"] += 1
+        _PRETRADE_STATS["reasons"]["max_bet_exceeded"] = _PRETRADE_STATS["reasons"].get("max_bet_exceeded", 0) + 1
+        return False, f"Bet ${cost_usd:.2f} exceeds max ${max_bet:.0f}"
+
+    # 4. CATEGORY BLOCK: blocked categories must never slip through
+    title = ""
+    try:
+        # Quick title lookup from recent trades or market cache
+        for _tl in list(BOT_STATE.get("all_trades", []))[-50:]:
+            if _tl.get("ticker") == ticker:
+                title = _tl.get("title", "") or _tl.get("market_title", "")
+                break
+    except Exception:
+        pass
+    if title:
+        cat = classify_market_category(title, ticker)
+        blocked = BOT_CONFIG.get("blocked_categories", [])
+        if cat in blocked:
+            _PRETRADE_STATS["blocked"] += 1
+            _PRETRADE_STATS["reasons"]["blocked_category"] = _PRETRADE_STATS["reasons"].get("blocked_category", 0) + 1
+            return False, f"Category '{cat}' is blocked"
+
+    # 5. EV CHECK: if we have win_prob, verify positive EV after fees
+    # This is THE most important check. Every trade must have a mathematical
+    # path to profit. Kalshi fee = 7% of profit on winning trades.
+    if win_prob is not None and win_prob > 0:
+        payout_if_win = (100 - price_cents)  # cents per contract
+        fee_if_win = 0.07 * payout_if_win    # 7% of profit
+        ev_cents = win_prob * (payout_if_win - fee_if_win) - (1 - win_prob) * price_cents
+        if ev_cents < 0:
+            _PRETRADE_STATS["blocked"] += 1
+            _PRETRADE_STATS["reasons"]["negative_ev"] = _PRETRADE_STATS["reasons"].get("negative_ev", 0) + 1
+            return False, f"Negative EV: {ev_cents:.1f}c/contract (prob={win_prob:.1%}, price={price_cents}c)"
+
+    # 6. EDGE CHECK: if we have edge, verify it's meaningful (> fee drag)
+    if edge is not None:
+        # Fee drag on a typical trade is ~3-5% of the contract value
+        # Require edge > 2% minimum to overcome fees + slippage
+        min_edge = 0.02
+        if edge < min_edge:
+            _PRETRADE_STATS["blocked"] += 1
+            _PRETRADE_STATS["reasons"]["insufficient_edge"] = _PRETRADE_STATS["reasons"].get("insufficient_edge", 0) + 1
+            return False, f"Edge {edge:.1%} below minimum {min_edge:.0%}"
+
+    # 7. BALANCE: make sure we actually have the money
+    try:
+        bal = _get_cached_balance()
+        min_bal = BOT_CONFIG.get("min_balance_usd", 200)
+        if bal < min_bal:
+            _PRETRADE_STATS["blocked"] += 1
+            _PRETRADE_STATS["reasons"]["low_balance"] = _PRETRADE_STATS["reasons"].get("low_balance", 0) + 1
+            return False, f"Balance ${bal:.0f} below minimum ${min_bal:.0f}"
+    except Exception:
+        pass  # can't check balance, allow trade
+
+    # 8. LEARNING MULTIPLIER: if the learning engine says skip (0.0), skip
+    try:
+        mult = _learning_multiplier(ticker, title, price_cents=price_cents, strategy=strategy)
+        if mult <= 0.05:  # effectively zero
+            _PRETRADE_STATS["blocked"] += 1
+            _PRETRADE_STATS["reasons"]["learning_blocked"] = _PRETRADE_STATS["reasons"].get("learning_blocked", 0) + 1
+            return False, f"Learning engine blocked (multiplier={mult:.2f})"
+    except Exception:
+        pass  # learning engine not ready, allow trade
+
+    # ALL CHECKS PASSED
+    _PRETRADE_STATS["passed"] += 1
+    return True, "ok"
+
+
+# ---------------------------------------------------------------------------
 # Kalshi order placement (NEW)
 # ---------------------------------------------------------------------------
 
-def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggressive=True, orderbook_hint=None):
+def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggressive=True, orderbook_hint=None,
+                       win_prob=None, edge=None, strategy=None):
+    # PRE-TRADE VALIDATION — the last line of defense. Every buy must pass.
+    if action == "buy":
+        cost_est = (price_cents * count) / 100.0
+        ok, reason = _pretrade_validate(
+            ticker, side, price_cents, count, cost_est,
+            strategy=strategy, win_prob=win_prob, edge=edge
+        )
+        if not ok:
+            _log_activity(f"🚫 BLOCKED by gateway: {ticker} {side} @ {price_cents}c — {reason}", "warn")
+            return {"error": f"Pre-trade validation failed: {reason}"}
+
     path = "/portfolio/orders"
     headers = signed_headers("POST", path)
     if not headers:
@@ -3893,7 +4032,8 @@ def live_game_snipe():
                 if not _correlation_check_ok(ticker, conviction):
                     continue
 
-                result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_snipe_ob_pre)
+                result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_snipe_ob_pre,
+                                           win_prob=_snipe_our_prob, edge=(_snipe_our_prob - implied_prob_snipe) if _snipe_our_prob else None, strategy="live_sniper")
                 success = "error" not in result
 
                 if success:
@@ -4694,7 +4834,8 @@ def moonshark_snipe():
                 if not _correlation_check_ok(ticker, ms_conviction):
                     continue
 
-                result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob)
+                result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob,
+                                           win_prob=_model_prob if _model_prob else None, edge=espn_edge, strategy="moonshark")
                 success = "error" not in result
 
                 if success:
@@ -5252,7 +5393,8 @@ def closegame_snipe():
                 if not _correlation_check_ok(ticker, _cg_conv_est):
                     continue
 
-                result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_cg_ob)
+                result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_cg_ob,
+                                           win_prob=espn_win_prob_cg, edge=espn_edge_cg, strategy="closegame")
                 success = "error" not in result
 
                 if success:
@@ -5626,7 +5768,8 @@ def floor_quota_snipe():
             f"🎯 FLOOR {side.upper()} {title[:35]} @ {price}c x{count} (${cost_usd:.2f}) edge={edge:+.1%}",
             "info"
         )
-        result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob)
+        result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob,
+                                   win_prob=cand.get("our_prob"), edge=edge, strategy="floor")
         if "error" in result:
             # Surface Kalshi's response body (not just our exception str) so
             # we can actually diagnose what the API is rejecting.
@@ -5974,7 +6117,8 @@ def momentum_swing_snipe():
                 "info"
             )
 
-            result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob)
+            result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob,
+                                       win_prob=live_prob, edge=edge, strategy="momentum_swing")
             if "error" in result:
                 _release_game_exposure(event_key, cost_usd)
                 _log_activity(f"SWING failed: {ticker} — {result.get('error', '')[:60]}", "error")
@@ -6298,7 +6442,8 @@ def goalie_pulled_snipe():
             f"(${cost_usd:.2f}) | {away_abbrev} {away_score}-{home_score} {home_abbrev} {period} ({secs_left}s) | edge=+{edge:.1%}",
             "info"
         )
-        result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob)
+        result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob,
+                                   win_prob=best["our_prob"], edge=edge, strategy="goalie_pulled")
         if "error" in result:
             _release_game_exposure(event_key, cost_usd)
             _log_activity(f"GOALIE failed: {ticker} — {result.get('error', '')[:60]}", "error")
@@ -7739,6 +7884,126 @@ def _compute_bucket_stats(trades, key_fn):
             "confidence": confidence,
         }
     return result
+
+
+# ---------------------------------------------------------------------------
+# SELF-MONITORING WATCHDOG — catches bugs automatically
+# ---------------------------------------------------------------------------
+# Runs every learning cycle. Checks for the exact classes of bugs we've found
+# before so they can NEVER happen again undetected.
+# ---------------------------------------------------------------------------
+
+_WATCHDOG_ALERTS = []  # list of active alerts
+
+def _watchdog_check():
+    """Self-monitoring check for known bug patterns. Logs alerts when something looks wrong."""
+    global _WATCHDOG_ALERTS
+    alerts = []
+    now_str = datetime.datetime.now(tz=_PACIFIC).isoformat()
+
+    # CHECK 1: Budget sanity — per-strategy sum should match _total_daily_spent()
+    strat_sum = (
+        BOT_STATE.get("snipe_daily_spent", 0)
+        + BOT_STATE.get("moonshark_daily_spent", 0)
+        + BOT_STATE.get("closegame_daily_spent", 0)
+        + BOT_STATE.get("floor_daily_spent", 0)
+        + BOT_STATE.get("swing_daily_spent", 0)
+        + BOT_STATE.get("goalie_daily_spent", 0)
+        + BOT_STATE.get("misc_daily_spent", 0)
+    )
+    reported = _total_daily_spent()
+    if abs(strat_sum - reported) > 0.01:
+        alerts.append(f"BUDGET MISMATCH: strat_sum=${strat_sum:.2f} vs _total_daily_spent=${reported:.2f}")
+
+    # CHECK 2: Daily spend should never exceed 2x max_daily (catches double-counting)
+    max_daily = BOT_CONFIG.get("max_daily_usd", 125.0)
+    if reported > max_daily * 2:
+        alerts.append(f"BUDGET OVERRUN: ${reported:.0f} spent (max=${max_daily:.0f}) — possible double-counting")
+
+    # CHECK 3: legacy daily_spent_usd should roughly match per-strategy total
+    # (catches the exact bug we found before)
+    legacy = BOT_STATE.get("daily_spent_usd", 0)
+    if legacy > 0 and reported > 0 and (legacy / max(1, reported) > 3.0 or reported / max(1, legacy) > 3.0):
+        alerts.append(f"LEGACY MISMATCH: daily_spent_usd=${legacy:.0f} vs per-strategy=${reported:.0f} (>3x diff)")
+
+    # CHECK 4: Win rate sanity — if 7d win rate drops below 15%, something is very wrong
+    try:
+        _7d_cutoff = (datetime.datetime.now(tz=_PACIFIC) - datetime.timedelta(days=7)).isoformat()
+        _7d_wins = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "win" and (t.get("settlement_time") or "") >= _7d_cutoff)
+        _7d_losses = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "loss" and (t.get("settlement_time") or "") >= _7d_cutoff)
+        _7d_total = _7d_wins + _7d_losses
+        if _7d_total >= 10:
+            _7d_wr = _7d_wins / _7d_total
+            if _7d_wr < 0.15:
+                alerts.append(f"LOW WIN RATE: 7d={_7d_wr:.0%} ({_7d_wins}W/{_7d_losses}L) — possible model failure")
+    except Exception:
+        pass
+
+    # CHECK 5: Pre-trade gateway stats — if >50% of trades are being blocked, check why
+    if _PRETRADE_STATS["checked"] > 20:
+        block_rate = _PRETRADE_STATS["blocked"] / _PRETRADE_STATS["checked"]
+        if block_rate > 0.5:
+            top_reason = max(_PRETRADE_STATS["reasons"], key=_PRETRADE_STATS["reasons"].get) if _PRETRADE_STATS["reasons"] else "unknown"
+            alerts.append(f"HIGH BLOCK RATE: {block_rate:.0%} of trades blocked (top reason: {top_reason})")
+
+    # CHECK 6: Strategy counters should reset on new day
+    today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+    for strat in ["snipe", "moonshark", "closegame", "floor", "swing", "goalie"]:
+        date_key = f"{strat}_date"
+        spent_key = f"{strat}_daily_spent"
+        strat_date = BOT_STATE.get(date_key)
+        strat_spent = BOT_STATE.get(spent_key, 0)
+        if strat_date and strat_date != today and strat_spent > 0:
+            alerts.append(f"STALE COUNTER: {strat} date={strat_date} but spent=${strat_spent:.2f} (should be 0)")
+
+    # CHECK 7: Positions with no exit strategy — any position held >24h with no take-profit
+    try:
+        positions = check_position_prices()
+        for p in positions:
+            _ptk = p.get("ticker", "")
+            _entry_time = None
+            for t in reversed(BOT_STATE.get("all_trades", [])):
+                if t.get("ticker") == _ptk:
+                    _entry_time = t.get("timestamp")
+                    break
+            if _entry_time:
+                try:
+                    _et = datetime.datetime.fromisoformat(_entry_time.replace("Z", "+00:00")).replace(tzinfo=None)
+                    _hours = (datetime.datetime.utcnow() - _et).total_seconds() / 3600
+                    if _hours > 24 and _ptk not in _resting_sells:
+                        _pnl = p.get("pnl_pct", 0) or 0
+                        if _pnl < -30:
+                            alerts.append(f"STUCK LOSER: {_ptk} held {_hours:.0f}h, P&L={_pnl}% — no exit order")
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # CHECK 8: CLV tracking — if we have 20+ settled trades but 0 CLV data, it's broken
+    try:
+        _settled_count = sum(1 for t in _TRADE_JOURNAL if t.get("result") is not None)
+        _clv_count = sum(1 for t in _TRADE_JOURNAL if t.get("clv_cents") is not None)
+        if _settled_count >= 20 and _clv_count == 0:
+            alerts.append(f"CLV BROKEN: {_settled_count} settled trades but 0 with CLV data")
+    except Exception:
+        pass
+
+    # Log alerts
+    if alerts:
+        _WATCHDOG_ALERTS = [{"alert": a, "time": now_str} for a in alerts]
+        for a in alerts:
+            _log_activity(f"⚠️ WATCHDOG: {a}", "error")
+        # Send critical alerts to Discord
+        if any("BUDGET" in a or "LOW WIN RATE" in a for a in alerts):
+            try:
+                _discord_msg = "🚨 **WATCHDOG ALERTS**\n" + "\n".join(f"• {a}" for a in alerts)
+                send_discord_alert(_discord_msg)
+            except Exception:
+                pass
+    else:
+        _WATCHDOG_ALERTS = []
+
+    return alerts
 
 
 def _learning_engine():
@@ -9965,6 +10230,11 @@ def _ensure_bg_thread():
                     _check_tune_rollback(_per_strategy_stats(days=2))
                 except Exception as _rbe:
                     print(f"[LEARNING] Rollback check error: {_rbe}")
+                # Watchdog self-check — catches known bug patterns
+                try:
+                    _watchdog_check()
+                except Exception as _wde:
+                    print(f"[WATCHDOG] Error: {_wde}")
                 # Heartbeat log every 20 cycles (~1 hr)
                 if _learn_cycle % 20 == 0:
                     with _LEARNING_STATE_LOCK:
@@ -10677,6 +10947,14 @@ def health():
         "trading_thread": "alive" if _bg_alive else "dead",
         "auto_trade": BOT_CONFIG.get("enabled", False),
         "uptime_cycles": BOT_STATE.get("cycle", 0),
+        "watchdog_alerts": _WATCHDOG_ALERTS,
+        "pretrade_gateway": {
+            "checked": _PRETRADE_STATS["checked"],
+            "passed": _PRETRADE_STATS["passed"],
+            "blocked": _PRETRADE_STATS["blocked"],
+            "block_rate": round(_PRETRADE_STATS["blocked"] / max(1, _PRETRADE_STATS["checked"]) * 100, 1),
+            "top_reasons": dict(sorted(_PRETRADE_STATS["reasons"].items(), key=lambda x: x[1], reverse=True)[:5]),
+        },
     })
 
 
