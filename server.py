@@ -247,6 +247,8 @@ def _save_state():
         # Cap all_trades to prevent unbounded memory growth
         if len(BOT_STATE["all_trades"]) > 1000:
             BOT_STATE["all_trades"] = BOT_STATE["all_trades"][-500:]
+        with _TRADE_JOURNAL_LOCK:
+            _journal_for_save = _TRADE_JOURNAL[-500:]  # keep last 500 journal entries
         data = {
             "all_trades": BOT_STATE["all_trades"],
             "trades_today": BOT_STATE["trades_today"],
@@ -254,7 +256,7 @@ def _save_state():
             "trade_date": BOT_STATE["trade_date"],
             "pick_history": BOT_STATE.get("pick_history", [])[-500:],  # keep last 500
             # Persist trade journal & category stats so they survive in-deployment restarts
-            "trade_journal": _TRADE_JOURNAL[-500:],  # keep last 500 journal entries
+            "trade_journal": _journal_for_save,
             "category_stats": _CATEGORY_STATS,
             # Persist snipe daily counters
             "snipe_daily_spent": BOT_STATE.get("snipe_daily_spent", 0.0),
@@ -402,9 +404,10 @@ def _load_state():
         # --- Cumulative data: always restore regardless of day ---
         saved_journal = data.get("trade_journal", [])
         if saved_journal:
-            _TRADE_JOURNAL.clear()
-            _TRADE_JOURNAL.extend(saved_journal)
-            print(f"[STATE] Restored {len(_TRADE_JOURNAL)} trade journal entries from disk")
+            with _TRADE_JOURNAL_LOCK:
+                _TRADE_JOURNAL.clear()
+                _TRADE_JOURNAL.extend(saved_journal)
+            print(f"[STATE] Restored {len(saved_journal)} trade journal entries from disk")
 
         saved_cat_stats = data.get("category_stats", {})
         if saved_cat_stats:
@@ -927,7 +930,8 @@ def _rebuild_journal_from_kalshi():
             return
 
         # Tickers already in journal — don't duplicate
-        existing_tickers = {r["ticker"] for r in _TRADE_JOURNAL if r.get("ticker")}
+        with _TRADE_JOURNAL_LOCK:
+            existing_tickers = {r["ticker"] for r in _TRADE_JOURNAL if r.get("ticker")}
         # Also build set of tickers in all_trades for bot_version lookup
         trade_map = {}
         for t in BOT_STATE.get("all_trades", []):
@@ -1085,7 +1089,8 @@ def _rebuild_journal_from_kalshi():
 
         _save_state()
         total_cats = len(_CATEGORY_STATS)
-        total_journal = len(_TRADE_JOURNAL)
+        with _TRADE_JOURNAL_LOCK:
+            total_journal = len(_TRADE_JOURNAL)
         print(f"[JOURNAL-REBUILD] Rebuilt from {len(positions_list)} settled positions: "
               f"{new_count} new journal entries (total {total_journal}), "
               f"{total_cats} categories tracked")
@@ -3002,7 +3007,9 @@ def check_position_prices():
             # Determine who placed this bet: check journal, all_trades, and today's trade lists
             placed_by = None
             # 1) Check trade journal (most reliable if server hasn't restarted)
-            for jt in reversed(_TRADE_JOURNAL):
+            with _TRADE_JOURNAL_LOCK:
+                _journal_snap = list(_TRADE_JOURNAL)
+            for jt in reversed(_journal_snap):
                 if jt.get("ticker") == ticker and jt.get("side") == side:
                     strat = jt.get("strategy", "")
                     if strat in ("moonshark", "live_sniper", "consensus_mispricing", "arb", "closegame"):
@@ -3234,6 +3241,7 @@ def run_bot_scan():
         _resting_sells.clear()
         _orderbook_cache.clear()
         _position_high_water.clear()
+        _GAME_EXPOSURE.clear()
         _log_activity("Daily reset — new trading day started")
         # Send daily summary to Discord
         try:
@@ -6630,7 +6638,9 @@ def _warm_picks_cache():
 
 def _adaptive_kelly_divisor():
     """Adaptive Kelly: more conservative on losing streaks, slightly aggressive on wins."""
-    _recent_results = [t.get("result") for t in _TRADE_JOURNAL[-20:] if t.get("result") in ("win", "loss")]
+    with _TRADE_JOURNAL_LOCK:
+        _recent_20 = _TRADE_JOURNAL[-20:]
+    _recent_results = [t.get("result") for t in _recent_20 if t.get("result") in ("win", "loss")]
     _recent_wins = sum(1 for r in _recent_results if r == "win")
     _recent_total = len(_recent_results)
     if _recent_total >= 5:
@@ -8368,11 +8378,15 @@ def _watchdog_check():
     if legacy > 0 and reported > 0 and (legacy / max(1, reported) > 3.0 or reported / max(1, legacy) > 3.0):
         alerts.append(f"LEGACY MISMATCH: daily_spent_usd=${legacy:.0f} vs per-strategy=${reported:.0f} (>3x diff)")
 
+    # Snapshot journal once for all watchdog checks (thread safety)
+    with _TRADE_JOURNAL_LOCK:
+        _wd_journal = list(_TRADE_JOURNAL)
+
     # CHECK 4: Win rate sanity — if 7d win rate drops below 15%, something is very wrong
     try:
         _7d_cutoff = (datetime.datetime.now(tz=_PACIFIC) - datetime.timedelta(days=7)).isoformat()
-        _7d_wins = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "win" and (t.get("settlement_time") or "") >= _7d_cutoff)
-        _7d_losses = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "loss" and (t.get("settlement_time") or "") >= _7d_cutoff)
+        _7d_wins = sum(1 for t in _wd_journal if t.get("result") == "win" and (t.get("settlement_time") or "") >= _7d_cutoff)
+        _7d_losses = sum(1 for t in _wd_journal if t.get("result") == "loss" and (t.get("settlement_time") or "") >= _7d_cutoff)
         _7d_total = _7d_wins + _7d_losses
         if _7d_total >= 10:
             _7d_wr = _7d_wins / _7d_total
@@ -8423,8 +8437,8 @@ def _watchdog_check():
 
     # CHECK 8: CLV tracking — if we have 20+ settled trades but 0 CLV data, it's broken
     try:
-        _settled_count = sum(1 for t in _TRADE_JOURNAL if t.get("result") is not None)
-        _clv_count = sum(1 for t in _TRADE_JOURNAL if t.get("clv_cents") is not None)
+        _settled_count = sum(1 for t in _wd_journal if t.get("result") is not None)
+        _clv_count = sum(1 for t in _wd_journal if t.get("clv_cents") is not None)
         if _settled_count >= 20 and _clv_count == 0:
             alerts.append(f"CLV BROKEN: {_settled_count} settled trades but 0 with CLV data")
     except Exception:
@@ -8435,7 +8449,7 @@ def _watchdog_check():
     try:
         _24h_cutoff = (datetime.datetime.now(tz=_PACIFIC) - datetime.timedelta(hours=24)).isoformat()
         _sport_losses = {}
-        for t in _TRADE_JOURNAL:
+        for t in _wd_journal:
             if t.get("result") == "loss" and (t.get("settlement_time") or "") >= _24h_cutoff:
                 _sp = t.get("sport_type") or _sport_from_ticker(t.get("ticker", "")) or "unknown"
                 _sport_losses[_sp] = _sport_losses.get(_sp, 0) + 1
@@ -8448,7 +8462,7 @@ def _watchdog_check():
     # CHECK 10: Fill price tracking — compare what we intended to pay vs what we actually paid
     # If fill prices are consistently 3c+ above ask, our slippage model is wrong
     try:
-        _recent_fills = [t for t in _TRADE_JOURNAL if t.get("entry_time", "") >= _24h_cutoff and t.get("result") is None]
+        _recent_fills = [t for t in _wd_journal if t.get("entry_time", "") >= _24h_cutoff and t.get("result") is None]
         if len(_recent_fills) >= 5:
             _avg_slippage = 0
             _slip_count = 0
@@ -8485,8 +8499,8 @@ def _watchdog_check():
     # CHECK 12: Real vs reported win rate — compare settled-only WR to displayed WR
     # This catches the exact problem where 59% displayed masks 10% settled reality
     try:
-        _settled_wins = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "win")
-        _settled_losses = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "loss")
+        _settled_wins = sum(1 for t in _wd_journal if t.get("result") == "win")
+        _settled_losses = sum(1 for t in _wd_journal if t.get("result") == "loss")
         _settled_total = _settled_wins + _settled_losses
         if _settled_total >= 15:
             _real_wr = _settled_wins / _settled_total
@@ -8500,8 +8514,8 @@ def _watchdog_check():
     # automatically pause trading. This prevents the bot from burning cash while we sleep.
     try:
         _recent_cutoff = (datetime.datetime.now(tz=_PACIFIC) - datetime.timedelta(hours=48)).isoformat()
-        _recent_wins = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "win" and (t.get("settlement_time") or "") >= _recent_cutoff)
-        _recent_losses = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "loss" and (t.get("settlement_time") or "") >= _recent_cutoff)
+        _recent_wins = sum(1 for t in _wd_journal if t.get("result") == "win" and (t.get("settlement_time") or "") >= _recent_cutoff)
+        _recent_losses = sum(1 for t in _wd_journal if t.get("result") == "loss" and (t.get("settlement_time") or "") >= _recent_cutoff)
         _recent_total = _recent_wins + _recent_losses
         if _recent_total >= 8:
             _recent_wr = _recent_wins / _recent_total
@@ -8522,7 +8536,7 @@ def _watchdog_check():
         _today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
         _today_losses = sum(
             float(t.get("pnl_usd") or t.get("pnl") or 0)
-            for t in _TRADE_JOURNAL
+            for t in _wd_journal
             if t.get("result") == "loss" and str(t.get("settlement_time") or "")[:10] == _today_str
         )
         if _today_losses < -20:  # lost more than $20 today on settled trades
@@ -8572,7 +8586,9 @@ def _learning_engine():
 
     Runs hourly + on startup. Requires 10+ settled trades before making adjustments.
     """
-    settled = [t for t in _TRADE_JOURNAL if t.get("result")]
+    with _TRADE_JOURNAL_LOCK:
+        _journal_snap = list(_TRADE_JOURNAL)
+    settled = [t for t in _journal_snap if t.get("result")]
     if len(settled) < 10:
         return  # not enough data to learn from
 
@@ -9595,7 +9611,9 @@ def _journal_settle(ticker, won, pnl_usd, closing_price_cents=None):
 
 def _get_clv_stats():
     """Compute aggregate CLV (Closing Line Value) statistics from the trade journal."""
-    clv_trades = [t for t in _TRADE_JOURNAL if t.get("clv_cents") is not None]
+    with _TRADE_JOURNAL_LOCK:
+        _journal_snap = list(_TRADE_JOURNAL)
+    clv_trades = [t for t in _journal_snap if t.get("clv_cents") is not None]
     if not clv_trades:
         return {"total_trades_with_clv": 0, "avg_clv_cents": 0, "positive_clv_pct": 0, "total_clv_cents": 0}
     total_clv = sum(t["clv_cents"] for t in clv_trades)
@@ -9612,7 +9630,9 @@ def _get_clv_stats():
 
 def get_pattern_analysis():
     """Analyze trade journal for patterns in wins vs losses."""
-    settled = [t for t in _TRADE_JOURNAL if t["result"] is not None]
+    with _TRADE_JOURNAL_LOCK:
+        _journal_snap = list(_TRADE_JOURNAL)
+    settled = [t for t in _journal_snap if t["result"] is not None]
     if not settled:
         # Fallback to settled_history from portfolio cache
         return {"message": "No settled trades in journal yet", "patterns": []}
@@ -10281,7 +10301,9 @@ def _background_loop():
         try:
             _startup_daily = sum((p.get("unrealized_pnl_cents") or 0) for p in _pos_early) / 100
             _today_str_startup = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
-            for _jt in _TRADE_JOURNAL:
+            with _TRADE_JOURNAL_LOCK:
+                _startup_journal = list(_TRADE_JOURNAL)
+            for _jt in _startup_journal:
                 if _jt.get("result") is not None and str(_jt.get("settlement_time") or "")[:10] == _today_str_startup:
                     _startup_daily += float(_jt.get("pnl_usd") or _jt.get("pnl") or 0)
             _PORTFOLIO_CACHE["data"]["daily_pnl_usd"] = round(_startup_daily, 2)
@@ -10587,8 +10609,10 @@ def _background_loop():
 
                 # Day 1+ win rate (only count trades from March 16, 2026 onwards)
                 # Use trade journal for Day 1+ tracking, fall back to _CATEGORY_STATS
-                _d1_wins = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "win")
-                _d1_losses = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "loss")
+                with _TRADE_JOURNAL_LOCK:
+                    _pf_journal = list(_TRADE_JOURNAL)
+                _d1_wins = sum(1 for t in _pf_journal if t.get("result") == "win")
+                _d1_losses = sum(1 for t in _pf_journal if t.get("result") == "loss")
                 # If journal is empty, use category stats (which reset on restart)
                 if _d1_wins + _d1_losses == 0:
                     for _cs in _CATEGORY_STATS.values():
@@ -10598,8 +10622,8 @@ def _background_loop():
 
                 # 7-day win rate — only trades settled in last 7 days
                 _7d_cutoff = (datetime.datetime.utcnow() - datetime.timedelta(days=7)).isoformat() + "Z"
-                _7d_wins = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "win" and (t.get("settlement_time") or "") >= _7d_cutoff)
-                _7d_losses = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "loss" and (t.get("settlement_time") or "") >= _7d_cutoff)
+                _7d_wins = sum(1 for t in _pf_journal if t.get("result") == "win" and (t.get("settlement_time") or "") >= _7d_cutoff)
+                _7d_losses = sum(1 for t in _pf_journal if t.get("result") == "loss" and (t.get("settlement_time") or "") >= _7d_cutoff)
                 _7d_wr = round(_7d_wins / max(1, _7d_wins + _7d_losses) * 100, 1) if (_7d_wins + _7d_losses) > 0 else 0
 
                 _total_unrealized = round(sum((p.get("unrealized_pnl_cents") or 0) for p in _pos2) / 100, 2)
@@ -10608,7 +10632,7 @@ def _background_loop():
                 _daily_pnl = _total_unrealized
                 try:
                     _today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
-                    for _jt in _TRADE_JOURNAL:
+                    for _jt in _pf_journal:
                         if _jt.get("result") is not None and str(_jt.get("settlement_time") or "")[:10] == _today_str:
                             _daily_pnl += float(_jt.get("pnl_usd") or _jt.get("pnl") or 0)
                     _daily_pnl = round(_daily_pnl, 2)
@@ -10648,11 +10672,11 @@ def _background_loop():
                 _total_invested2 = _invested_from_positions if _invested_from_positions > 0 else round(_kalshi_portfolio2, 2)
 
                 # REAL settled-only stats from trade journal (the truth, no inflation)
-                _journal_wins = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "win")
-                _journal_losses = sum(1 for t in _TRADE_JOURNAL if t.get("result") == "loss")
+                _journal_wins = sum(1 for t in _pf_journal if t.get("result") == "win")
+                _journal_losses = sum(1 for t in _pf_journal if t.get("result") == "loss")
                 _journal_total = _journal_wins + _journal_losses
                 _journal_wr = round(_journal_wins / max(1, _journal_total) * 100, 1)
-                _journal_pnl = round(sum(float(t.get("pnl_usd") or 0) for t in _TRADE_JOURNAL if t.get("result") is not None), 2)
+                _journal_pnl = round(sum(float(t.get("pnl_usd") or 0) for t in _pf_journal if t.get("result") is not None), 2)
 
                 _PORTFOLIO_CACHE["data"] = {
                     "balance_usd": round(_bal2, 2),
@@ -10679,7 +10703,7 @@ def _background_loop():
                     "settled_only_losses": _journal_losses,
                     "settled_only_win_rate": _journal_wr,
                     "settled_only_pnl": _journal_pnl,
-                    "total_realized_usd": _SETTLED_CACHE["data"]["total_pnl_usd"] if _SETTLED_CACHE.get("data") else round(sum(float(t.get("pnl_usd") or t.get("pnl") or 0) for t in _TRADE_JOURNAL) if _TRADE_JOURNAL else _realized2, 2),
+                    "total_realized_usd": _SETTLED_CACHE["data"]["total_pnl_usd"] if _SETTLED_CACHE.get("data") else round(sum(float(t.get("pnl_usd") or t.get("pnl") or 0) for t in _pf_journal) if _pf_journal else _realized2, 2),
                     "total_realized_all": round(_realized2, 2),
                     "settled_history": _settled_list2[-20:],
                 }
@@ -11926,6 +11950,10 @@ def settled_positions():
         current_streak_type = None
         settled = []
 
+        # Snapshot trade journal under lock for thread safety (Flask route)
+        with _TRADE_JOURNAL_LOCK:
+            _journal_snap = list(_TRADE_JOURNAL)
+
         # Build a map of BUY timestamps from all_trades + trade journal for date filtering
         # Use LATEST buy date so re-traded tickers pass the cutoff filter
         _trade_dates = {}
@@ -11937,7 +11965,7 @@ def settled_positions():
                 if _tk not in _trade_dates or _ts > _trade_dates[_tk]:
                     _trade_dates[_tk] = _ts  # Use LATEST buy date
         # Also check trade journal — use latest date if newer
-        for _jt in _TRADE_JOURNAL:
+        for _jt in _journal_snap:
             _tk = _jt.get("ticker", "")
             _ts = (_jt.get("trade_date") or (_jt.get("timestamp", "") or "")[:10] or "")
             if _tk and _ts:
@@ -11990,7 +12018,7 @@ def settled_positions():
 
         # Cache market titles — use global _TITLE_CACHE, pre-populate from trade journal
         _title_cache = _TITLE_CACHE  # alias to global for backward compat
-        for _jt in _TRADE_JOURNAL:
+        for _jt in _journal_snap:
             _tk = _jt.get("ticker", "")
             _tt = _jt.get("title", "")
             if _tk and _tt and _tk not in _title_cache:
@@ -12181,7 +12209,7 @@ def settled_positions():
 
             # Get settlement time - prefer trade journal (has market close_time), then position data
             settle_time = ""
-            for _jcheck in _TRADE_JOURNAL:
+            for _jcheck in _journal_snap:
                 if _jcheck.get("ticker") == ticker and _jcheck.get("settlement_time"):
                     settle_time = _jcheck["settlement_time"]
                     break
@@ -12195,7 +12223,7 @@ def settled_positions():
             _game_state_at_entry = ""
             _entry_time = ""
             # Check trade journal first (richest data)
-            for _jrec in _TRADE_JOURNAL:
+            for _jrec in _journal_snap:
                 if _jrec.get("ticker") == ticker:
                     # ESPN edge
                     if _jrec.get("espn_edge"):
@@ -12309,7 +12337,7 @@ def settled_positions():
                 _trade_lookup[_tk]["count"] += _tcount
                 _trade_lookup[_tk]["cost_cents"] += _tprice * _tcount
         # Also check trade journal for additional data
-        for _jt in _TRADE_JOURNAL:
+        for _jt in _journal_snap:
             _tk = _jt.get("ticker", "")
             if _tk and _tk not in _trade_lookup and _jt.get("count", 0) > 0:
                 _tcount = _jt.get("count", 0)
@@ -12428,7 +12456,7 @@ def settled_positions():
 
             # Source 3: Trade journal — last resort
             if _total_count == 0:
-                for _jt in _TRADE_JOURNAL:
+                for _jt in _journal_snap:
                     if _jt.get("ticker") == _fticker and _jt.get("count", 0) > 0:
                         _total_count = _jt["count"]
                         _ep = _jt.get("price_cents", 0) or _jt.get("price_at_entry", 0) or 0
@@ -12485,7 +12513,7 @@ def settled_positions():
             _espn_edge = None
             _conviction = 0
             _game_state = ""
-            for _jrec in _TRADE_JOURNAL:
+            for _jrec in _journal_snap:
                 if _jrec.get("ticker") == _fticker:
                     _trade_strategy = _jrec.get("strategy", _trade_strategy)
                     _entry_time = _jrec.get("entry_time", _entry_time)
@@ -12549,7 +12577,7 @@ def settled_positions():
                 _tk = _at.get("ticker", "")
                 if _tk and _at.get("action", "buy") == "buy" and _tk not in _zp_trade_map:
                     _zp_trade_map[_tk] = _at
-            for _jt in _TRADE_JOURNAL:
+            for _jt in _journal_snap:
                 _tk = _jt.get("ticker", "")
                 if _tk and _tk not in _zp_trade_map and (_jt.get("count", 0) or 0) > 0:
                     _zp_trade_map[_tk] = _jt
@@ -12695,7 +12723,7 @@ def settled_positions():
                 _zp_espn = None
                 _zp_conv = 0
                 _zp_gs = ""
-                for _jrec in _TRADE_JOURNAL:
+                for _jrec in _journal_snap:
                     if _jrec.get("ticker") == ticker:
                         _zp_strategy = _jrec.get("strategy", _zp_strategy)
                         _zp_entry_time = _jrec.get("entry_time", _zp_entry_time)
@@ -12897,7 +12925,9 @@ def trends_endpoint():
 
 def _generate_trends():
     params = _LEARNING_STATE.get("parameters", {})
-    settled = [t for t in _TRADE_JOURNAL if t.get("result")]
+    with _TRADE_JOURNAL_LOCK:
+        _journal_snap = list(_TRADE_JOURNAL)
+    settled = [t for t in _journal_snap if t.get("result")]
     total_settled = len(settled)
     total_wins = sum(1 for t in settled if t["result"] == "win")
     total_losses = total_settled - total_wins
@@ -13061,8 +13091,10 @@ def analytics_learning():
 
     # Settled count + journal size
     try:
-        payload["settled_count"] = sum(1 for t in _TRADE_JOURNAL if t.get("result"))
-        payload["trade_journal_size"] = len(_TRADE_JOURNAL)
+        with _TRADE_JOURNAL_LOCK:
+            _journal_snap = list(_TRADE_JOURNAL)
+        payload["settled_count"] = sum(1 for t in _journal_snap if t.get("result"))
+        payload["trade_journal_size"] = len(_journal_snap)
     except Exception as _e:
         payload["errors"].append(f"journal: {_e}")
 
@@ -13149,7 +13181,9 @@ def analytics_learning():
 def analytics_endpoint():
     """Return processed analytics data from trade journal and category stats."""
     try:
-        settled = [t for t in _TRADE_JOURNAL if t.get("result") is not None]
+        with _TRADE_JOURNAL_LOCK:
+            _journal_snap = list(_TRADE_JOURNAL)
+        settled = [t for t in _journal_snap if t.get("result") is not None]
 
         # --- Win Rate by Sport ---
         by_sport = {}
@@ -13278,7 +13312,9 @@ def analytics_endpoint():
 def analytics_patterns_endpoint():
     """Deep pattern analysis of trade journal — win rates sliced by every dimension."""
     try:
-        settled = [t for t in _TRADE_JOURNAL if t.get("result") is not None]
+        with _TRADE_JOURNAL_LOCK:
+            _journal_snap = list(_TRADE_JOURNAL)
+        settled = [t for t in _journal_snap if t.get("result") is not None]
         if not settled:
             return jsonify({"message": "No settled trades in journal yet", "total_settled": 0})
 
@@ -13484,8 +13520,10 @@ def insights_endpoint():
         return jsonify(_insights_cache["data"])
     generated_at = now_pt.strftime("%b %d, %Y %I:%M %p PT")
     try:
-        settled = [t for t in _TRADE_JOURNAL if t.get("result") is not None]
-        pending = [t for t in _TRADE_JOURNAL if t.get("result") is None]
+        with _TRADE_JOURNAL_LOCK:
+            _journal_snap = list(_TRADE_JOURNAL)
+        settled = [t for t in _journal_snap if t.get("result") is not None]
+        pending = [t for t in _journal_snap if t.get("result") is None]
         markets_scanned = BOT_STATE.get("last_scan_markets", 0)
         mispriced_count = BOT_STATE.get("last_scan_mispriced", 0)
         daily_spent = _total_daily_spent()
@@ -13511,7 +13549,7 @@ def insights_endpoint():
             })
             insights.append({
                 "title": "Waiting for Results",
-                "detail": f"{len(_TRADE_JOURNAL)} total trades placed, {len(pending)} still pending settlement. Need settled trades to generate performance insights.",
+                "detail": f"{len(_journal_snap)} total trades placed, {len(pending)} still pending settlement. Need settled trades to generate performance insights.",
                 "trend": "neutral",
                 "action": "Insights will sharpen as more trades settle and patterns emerge.",
             })
@@ -13648,7 +13686,7 @@ def insights_endpoint():
             })
 
         # 4. MoonShark performance
-        moon_trades = [t for t in _TRADE_JOURNAL if t.get("strategy") == "moonshark"]
+        moon_trades = [t for t in _journal_snap if t.get("strategy") == "moonshark"]
         moon_settled = [t for t in moon_trades if t.get("result") is not None]
         moon_wins = sum(1 for t in moon_settled if t["result"] == "win")
         moon_pnl = sum(t.get("pnl_usd", 0) for t in moon_settled)
@@ -14622,9 +14660,11 @@ def trades_today_endpoint():
     all_today = list(_consolidated.values())
 
     # Enrich conviction/edge from trade journal (survives deploys via _save_state)
+    with _TRADE_JOURNAL_LOCK:
+        _journal_snap = list(_TRADE_JOURNAL)
     for t in all_today:
         if (not t.get("conviction") or not t.get("edge_reasons")) and t.get("ticker"):
-            for _jr in reversed(_TRADE_JOURNAL):
+            for _jr in reversed(_journal_snap):
                 if _jr.get("ticker") == t["ticker"]:
                     if not t.get("conviction") and _jr.get("conviction"):
                         t["conviction"] = _jr["conviction"]
@@ -16660,8 +16700,10 @@ def volatility_view():
 @app.route("/trades")
 def trades():
     # Build settlement lookup from trade journal AND Kalshi positions
+    with _TRADE_JOURNAL_LOCK:
+        _journal_snap = list(_TRADE_JOURNAL)
     settle_map = {}
-    for jt in _TRADE_JOURNAL:
+    for jt in _journal_snap:
         if jt.get("result"):
             settle_map[jt["ticker"]] = {
                 "result": jt["result"],
@@ -17062,7 +17104,9 @@ def trade_patterns():
 @app.route("/trade-journal")
 def trade_journal():
     """Full trade journal with all metadata."""
-    return jsonify({"trades": _TRADE_JOURNAL[-50:], "total": len(_TRADE_JOURNAL)})
+    with _TRADE_JOURNAL_LOCK:
+        _journal_snap = list(_TRADE_JOURNAL)
+    return jsonify({"trades": _journal_snap[-50:], "total": len(_journal_snap)})
 
 
 @app.route("/quick-bet", methods=["POST"])
@@ -17153,13 +17197,17 @@ def moonshark_stats():
     todays_trades = BOT_STATE.get("moonshark_trades_today", [])
     daily_spent = BOT_STATE.get("moonshark_daily_spent", 0.0)
 
+    # Snapshot trade journal under lock for thread safety (Flask route)
+    with _TRADE_JOURNAL_LOCK:
+        _journal_snap = list(_TRADE_JOURNAL)
+
     # ── Gather ALL MoonShark-style trades ──
     # 1. Journal entries with strategy == "moonshark"
-    moonshark_journal = [t for t in _TRADE_JOURNAL if t.get("strategy") == "moonshark"]
+    moonshark_journal = [t for t in _journal_snap if t.get("strategy") == "moonshark"]
 
     # 2. Also include any journal entry where entry price was <= 30 cents (manual low-price bets)
     low_price_journal = [
-        t for t in _TRADE_JOURNAL
+        t for t in _journal_snap
         if t.get("strategy") != "moonshark"
         and (t.get("price_cents") or t.get("price_at_entry") or 999) <= 30
         and (t.get("price_cents") or t.get("price_at_entry") or 0) > 0
@@ -17167,7 +17215,7 @@ def moonshark_stats():
 
     # 3. Pull from Kalshi settled positions API for any trades <= 30 cents not already in journal
     kalshi_low_price_settled = []
-    journal_tickers = {t.get("ticker") for t in _TRADE_JOURNAL if t.get("ticker")}
+    journal_tickers = {t.get("ticker") for t in _journal_snap if t.get("ticker")}
     try:
         path = "/portfolio/positions"
         positions_list = []
@@ -17832,8 +17880,10 @@ def wta_wheel_stats():
     """Stats for WTA wheel bets and all WTA tennis positions."""
     try:
         # Get all WTA trades from journal (wheel + bot)
-        wta_all = [t for t in _TRADE_JOURNAL if "KXWTA" in (t.get("ticker") or "").upper()]
-        wta_wheel = [t for t in _TRADE_JOURNAL if t.get("strategy") == "wta_wheel"]
+        with _TRADE_JOURNAL_LOCK:
+            _journal_snap = list(_TRADE_JOURNAL)
+        wta_all = [t for t in _journal_snap if "KXWTA" in (t.get("ticker") or "").upper()]
+        wta_wheel = [t for t in _journal_snap if t.get("strategy") == "wta_wheel"]
         wta_settled = [t for t in wta_all if t.get("result") is not None]
         wheel_settled = [t for t in wta_wheel if t.get("result") is not None]
 
