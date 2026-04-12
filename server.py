@@ -2399,6 +2399,13 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
         _PRETRADE_STATS["reasons"]["below_price_floor"] = _PRETRADE_STATS["reasons"].get("below_price_floor", 0) + 1
         return False, f"Price {price_cents}c below 15c minimum floor"
 
+    # GLOBAL MAXIMUM PRICE CEILING — heavy favorites (>65c) have 0% settled win rate
+    # At 65c you risk 65c to win 32.5c (after fee). Above this, risk/reward is terrible.
+    if price_cents > 65:
+        _PRETRADE_STATS["blocked"] += 1
+        _PRETRADE_STATS["reasons"]["above_price_ceiling"] = _PRETRADE_STATS["reasons"].get("above_price_ceiling", 0) + 1
+        return False, f"Price {price_cents}c above 65c ceiling — heavy favorites lose money"
+
     if count < 1:
         _PRETRADE_STATS["blocked"] += 1
         _PRETRADE_STATS["reasons"]["bad_count"] = _PRETRADE_STATS["reasons"].get("bad_count", 0) + 1
@@ -3257,8 +3264,8 @@ LIVE_GAME_SERIES = [
 ]
 
 # Sniper settings
-SNIPE_MIN_PRICE = 67   # cents — slightly tightened from 65 (still captures early games)
-SNIPE_MAX_PRICE = 85   # cents — cap at 85c (need 15%+ profit margin, one upset can't wipe 6 wins)
+SNIPE_MIN_PRICE = 25   # cents — value range: 25-65c (balanced risk/reward)
+SNIPE_MAX_PRICE = 65   # cents — hard cap at 65c (0% settled win rate above this)
 SNIPE_BET_USD = 15.0   # fallback — now uses _smart_bet_size() for bankroll scaling
 SNIPE_MAX_DAILY = 50.0   # daily safety cap — reduced to 25% of bankroll total across strategies
 SNIPE_MAX_TRADES = 20    # more room — this is our best strategy
