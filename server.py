@@ -292,8 +292,7 @@ def _save_state():
             "game_exposure": _GAME_EXPOSURE,
             # Performance history for line chart (keep last _PERF_HISTORY_MAX)
             "perf_history": _PERF_HISTORY[-_PERF_HISTORY_MAX:],
-            # High-water mark for W/L counts (survives Kalshi data pruning)
-            "settled_hwm": _SETTLED_HWM,
+            # HWM removed — raw Kalshi data is source of truth now
             # Paper trades (persist across restarts, not day-dependent)
             "paper_trades": _PAPER_TRADES[-_PAPER_TRADES_MAX:],
             # Timestamp for date-check on load
@@ -441,11 +440,9 @@ def _load_state():
             _PAPER_TRADES.extend(saved_paper[-_PAPER_TRADES_MAX:])
             print(f"[STATE] Restored {len(_PAPER_TRADES)} paper trades from disk")
 
-        # Restore settled high-water mark (W/L counts survive Kalshi data pruning)
-        saved_hwm = data.get("settled_hwm")
-        if saved_hwm:
-            _SETTLED_HWM.update(saved_hwm)
-            print(f"[STATE] Restored HWM: {_SETTLED_HWM['wins']}W/{_SETTLED_HWM['losses']}L, P&L=${_SETTLED_HWM['total_pnl']:.2f}")
+        # HWM no longer restored — we want raw Kalshi numbers, not inflated historical max.
+        # The /settled endpoint will recalculate accurate W/L from Kalshi API on each call.
+        print(f"[STATE] HWM reset to 0/0 — using raw Kalshi settled data")
 
         print(f"[STATE] Restored {len(BOT_STATE['all_trades'])} trades from disk, "
               f"daily_spent reset to $0 for new session, same_day={is_same_day}")
@@ -454,13 +451,9 @@ def _load_state():
     except Exception as e:
         print(f"[STATE] Load error: {e}")
 
-    # Seed minimum known W/L from verified session data (April 11, 2026)
-    # Runs OUTSIDE try/except so it applies even on first boot with no state file
-    if _SETTLED_HWM["wins"] < 120:
-        _SETTLED_HWM["wins"] = 120
-    if _SETTLED_HWM["losses"] < 85:
-        _SETTLED_HWM["losses"] = 85
-    print(f"[STATE] HWM after seed: {_SETTLED_HWM['wins']}W/{_SETTLED_HWM['losses']}L")
+    # HWM seed removed — was inflating win rate with fake 120W/85L minimum.
+    # Now shows raw settled numbers from Kalshi API as source of truth.
+    print(f"[STATE] HWM: {_SETTLED_HWM['wins']}W/{_SETTLED_HWM['losses']}L")
 
 def _hydrate_from_kalshi():
     """Pull actual trade fills from Kalshi API to rebuild state after deploy."""
@@ -12797,25 +12790,12 @@ def settled_positions():
         _bot_pnl = round(sum(s.get("pnl_usd", 0) for s in _bot_settled), 2)
         _bot_total = _bot_wins + _bot_losses
 
-        # High-water mark: never report fewer W/L than previously seen
-        # (Kalshi zeroes out old fill data after settlement, so counts drop after deploy)
-        _hwm_changed = False
-        if _bot_wins > _SETTLED_HWM["wins"]:
-            _SETTLED_HWM["wins"] = _bot_wins
-            _hwm_changed = True
-        if _bot_losses > _SETTLED_HWM["losses"]:
-            _SETTLED_HWM["losses"] = _bot_losses
-            _hwm_changed = True
-        if _bot_pnl > _SETTLED_HWM["total_pnl"]:
-            _SETTLED_HWM["total_pnl"] = _bot_pnl
-            _hwm_changed = True
-        if _hwm_changed:
-            _save_state()  # persist HWM to disk immediately
-        _final_wins = max(_bot_wins, _SETTLED_HWM["wins"])
-        _final_losses = max(_bot_losses, _SETTLED_HWM["losses"])
-        _final_pnl = _bot_pnl  # P&L uses current data (HWM not appropriate for P&L)
+        # Use raw Kalshi settled data — no more HWM inflation
+        _final_wins = _bot_wins
+        _final_losses = _bot_losses
+        _final_pnl = _bot_pnl
         _final_total = _final_wins + _final_losses
-        print(f"[SETTLED] bot={_bot_wins}W/{_bot_losses}L, HWM={_SETTLED_HWM}, final={_final_wins}W/{_final_losses}L, all={wins}W/{losses}L, settled_list={len(settled)}")
+        print(f"[SETTLED] {_final_wins}W/{_final_losses}L, P&L=${_final_pnl:.2f}, all={wins}W/{losses}L, settled_list={len(settled)}")
 
         result = {
             "settled": settled,
