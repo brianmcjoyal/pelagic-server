@@ -10263,7 +10263,14 @@ def _background_loop():
                 _last_perf_ts = _PERF_HISTORY[-1]["ts"][:18] if _PERF_HISTORY else ""
                 _now_perf_ts = datetime.datetime.now(tz=_PACIFIC).isoformat()[:18]
                 _chart_val2 = _pf_value2 if _pf_value2 > 0 else _bal2
-                if _now_perf_ts != _last_perf_ts and _chart_val2 > 0:
+                # Reject spikes: if new value jumps >2% from last recorded value,
+                # it's likely a mid-refresh artifact — skip this snapshot
+                _spike_ok = True
+                if _PERF_HISTORY and _chart_val2 > 0:
+                    _last_val = _PERF_HISTORY[-1].get("value", 0)
+                    if _last_val > 0 and abs(_chart_val2 - _last_val) / _last_val > 0.02:
+                        _spike_ok = False
+                if _now_perf_ts != _last_perf_ts and _chart_val2 > 0 and _spike_ok:
                     with _PERF_HISTORY_LOCK:
                         _PERF_HISTORY.append({
                             "ts": datetime.datetime.now(tz=_PACIFIC).isoformat(),
@@ -21103,6 +21110,30 @@ async function loadPerfHistory() {
   }
 }
 
+function _smoothPerfPoints(pts) {
+  // Multi-pass spike removal: catches both single-point spikes and
+  // multi-point bursts (e.g. 3 consecutive elevated readings during a live game).
+  // Uses median of 5-point window — much more robust than neighbor-average.
+  if (pts.length < 5) return pts;
+  var result = pts.slice();
+  // 2 passes to catch cascading spikes
+  for (var pass = 0; pass < 2; pass++) {
+    for (var i = 2; i < result.length - 2; i++) {
+      var window5 = [
+        result[i-2].value, result[i-1].value, result[i].value,
+        result[i+1].value, result[i+2].value
+      ].sort(function(a,b){ return a-b; });
+      var median = window5[2];
+      var curr = result[i].value;
+      var devPct = Math.abs(curr - median) / Math.max(1, median);
+      if (devPct > 0.015) { // 1.5% deviation from local median = spike
+        result[i] = {ts: result[i].ts, value: Math.round(median * 100) / 100, cash: result[i].cash};
+      }
+    }
+  }
+  return result;
+}
+
 function filterPerfData() {
   if (!_perfChartData.length) return [];
   var now = new Date();
@@ -21110,55 +21141,24 @@ function filterPerfData() {
   if (_perfChartRange === '1h') cutoff = new Date(now - 3600000);
   else if (_perfChartRange === '6h') cutoff = new Date(now - 6 * 3600000);
   else if (_perfChartRange === '1d') {
-    // "1D" = TODAY since midnight Pacific Time — matches Daily P&L header
+    // "TODAY" = since midnight Pacific Time — matches Daily P&L header
     var ptNow = new Date(now.toLocaleString('en-US', {timeZone: 'America/Los_Angeles'}));
-    cutoff = new Date(ptNow.getFullYear(), ptNow.getMonth(), ptNow.getDate());
-    // Convert back to UTC: get the offset
-    var midnightPT = new Date(now);
-    midnightPT.setHours(midnightPT.getHours() - (now - cutoff) / 3600000);
-    // Simpler: just use hours since midnight PT
     var hrsSinceMidnight = ptNow.getHours() + ptNow.getMinutes() / 60;
     cutoff = new Date(now - hrsSinceMidnight * 3600000);
   }
   else if (_perfChartRange === '7d') cutoff = new Date(now - 7 * 86400000);
-  // 'all' = no cutoff, but still smooth spikes
+  // 'all' = no cutoff
+  var pts;
   if (!cutoff) {
-    var allPts = _perfChartData.slice();
-    if (allPts.length > 4) {
-      for (var si = 1; si < allPts.length - 1; si++) {
-        var prev = allPts[si - 1].value;
-        var curr = allPts[si].value;
-        var next = allPts[si + 1].value;
-        var avgNeighbor = (prev + next) / 2;
-        var jumpPct = Math.abs(curr - avgNeighbor) / avgNeighbor;
-        if (jumpPct > 0.03) {
-          allPts[si] = {ts: allPts[si].ts, value: Math.round(avgNeighbor * 100) / 100, cash: allPts[si].cash};
-        }
-      }
-    }
-    return allPts;
+    pts = _perfChartData.slice();
+  } else {
+    var cutMs = cutoff.getTime();
+    pts = _perfChartData.filter(function(p) {
+      var d = new Date(p.ts);
+      return !isNaN(d.getTime()) && d.getTime() >= cutMs;
+    });
   }
-  // Parse timestamps properly — string comparison breaks with timezone offsets
-  var cutMs = cutoff.getTime();
-  var filtered = _perfChartData.filter(function(p) {
-    var d = new Date(p.ts);
-    return !isNaN(d.getTime()) && d.getTime() >= cutMs;
-  });
-  // Smooth out outlier spikes (data artifacts from mid-refresh snapshots)
-  // Replace any point that jumps >3% from its neighbors with the average of neighbors
-  if (filtered.length > 4) {
-    for (var si = 1; si < filtered.length - 1; si++) {
-      var prev = filtered[si - 1].value;
-      var curr = filtered[si].value;
-      var next = filtered[si + 1].value;
-      var avgNeighbor = (prev + next) / 2;
-      var jumpPct = Math.abs(curr - avgNeighbor) / avgNeighbor;
-      if (jumpPct > 0.03) {
-        filtered[si] = {ts: filtered[si].ts, value: Math.round(avgNeighbor * 100) / 100, cash: filtered[si].cash};
-      }
-    }
-  }
-  return filtered;
+  return _smoothPerfPoints(pts);
 }
 
 function drawPerfLineChart() {
