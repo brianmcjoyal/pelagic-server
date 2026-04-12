@@ -606,6 +606,32 @@ def _hydrate_from_kalshi():
         if _new_cg:
             BOT_STATE.setdefault("closegame_trades_today", []).extend(_new_cg)
         BOT_STATE["closegame_daily_spent"] = round(sum(t.get("cost_usd", 0) for t in BOT_STATE.get("closegame_trades_today", [])), 2)
+
+        # Hydrate floor/swing/goalie daily counters (same pattern)
+        _fl_today = [t for t in today_trades if t.get("strategy") == "floor"]
+        _existing_fl_ids = set(t.get("order_id") or t.get("ticker", "") + str(t.get("timestamp", "")) for t in BOT_STATE.get("floor_trades_today", []))
+        _new_fl = [t for t in _fl_today if (t.get("order_id") or t.get("ticker", "") + str(t.get("timestamp", ""))) not in _existing_fl_ids]
+        if _new_fl:
+            BOT_STATE.setdefault("floor_trades_today", []).extend(_new_fl)
+        BOT_STATE["floor_daily_spent"] = round(sum(t.get("cost_usd", 0) for t in BOT_STATE.get("floor_trades_today", [])), 2)
+        BOT_STATE["floor_date"] = today_str
+
+        _sw_today = [t for t in today_trades if t.get("strategy") == "swing"]
+        _existing_sw_ids = set(t.get("order_id") or t.get("ticker", "") + str(t.get("timestamp", "")) for t in BOT_STATE.get("swing_trades_today", []))
+        _new_sw = [t for t in _sw_today if (t.get("order_id") or t.get("ticker", "") + str(t.get("timestamp", ""))) not in _existing_sw_ids]
+        if _new_sw:
+            BOT_STATE.setdefault("swing_trades_today", []).extend(_new_sw)
+        BOT_STATE["swing_daily_spent"] = round(sum(t.get("cost_usd", 0) for t in BOT_STATE.get("swing_trades_today", [])), 2)
+        BOT_STATE["swing_date"] = today_str
+
+        _gl_today = [t for t in today_trades if t.get("strategy") in ("goalie", "goalie_pulled")]
+        _existing_gl_ids = set(t.get("order_id") or t.get("ticker", "") + str(t.get("timestamp", "")) for t in BOT_STATE.get("goalie_trades_today", []))
+        _new_gl = [t for t in _gl_today if (t.get("order_id") or t.get("ticker", "") + str(t.get("timestamp", ""))) not in _existing_gl_ids]
+        if _new_gl:
+            BOT_STATE.setdefault("goalie_trades_today", []).extend(_new_gl)
+        BOT_STATE["goalie_daily_spent"] = round(sum(t.get("cost_usd", 0) for t in BOT_STATE.get("goalie_trades_today", [])), 2)
+        BOT_STATE["goalie_date"] = today_str
+
         BOT_STATE["daily_spent_usd"] = round(today_spent, 2)
         # Also seed global event lock with today's events
         with _EVENT_LOCK:
@@ -2958,6 +2984,13 @@ def run_bot_scan():
         BOT_STATE["floor_trades_today"] = []
         BOT_STATE["floor_daily_spent"] = 0.0
         BOT_STATE["floor_date"] = today
+        BOT_STATE["swing_trades_today"] = []
+        BOT_STATE["swing_daily_spent"] = 0.0
+        BOT_STATE["swing_date"] = today
+        BOT_STATE["goalie_trades_today"] = []
+        BOT_STATE["goalie_daily_spent"] = 0.0
+        BOT_STATE["goalie_date"] = today
+        BOT_STATE["misc_daily_spent"] = 0.0  # quant, arb, manual /trade
         # Clean up stale tracking data to prevent memory leaks
         _game_score_tracker.clear()
         _price_averages.clear()
@@ -3173,14 +3206,18 @@ def _total_daily_spent():
         + BOT_STATE.get("floor_daily_spent", 0)
         + BOT_STATE.get("swing_daily_spent", 0)
         + BOT_STATE.get("goalie_daily_spent", 0)
+        + BOT_STATE.get("misc_daily_spent", 0)
     )
 
 
 def _total_bets_today():
-    """Count every bet placed today across every strategy."""
+    """Count every bet placed today across every strategy.
+    NOTE: We use ONLY per-strategy lists — NOT trades_today.
+    trades_today is a catch-all that overlaps with per-strategy lists,
+    causing double-counting (same pattern as the daily_spent_usd bug).
+    """
     return (
-        len(BOT_STATE.get("trades_today", []))
-        + len(BOT_STATE.get("snipe_trades_today", []))
+        len(BOT_STATE.get("snipe_trades_today", []))
         + len(BOT_STATE.get("moonshark_trades_today", []))
         + len(BOT_STATE.get("closegame_trades_today", []))
         + len(BOT_STATE.get("manual_trades_today", []))
@@ -3226,10 +3263,12 @@ def _sport_from_ticker(ticker):
 def _current_sport_exposure():
     """Return {sport: usd_spent_today} across all strategies using today's trades."""
     exposure = {}
+    # NOTE: We use ONLY per-strategy lists — NOT trades_today (overlaps = double-count)
     trade_buckets = [
-        "trades_today", "snipe_trades_today", "moonshark_trades_today",
+        "snipe_trades_today", "moonshark_trades_today",
         "closegame_trades_today", "floor_trades_today",
         "swing_trades_today", "goalie_trades_today",
+        "manual_trades_today",
     ]
     for bucket in trade_buckets:
         for t in BOT_STATE.get(bucket, []) or []:
@@ -3403,7 +3442,9 @@ def live_game_snipe():
         pass
     # Also include today's trades from ALL strategies to prevent cross-strategy dupes
     for _tlist in [BOT_STATE.get("snipe_trades_today", []), BOT_STATE.get("moonshark_trades_today", []),
-                   BOT_STATE.get("closegame_trades_today", []), BOT_STATE.get("manual_trades_today", [])]:
+                   BOT_STATE.get("closegame_trades_today", []), BOT_STATE.get("manual_trades_today", []),
+                   BOT_STATE.get("floor_trades_today", []), BOT_STATE.get("swing_trades_today", []),
+                   BOT_STATE.get("goalie_trades_today", [])]:
         for _t in _tlist:
             _tk = _t.get("ticker", "")
             if _tk:
@@ -3695,7 +3736,9 @@ def live_game_snipe():
                     if _snipe_league_oa:
                         _snipe_consensus = _get_consensus_odds(_snipe_team, _snipe_league_oa)
                 if _snipe_consensus is not None:
-                    _snipe_cons_edge = _snipe_consensus - implied_prob_snipe
+                    # For NO bets, consensus is team win prob; we need 1-consensus vs our price
+                    _snipe_cons_prob = (1 - _snipe_consensus) if side == "no" else _snipe_consensus
+                    _snipe_cons_edge = _snipe_cons_prob - implied_prob_snipe
                     _log_activity(
                         f"SNIPE ODDS API: {ticker} — consensus={_snipe_consensus:.1%} vs Kalshi={implied_prob_snipe:.0%} edge={_snipe_cons_edge:+.1%}",
                         "info"
@@ -3893,6 +3936,7 @@ def live_game_snipe():
                             f"= ${actual_cost:.2f} (potential +${potential:.2f}) | {title[:40]}",
                             "success"
                         )
+                        _place_take_profit(ticker, side, price, filled, "sniper")
                         snipes.append({"ticker": ticker, "filled": filled, "cost": actual_cost, "potential": potential})
                         existing_tickers.add(ticker)
                         existing_events.add(event_key)
@@ -3983,7 +4027,9 @@ def moonshark_snipe():
         pass
     # Also include today's trades from ALL strategies to prevent cross-strategy dupes
     for _tlist in [BOT_STATE.get("snipe_trades_today", []), BOT_STATE.get("moonshark_trades_today", []),
-                   BOT_STATE.get("closegame_trades_today", []), BOT_STATE.get("manual_trades_today", [])]:
+                   BOT_STATE.get("closegame_trades_today", []), BOT_STATE.get("manual_trades_today", []),
+                   BOT_STATE.get("floor_trades_today", []), BOT_STATE.get("swing_trades_today", []),
+                   BOT_STATE.get("goalie_trades_today", [])]:
         for _t in _tlist:
             _tk = _t.get("ticker", "")
             if _tk:
@@ -4399,7 +4445,9 @@ def moonshark_snipe():
                     if _ms_team_abbrev:
                         _consensus_prob = _get_consensus_odds(_ms_team_abbrev, _league)
                 if _consensus_prob is not None:
-                    _consensus_edge = _consensus_prob - implied_prob
+                    # For NO bets, consensus is team win prob; we need 1-consensus vs our price
+                    _cons_adj = (1 - _consensus_prob) if side == "no" else _consensus_prob
+                    _consensus_edge = _cons_adj - implied_prob
                     _log_activity(
                         f"ODDS API CHECK: {ticker} — consensus={_consensus_prob:.1%} vs Kalshi={implied_prob:.0%} edge={_consensus_edge:+.1%} (ESPN={espn_implied:.1%})",
                         "info"
@@ -4773,6 +4821,10 @@ def closegame_snipe():
     existing_events = set()
     try:
         positions = check_position_prices()
+        # Enforce global position cap — no new closegame bets if already bloated
+        if len(positions) >= BOT_CONFIG.get("max_open_positions", 40):
+            _log_activity(f"🎯 CloseGame SKIP: {len(positions)} open positions >= cap", "warn")
+            return []
         for p in positions:
             existing_tickers.add(p.get("ticker", ""))
             parts = p.get("ticker", "").split("-")
@@ -5080,7 +5132,9 @@ def closegame_snipe():
                 # The Odds API consensus validation for CloseGame
                 _cg_consensus = _get_consensus_odds(underdog, cg["sport"]) if underdog else None
                 if _cg_consensus is not None:
-                    _cg_cons_edge = _cg_consensus - kalshi_implied
+                    # For NO bets, consensus is team win prob; we need 1-consensus vs our price
+                    _cg_cons_adj = (1 - _cg_consensus) if side == "no" else _cg_consensus
+                    _cg_cons_edge = _cg_cons_adj - kalshi_implied
                     _log_activity(
                         f"CLOSEGAME ODDS API: {ticker} — consensus={_cg_consensus:.1%} vs Kalshi={kalshi_implied:.0%} edge={_cg_cons_edge:+.1%}",
                         "info"
@@ -5343,6 +5397,8 @@ def floor_quota_snipe():
         BOT_STATE.get("closegame_trades_today", []),
         BOT_STATE.get("manual_trades_today", []),
         BOT_STATE.get("floor_trades_today", []),
+        BOT_STATE.get("swing_trades_today", []),
+        BOT_STATE.get("goalie_trades_today", []),
     ]:
         for _t in _tlist:
             _tk = _t.get("ticker", "")
@@ -5514,6 +5570,14 @@ def floor_quota_snipe():
         price = cand["price"]
         edge = cand["edge"]
         event_key = cand["event_key"]
+
+        # Sport exposure cap — prevent floor from piling up on one sport
+        _fl_cap_ok, _, _ = _sport_cap_ok(ticker, FLOOR_BET_USD)
+        if not _fl_cap_ok:
+            continue
+        # Temporal correlation guard
+        if not _correlation_check_ok(ticker, 3):
+            continue
 
         # Small bet — risk is limited by design
         bet_usd = min(FLOOR_BET_USD, FLOOR_MAX_DAILY_USD - BOT_STATE.get("floor_daily_spent", 0))
@@ -6155,7 +6219,7 @@ def goalie_pulled_snipe():
                 best = {
                     "edge": edge, "price": yes_ask, "implied": implied,
                     "our_prob": our_prob, "ticker": _raw_ticker,
-                    "title": mkt.get("title", ""), "event_key": event_key,
+                    "title": mkt.get("title", ""), "event_key": "-".join(_raw_ticker.split("-")[:2]) if _raw_ticker else "",
                     "is_home": is_home_ticker,
                 }
                 best_mkt = mkt
@@ -6169,6 +6233,14 @@ def goalie_pulled_snipe():
         edge = best["edge"]
         event_key = best["event_key"]
         side = "yes"
+
+        # EV-after-fees filter — skip negative-EV bets
+        _gl_ev = edge * (100 - price)  # EV per contract in cents
+        _gl_fee = 0.07 * best["our_prob"] * (100 - price) / 100.0  # expected fee in cents
+        _gl_ev_after_fees = _gl_ev - _gl_fee
+        if _gl_ev_after_fees <= 0:
+            _log_activity(f"GOALIE SKIP {ticker}: negative EV after fees ({_gl_ev_after_fees:.1f}c)", "info")
+            continue
 
         remaining = GOALIE_MAX_DAILY_USD - BOT_STATE.get("goalie_daily_spent", 0)
         profit_if_win = (100 - price) / 100.0
@@ -7117,6 +7189,7 @@ def run_quant_strategies(all_markets):
         if success:
             with _BOT_STATE_LOCK:
                 BOT_STATE["daily_spent_usd"] += cost_usd
+                BOT_STATE["misc_daily_spent"] = BOT_STATE.get("misc_daily_spent", 0) + cost_usd
             BOT_STATE["trades_today"].append(trade_record)
             trades_this_round += 1
             kelly_sizes.append(cost_usd)
@@ -8414,8 +8487,10 @@ def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, stra
     market_type = "unknown"
     if close_time:
         try:
-            ct_dt = datetime.datetime.fromisoformat(str(close_time).replace("Z", "+00:00")).replace(tzinfo=None)
-            hours_to_close = round((ct_dt - now).total_seconds() / 3600, 2)
+            ct_dt = datetime.datetime.fromisoformat(str(close_time).replace("Z", "+00:00"))
+            # Ensure both datetimes are timezone-aware for correct subtraction
+            now_aware = now if now.tzinfo else now.replace(tzinfo=datetime.timezone.utc)
+            hours_to_close = round((ct_dt - now_aware).total_seconds() / 3600, 2)
             if hours_to_close is not None:
                 if hours_to_close <= 0:
                     market_type = "live_sports"
@@ -8434,7 +8509,7 @@ def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, stra
 
     # Bet sizing and payout
     bet_size_usd = round(cost_usd, 2)
-    potential_payout_usd = round((100 * count) / 100.0, 2) if count else 0
+    potential_payout_usd = round(((100 - price_cents) * count) / 100.0, 2) if count and price_cents else 0
     risk_reward_ratio = round(potential_payout_usd / cost_usd, 3) if cost_usd > 0 else 0
 
     # --- Game state at entry (from ESPN live scores) ---
@@ -9328,7 +9403,7 @@ def _background_loop():
             _today_str_startup = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
             for _jt in _TRADE_JOURNAL:
                 if _jt.get("result") is not None and str(_jt.get("settlement_time") or "")[:10] == _today_str_startup:
-                    _startup_daily += float(_jt.get("pnl") or 0)
+                    _startup_daily += float(_jt.get("pnl_usd") or _jt.get("pnl") or 0)
             _PORTFOLIO_CACHE["data"]["daily_pnl_usd"] = round(_startup_daily, 2)
         except Exception:
             pass
@@ -9648,7 +9723,7 @@ def _background_loop():
                     _today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
                     for _jt in _TRADE_JOURNAL:
                         if _jt.get("result") is not None and str(_jt.get("settlement_time") or "")[:10] == _today_str:
-                            _daily_pnl += float(_jt.get("pnl") or 0)
+                            _daily_pnl += float(_jt.get("pnl_usd") or _jt.get("pnl") or 0)
                     _daily_pnl = round(_daily_pnl, 2)
                 except Exception:
                     pass
@@ -9705,7 +9780,7 @@ def _background_loop():
                     "win_rate": round(_SETTLED_CACHE["data"]["wins"] / max(1, _SETTLED_CACHE["data"]["wins"] + _SETTLED_CACHE["data"]["losses"]) * 100, 1) if _SETTLED_CACHE.get("data") else _d1_wr,
                     "win_rate_all_time": _wr2,
                     "win_rate_7d": _7d_wr,
-                    "total_realized_usd": _SETTLED_CACHE["data"]["total_pnl_usd"] if _SETTLED_CACHE.get("data") else round(sum(t.get("pnl", 0) for t in _TRADE_JOURNAL) if _TRADE_JOURNAL else _realized2, 2),
+                    "total_realized_usd": _SETTLED_CACHE["data"]["total_pnl_usd"] if _SETTLED_CACHE.get("data") else round(sum(float(t.get("pnl_usd") or t.get("pnl") or 0) for t in _TRADE_JOURNAL) if _TRADE_JOURNAL else _realized2, 2),
                     "total_realized_all": round(_realized2, 2),
                     "settled_history": _settled_list2[-20:],
                 }
@@ -14568,52 +14643,63 @@ _ODDS_API_SPORT_MAP = {
 
 # Abbreviation -> full team name fragments for fuzzy matching
 # The Odds API uses full names like "Los Angeles Lakers"; Kalshi uses "LAL"
-_ODDS_API_TEAM_ALIASES = {
-    # NBA
-    "atl": ["atlanta", "hawks"], "bos": ["boston", "celtics"], "bkn": ["brooklyn", "nets"],
-    "cha": ["charlotte", "hornets"], "chi": ["chicago", "bulls"], "cle": ["cleveland", "cavaliers"],
-    "dal": ["dallas", "mavericks"], "den": ["denver", "nuggets"], "det": ["detroit", "pistons"],
-    "gs": ["golden state", "warriors"], "gsw": ["golden state", "warriors"],
-    "hou": ["houston", "rockets"], "ind": ["indiana", "pacers"],
-    "lac": ["la clippers", "clippers"], "lal": ["los angeles lakers", "lakers"],
-    "mem": ["memphis", "grizzlies"], "mia": ["miami", "heat"], "mil": ["milwaukee", "bucks"],
-    "min": ["minnesota", "timberwolves"], "no": ["new orleans", "pelicans"],
-    "nop": ["new orleans", "pelicans"], "ny": ["new york", "knicks"], "nyk": ["new york", "knicks"],
-    "okc": ["oklahoma city", "thunder"], "orl": ["orlando", "magic"],
-    "phi": ["philadelphia", "76ers"], "phx": ["phoenix", "suns"], "por": ["portland", "trail blazers"],
-    "sac": ["sacramento", "kings"], "sa": ["san antonio", "spurs"], "sas": ["san antonio", "spurs"],
-    "tor": ["toronto", "raptors"], "uta": ["utah", "jazz"], "wsh": ["washington", "wizards"],
-    # MLB
-    "ari": ["arizona", "diamondbacks"], "bal": ["baltimore", "orioles"],
-    "cin": ["cincinnati", "reds"], "col": ["colorado", "rockies"],
-    "chc": ["chicago cubs", "cubs"], "chw": ["chicago white sox", "white sox"],
-    "hou": ["houston", "astros"], "kc": ["kansas city", "royals"],
-    "laa": ["los angeles angels", "angels"], "lad": ["los angeles dodgers", "dodgers"],
-    "mia": ["miami", "marlins"], "mil": ["milwaukee", "brewers"],
-    "min": ["minnesota", "twins"], "nym": ["new york mets", "mets"],
-    "nyy": ["new york yankees", "yankees"], "oak": ["oakland", "athletics"],
-    "pit": ["pittsburgh", "pirates"], "sd": ["san diego", "padres"],
-    "sf": ["san francisco", "giants"], "sea": ["seattle", "mariners"],
-    "stl": ["st. louis", "cardinals"], "tb": ["tampa bay", "rays"],
-    "tex": ["texas", "rangers"], "tor": ["toronto", "blue jays"],
-    "wsh": ["washington", "nationals"],
-    # NHL
-    "ana": ["anaheim", "ducks"], "bos": ["boston", "bruins"],
-    "buf": ["buffalo", "sabres"], "cgy": ["calgary", "flames"], "car": ["carolina", "hurricanes"],
-    "cbj": ["columbus", "blue jackets"], "col": ["colorado", "avalanche"],
-    "dal": ["dallas", "stars"], "det": ["detroit", "red wings"],
-    "edm": ["edmonton", "oilers"], "fla": ["florida", "panthers"],
-    "la": ["los angeles", "kings"], "min": ["minnesota", "wild"],
-    "mtl": ["montreal", "canadiens"], "nsh": ["nashville", "predators"],
-    "nj": ["new jersey", "devils"], "nyi": ["new york islanders", "islanders"],
-    "nyr": ["new york rangers", "rangers"], "ott": ["ottawa", "senators"],
-    "phi": ["philadelphia", "flyers"], "pit": ["pittsburgh", "penguins"],
-    "sea": ["seattle", "kraken"], "sj": ["san jose", "sharks"],
-    "stl": ["st. louis", "blues"], "tb": ["tampa bay", "lightning"],
-    "tor": ["toronto", "maple leafs"], "van": ["vancouver", "canucks"],
-    "vgk": ["vegas", "golden knights"], "wpg": ["winnipeg", "jets"],
-    "wsh": ["washington", "capitals"],
+# Sport-scoped aliases to avoid cross-sport key collisions (BOS=celtics vs bruins, etc.)
+_ODDS_API_TEAM_ALIASES_BY_SPORT = {
+    "nba": {
+        "atl": ["atlanta", "hawks"], "bos": ["boston", "celtics"], "bkn": ["brooklyn", "nets"],
+        "cha": ["charlotte", "hornets"], "chi": ["chicago", "bulls"], "cle": ["cleveland", "cavaliers"],
+        "dal": ["dallas", "mavericks"], "den": ["denver", "nuggets"], "det": ["detroit", "pistons"],
+        "gs": ["golden state", "warriors"], "gsw": ["golden state", "warriors"],
+        "hou": ["houston", "rockets"], "ind": ["indiana", "pacers"],
+        "lac": ["la clippers", "clippers"], "lal": ["los angeles lakers", "lakers"],
+        "mem": ["memphis", "grizzlies"], "mia": ["miami", "heat"], "mil": ["milwaukee", "bucks"],
+        "min": ["minnesota", "timberwolves"], "no": ["new orleans", "pelicans"],
+        "nop": ["new orleans", "pelicans"], "ny": ["new york", "knicks"], "nyk": ["new york", "knicks"],
+        "okc": ["oklahoma city", "thunder"], "orl": ["orlando", "magic"],
+        "phi": ["philadelphia", "76ers"], "phx": ["phoenix", "suns"], "por": ["portland", "trail blazers"],
+        "sac": ["sacramento", "kings"], "sa": ["san antonio", "spurs"], "sas": ["san antonio", "spurs"],
+        "tor": ["toronto", "raptors"], "uta": ["utah", "jazz"], "wsh": ["washington", "wizards"],
+    },
+    "mlb": {
+        "ari": ["arizona", "diamondbacks"], "bal": ["baltimore", "orioles"],
+        "bos": ["boston", "red sox"], "cin": ["cincinnati", "reds"], "col": ["colorado", "rockies"],
+        "chc": ["chicago cubs", "cubs"], "chw": ["chicago white sox", "white sox"],
+        "hou": ["houston", "astros"], "kc": ["kansas city", "royals"],
+        "laa": ["los angeles angels", "angels"], "lad": ["los angeles dodgers", "dodgers"],
+        "mia": ["miami", "marlins"], "mil": ["milwaukee", "brewers"],
+        "min": ["minnesota", "twins"], "nym": ["new york mets", "mets"],
+        "nyy": ["new york yankees", "yankees"], "oak": ["oakland", "athletics"],
+        "phi": ["philadelphia", "phillies"], "pit": ["pittsburgh", "pirates"],
+        "sd": ["san diego", "padres"], "sf": ["san francisco", "giants"],
+        "sea": ["seattle", "mariners"], "stl": ["st. louis", "cardinals"],
+        "tb": ["tampa bay", "rays"], "tex": ["texas", "rangers"],
+        "tor": ["toronto", "blue jays"], "wsh": ["washington", "nationals"],
+        "det": ["detroit", "tigers"],
+    },
+    "nhl": {
+        "ana": ["anaheim", "ducks"], "bos": ["boston", "bruins"],
+        "buf": ["buffalo", "sabres"], "cgy": ["calgary", "flames"], "car": ["carolina", "hurricanes"],
+        "cbj": ["columbus", "blue jackets"], "col": ["colorado", "avalanche"],
+        "dal": ["dallas", "stars"], "det": ["detroit", "red wings"],
+        "edm": ["edmonton", "oilers"], "fla": ["florida", "panthers"],
+        "la": ["los angeles", "kings"], "min": ["minnesota", "wild"],
+        "mtl": ["montreal", "canadiens"], "nsh": ["nashville", "predators"],
+        "nj": ["new jersey", "devils"], "nyi": ["new york islanders", "islanders"],
+        "nyr": ["new york rangers", "rangers"], "ott": ["ottawa", "senators"],
+        "phi": ["philadelphia", "flyers"], "pit": ["pittsburgh", "penguins"],
+        "sea": ["seattle", "kraken"], "sj": ["san jose", "sharks"],
+        "stl": ["st. louis", "blues"], "tb": ["tampa bay", "lightning"],
+        "tor": ["toronto", "maple leafs"], "van": ["vancouver", "canucks"],
+        "vgk": ["vegas", "golden knights"], "wpg": ["winnipeg", "jets"],
+        "wsh": ["washington", "capitals"],
+    },
 }
+# Flat fallback (used when sport is unknown) — prefer sport-specific first
+_ODDS_API_TEAM_ALIASES = {}
+for _sport_aliases in _ODDS_API_TEAM_ALIASES_BY_SPORT.values():
+    for _abbr, _names in _sport_aliases.items():
+        if _abbr not in _ODDS_API_TEAM_ALIASES:
+            _ODDS_API_TEAM_ALIASES[_abbr] = _names
 
 
 def _fetch_odds_api(sport_key):
@@ -14684,18 +14770,25 @@ def _fetch_odds_api(sport_key):
         return None
 
 
-def _match_odds_api_team(team_abbrev, odds_api_name):
+def _match_odds_api_team(team_abbrev, odds_api_name, sport=None):
     """Check if a team abbreviation matches an Odds API full team name.
 
     team_abbrev: e.g. "LAL", "NYY"
     odds_api_name: e.g. "Los Angeles Lakers", "New York Yankees"
+    sport: e.g. "nba", "mlb", "nhl" — used for sport-scoped alias lookup
     Returns True if match found.
     """
     abbrev_lower = team_abbrev.lower()
     name_lower = odds_api_name.lower()
 
-    # Direct check via alias table
-    aliases = _ODDS_API_TEAM_ALIASES.get(abbrev_lower, [])
+    # Prefer sport-scoped aliases to avoid cross-sport collisions (BOS=celtics vs bruins)
+    aliases = []
+    if sport:
+        sport_lower = sport.lower()
+        sport_aliases = _ODDS_API_TEAM_ALIASES_BY_SPORT.get(sport_lower, {})
+        aliases = sport_aliases.get(abbrev_lower, [])
+    if not aliases:
+        aliases = _ODDS_API_TEAM_ALIASES.get(abbrev_lower, [])
     for alias in aliases:
         if alias in name_lower:
             return True
@@ -14732,8 +14825,8 @@ def _get_consensus_odds(team_abbrev, league):
         away_team = game.get("away_team", "")
 
         # Find which side our team is on
-        is_home = _match_odds_api_team(abbrev_upper, home_team)
-        is_away = _match_odds_api_team(abbrev_upper, away_team)
+        is_home = _match_odds_api_team(abbrev_upper, home_team, sport=league.lower())
+        is_away = _match_odds_api_team(abbrev_upper, away_team, sport=league.lower())
 
         if not is_home and not is_away:
             continue
@@ -15012,6 +15105,7 @@ def _check_arbitrage():
                             cost = (yes_ask + no_ask) * filled / 100.0
                             profit = gap * filled / 100.0
                             BOT_STATE["daily_spent_usd"] = BOT_STATE.get("daily_spent_usd", 0) + cost
+                            BOT_STATE["misc_daily_spent"] = BOT_STATE.get("misc_daily_spent", 0) + cost
                             _log_activity(
                                 f"ARB HIT! {ticker} x{filled} — cost ${cost:.2f}, guaranteed profit ${profit:.2f}",
                                 "success"
@@ -17765,6 +17859,7 @@ def execute_trade():
     if trade_record["success"]:
         with _BOT_STATE_LOCK:
             BOT_STATE["daily_spent_usd"] += trade_record["cost_usd"]
+            BOT_STATE["misc_daily_spent"] = BOT_STATE.get("misc_daily_spent", 0) + trade_record["cost_usd"]
     _save_state()
     return jsonify(trade_record)
 
