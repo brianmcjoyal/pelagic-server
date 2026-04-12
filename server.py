@@ -1993,8 +1993,8 @@ def _extract_actions(raw_q):
     return tokens & _ACTION_VERBS
 
 
-def _is_sports_market(raw_q):
-    """Check if a question is about sports."""
+def _is_sports_question(raw_q):
+    """Check if a question string is about sports (by keywords)."""
     q_lower = raw_q.lower()
     tokens = set(re.sub(r"[^a-z0-9\s]", "", q_lower).split())
     return bool(tokens & _SPORT_LEAGUES)
@@ -2103,7 +2103,7 @@ def similarity(a, b, raw_a="", raw_b=""):
         penalty *= 0.85
 
     # ── Sports-specific check ──
-    if _is_sports_market(ra) or _is_sports_market(rb):
+    if _is_sports_question(ra) or _is_sports_question(rb):
         if not _sports_compatible(ra, rb):
             return 0
 
@@ -3599,9 +3599,10 @@ def live_game_snipe():
     # Daily reset check (Pacific time — matches dashboard display)
     today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
     if BOT_STATE.get("snipe_date") != today:
-        BOT_STATE["snipe_date"] = today
-        BOT_STATE["snipe_trades_today"] = []
-        BOT_STATE["snipe_daily_spent"] = 0.0
+        with _BOT_STATE_LOCK:
+            BOT_STATE["snipe_date"] = today
+            BOT_STATE["snipe_trades_today"] = []
+            BOT_STATE["snipe_daily_spent"] = 0.0
 
     if BOT_STATE["snipe_daily_spent"] >= SNIPE_MAX_DAILY:
         return []
@@ -3968,7 +3969,7 @@ def live_game_snipe():
                 _snipe_fee = PLATFORM_FEES.get("kalshi", 0.07)
                 _snipe_win_est = _snipe_our_prob if (_snipe_espn_prob is not None) else (price / 100.0)
                 _snipe_ev_per = (_snipe_win_est * (100 - price) - (1 - _snipe_win_est) * price) / 100.0
-                _snipe_ev_after_fees = _snipe_ev_per - (_snipe_fee * _snipe_win_est * (100 - price) / 10000.0)
+                _snipe_ev_after_fees = _snipe_ev_per - (_snipe_fee * _snipe_win_est * (100 - price) / 100.0)
                 if _snipe_ev_after_fees < 0.01:  # Less than 1c EV per contract after fees
                     _log_activity(f"SNIPE SKIP: {ticker} — EV after fees {_snipe_ev_after_fees:.3f}c < 1c threshold", "info")
                     _ms_reasons["low_ev_snipe"] = _ms_reasons.get("low_ev_snipe", 0) + 1
@@ -4178,9 +4179,10 @@ def moonshark_snipe():
     # Daily reset check (Pacific time — matches dashboard display)
     today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
     if BOT_STATE.get("moonshark_date") != today:
-        BOT_STATE["moonshark_date"] = today
-        BOT_STATE["moonshark_trades_today"] = []
-        BOT_STATE["moonshark_daily_spent"] = 0.0
+        with _BOT_STATE_LOCK:
+            BOT_STATE["moonshark_date"] = today
+            BOT_STATE["moonshark_trades_today"] = []
+            BOT_STATE["moonshark_daily_spent"] = 0.0
 
     if BOT_STATE["moonshark_daily_spent"] >= MOONSHARK_MAX_DAILY:
         return []
@@ -4698,7 +4700,7 @@ def moonshark_snipe():
                 _kalshi_fee = PLATFORM_FEES.get("kalshi", 0.07)
                 _win_prob_est = _ms_our_prob if _ms_our_prob else (price / 100.0)
                 _ev_per_contract = (_win_prob_est * (100 - price) - (1 - _win_prob_est) * price) / 100.0
-                _ev_after_fees = _ev_per_contract - (_kalshi_fee * _win_prob_est * (100 - price) / 10000.0)
+                _ev_after_fees = _ev_per_contract - (_kalshi_fee * _win_prob_est * (100 - price) / 100.0)
                 if _ev_after_fees < 0.015:  # Less than 1.5 cents EV per contract after fees — not worth the risk
                     _ms_reasons["low_ev"] = _ms_reasons.get("low_ev", 0) + 1
                     continue
@@ -4991,9 +4993,10 @@ def closegame_snipe():
     # Daily reset (Pacific time — matches dashboard display)
     today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
     if BOT_STATE.get("closegame_date") != today:
-        BOT_STATE["closegame_date"] = today
-        BOT_STATE["closegame_trades_today"] = []
-        BOT_STATE["closegame_daily_spent"] = 0.0
+        with _BOT_STATE_LOCK:
+            BOT_STATE["closegame_date"] = today
+            BOT_STATE["closegame_trades_today"] = []
+            BOT_STATE["closegame_daily_spent"] = 0.0
 
     if BOT_STATE.get("closegame_daily_spent", 0) >= CLOSEGAME_MAX_DAILY:
         return []
@@ -5358,7 +5361,7 @@ def closegame_snipe():
                 # EV after fees filter — skip negative-EV bets
                 _cg_fee = PLATFORM_FEES.get("kalshi", 0.07)
                 _cg_ev = (estimated_win_prob * (100 - price) - (1 - estimated_win_prob) * price) / 100.0
-                _cg_ev_after_fees = _cg_ev - (_cg_fee * estimated_win_prob * (100 - price) / 10000.0)
+                _cg_ev_after_fees = _cg_ev - (_cg_fee * estimated_win_prob * (100 - price) / 100.0)
                 if _cg_ev_after_fees < 0.01:
                     _log_activity(f"CLOSEGAME SKIP: {ticker} — EV after fees {_cg_ev_after_fees:.3f} < 1c threshold", "info")
                     continue
@@ -5549,9 +5552,10 @@ def floor_quota_snipe():
 
     today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
     if BOT_STATE.get("floor_date") != today:
-        BOT_STATE["floor_date"] = today
-        BOT_STATE["floor_trades_today"] = []
-        BOT_STATE["floor_daily_spent"] = 0.0
+        with _BOT_STATE_LOCK:
+            BOT_STATE["floor_date"] = today
+            BOT_STATE["floor_trades_today"] = []
+            BOT_STATE["floor_daily_spent"] = 0.0
 
     shortfall = _quota_shortfall()
     if shortfall <= 0:
@@ -5912,9 +5916,10 @@ def momentum_swing_snipe():
 
     today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
     if BOT_STATE.get("swing_date") != today:
-        BOT_STATE["swing_date"] = today
-        BOT_STATE["swing_trades_today"] = []
-        BOT_STATE["swing_daily_spent"] = 0.0
+        with _BOT_STATE_LOCK:
+            BOT_STATE["swing_date"] = today
+            BOT_STATE["swing_trades_today"] = []
+            BOT_STATE["swing_daily_spent"] = 0.0
 
     if BOT_STATE.get("swing_daily_spent", 0) >= SWING_MAX_DAILY_USD:
         return []
@@ -6092,7 +6097,7 @@ def momentum_swing_snipe():
             # EV after fees filter — skip negative-EV bets
             _sw_fee = PLATFORM_FEES.get("kalshi", 0.07)
             _sw_ev = (live_prob * (100 - price) - (1 - live_prob) * price) / 100.0
-            _sw_ev_after_fees = _sw_ev - (_sw_fee * live_prob * (100 - price) / 10000.0)
+            _sw_ev_after_fees = _sw_ev - (_sw_fee * live_prob * (100 - price) / 100.0)
             if _sw_ev_after_fees < 0.01:
                 continue
 
@@ -6261,9 +6266,10 @@ def goalie_pulled_snipe():
 
     today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
     if BOT_STATE.get("goalie_date") != today:
-        BOT_STATE["goalie_date"] = today
-        BOT_STATE["goalie_trades_today"] = []
-        BOT_STATE["goalie_daily_spent"] = 0.0
+        with _BOT_STATE_LOCK:
+            BOT_STATE["goalie_date"] = today
+            BOT_STATE["goalie_trades_today"] = []
+            BOT_STATE["goalie_daily_spent"] = 0.0
 
     if BOT_STATE.get("goalie_daily_spent", 0) >= GOALIE_MAX_DAILY_USD:
         return []
@@ -7056,7 +7062,7 @@ def enhanced_auto_exit():
         _tk = ticker.upper()
         _game_prefixes = ("KXKBL", "KXATP", "KXWTA", "KXNCAA", "KXNBA", "KXNHL",
                           "KXMLB", "KXUFC", "KXMMA", "KXEPL", "KXNFL", "KXMLS",
-                          "KXWNBA", "KXSOCCER", "KXPGA", "KXNBA")
+                          "KXWNBA", "KXSOCCER", "KXPGA")
         _is_game = any(_tk.startswith(p) for p in _game_prefixes)
         if _is_game:
             _cur_price = pos.get("current_price") or 0
@@ -14881,7 +14887,7 @@ def _check_blowout(ticker, title, bet_team_abbrev=None):
 _game_score_tracker = {}  # {ticker: {"last_score": "MIL 45 - PHX 52", "last_state": "in", "alerts": []}}
 
 # ── Price Movement Tracker ────────────────────────────────────────────
-_price_history = {}  # {ticker: [(timestamp, yes_price), ...]} — last 10 readings
+_price_move_history = {}  # {ticker: [(timestamp, yes_price), ...]} — last 10 readings
 
 def _track_prices():
     """Track Kalshi price movements for game markets. Detect sharp moves."""
@@ -14915,12 +14921,12 @@ def _track_prices():
                 continue
 
             # Add to history
-            if ticker not in _price_history:
-                _price_history[ticker] = []
-            history = _price_history[ticker]
+            if ticker not in _price_move_history:
+                _price_move_history[ticker] = []
+            history = _price_move_history[ticker]
             history.append((now, yes_price))
             # Keep last 10 readings (~10 minutes at 60s intervals)
-            _price_history[ticker] = history[-10:]
+            _price_move_history[ticker] = history[-10:]
 
             # Need at least 3 readings to detect movement
             if len(history) < 3:
@@ -15549,7 +15555,7 @@ def _check_arbitrage():
             continue
 
         total = yes_ask + no_ask
-        if total < 98:  # At least 2c profit guaranteed
+        if total < 93:  # At least 7c gap needed to profit after 7% Kalshi fee on winning side
             gap = 100 - total
             title = m.get("title", ticker)[:40]
             _log_activity(
@@ -15591,11 +15597,19 @@ def _check_arbitrage():
                         filled = min(yes_filled, no_filled)
                         if filled > 0:
                             cost = (yes_ask + no_ask) * filled / 100.0
-                            profit = gap * filled / 100.0
+                            # Profit must account for 7% Kalshi fee on the winning side
+                            # Worst case fee: max of fee on YES winning or NO winning
+                            fee_if_yes_wins = 0.07 * (100 - yes_ask) * filled / 100.0
+                            fee_if_no_wins = 0.07 * (100 - no_ask) * filled / 100.0
+                            worst_fee = max(fee_if_yes_wins, fee_if_no_wins)
+                            gross_profit = gap * filled / 100.0
+                            profit = gross_profit - worst_fee
+                            if profit <= 0:
+                                _log_activity(f"ARB SKIP: {ticker} x{filled} — gap {gap}c but fee eats profit (gross ${gross_profit:.2f}, fee ${worst_fee:.2f})", "info")
                             BOT_STATE["daily_spent_usd"] = BOT_STATE.get("daily_spent_usd", 0) + cost
                             BOT_STATE["misc_daily_spent"] = BOT_STATE.get("misc_daily_spent", 0) + cost
                             _log_activity(
-                                f"ARB HIT! {ticker} x{filled} — cost ${cost:.2f}, guaranteed profit ${profit:.2f}",
+                                f"ARB HIT! {ticker} x{filled} — cost ${cost:.2f}, net profit ${profit:.2f} (after ${worst_fee:.2f} fee)",
                                 "success"
                             )
                             arbs.append({"ticker": ticker, "filled": filled, "profit": profit})
@@ -20188,7 +20202,7 @@ async function loadBetsFeed() {
       _ttKellyFrac = Math.max(0, _ttKellyFrac);
       // EV per contract after 7% Kalshi fee
       var _ttEVraw = (_ttWinProb * (100 - _ttPrice) - (1 - _ttWinProb) * _ttPrice) / 100;
-      var _ttFee = 0.07 * _ttPrice / 100;
+      var _ttFee = 0.07 * _ttWinProb * (100 - _ttPrice) / 100;
       var _ttEV = _ttEVraw - _ttFee;
 
       // Build tooltip data for hover — store as JSON in a single data attribute
