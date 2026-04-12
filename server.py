@@ -9687,78 +9687,178 @@ def _sample_gradient(stops, t):
 
 
 def _build_tradeshark_icon_png(size=180):
-    """Render a gold 'T' letter icon matching the shark logo's gold palette."""
+    """Render a gold 'T' with gradient + glimmer sparkle for mobile home screen."""
     import struct, zlib, math
 
-    # Gold gradient colors (same as shark logo)
-    gold_top = (0xda, 0xb0, 0x60)     # bright gold
-    gold_mid = (0xc9, 0x96, 0x3a)     # mid gold
-    gold_bot = (0x8b, 0x5e, 0x28)     # dark gold
-    bg_color = (0x0d, 0x0d, 0x0d)     # dark background
+    # TradeShark gold palette (matches header gradient)
+    bg = (0x0d, 0x0d, 0x0d)
 
     # Build RGBA pixel buffer
-    pixels = [bg_color + (255,)] * (size * size)
+    px = [bg + (255,)] * (size * size)
 
-    # Draw the "T" letter — proportioned for the icon
-    pad = int(size * 0.15)
-    # Top crossbar
-    bar_top = pad
-    bar_bottom = pad + int(size * 0.16)
-    bar_left = pad
-    bar_right = size - pad
-    # Vertical stem
-    stem_left = int(size * 0.38)
-    stem_right = int(size * 0.62)
-    stem_top = bar_bottom
-    stem_bottom = size - pad
+    # T dimensions — bold, slightly condensed, with rounded corners
+    pad = int(size * 0.14)
+    cr = max(3, int(size * 0.04))  # corner radius
 
-    def _gold_at_y(y):
-        """Interpolate gold gradient based on vertical position."""
-        t = (y - pad) / max(1, size - 2 * pad)
-        if t < 0.3:
-            f = t / 0.3
-            return tuple(int(gold_top[i] * (1 - f) + gold_mid[i] * f) for i in range(3))
-        else:
-            f = (t - 0.3) / 0.7
-            return tuple(int(gold_mid[i] * (1 - f) + gold_bot[i] * f) for i in range(3))
+    # Crossbar
+    bL, bR = pad, size - pad
+    bT, bB = pad, pad + int(size * 0.17)
+    # Stem
+    sL = int(size * 0.36)
+    sR = int(size * 0.64)
+    sT, sB = bB, size - pad
 
-    # Render T shape with rounded corners via anti-aliasing
+    def _in_rounded_rect(x, y, L, T, R, B, cr):
+        """Test if (x,y) is inside a rounded rect, returns 0.0-1.0 for AA."""
+        if x < L or x >= R or y < T or y >= B:
+            return 0.0
+        # Check corners
+        corners = [
+            (L + cr, T + cr),  # top-left
+            (R - cr, T + cr),  # top-right
+            (L + cr, B - cr),  # bottom-left
+            (R - cr, B - cr),  # bottom-right
+        ]
+        for cx, cy in corners:
+            dx, dy = 0, 0
+            if x < L + cr and y < T + cr:
+                dx, dy = x - (L + cr), y - (T + cr)
+            elif x >= R - cr and y < T + cr:
+                dx, dy = x - (R - cr - 1), y - (T + cr)
+            elif x < L + cr and y >= B - cr:
+                dx, dy = x - (L + cr), y - (B - cr - 1)
+            elif x >= R - cr and y >= B - cr:
+                dx, dy = x - (R - cr - 1), y - (B - cr - 1)
+            else:
+                continue
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist > cr + 0.5:
+                return 0.0
+            if dist > cr - 0.5:
+                return cr + 0.5 - dist
+        return 1.0
+
+    def _in_T(x, y):
+        """Coverage of (x,y) inside the T shape (0.0-1.0)."""
+        a1 = _in_rounded_rect(x, y, bL, bT, bR, bB, cr)
+        a2 = _in_rounded_rect(x, y, sL, sT, sR, sB, cr)
+        return min(1.0, a1 + a2)
+
+    # Gold gradient (top-to-bottom, 5 stops for richness)
+    _gold_stops = [
+        (0.00, (0xf0, 0xd0, 0x78)),  # bright highlight
+        (0.15, (0xda, 0xb0, 0x60)),  # warm gold
+        (0.40, (0xc9, 0x96, 0x3a)),  # classic gold
+        (0.70, (0xa8, 0x75, 0x30)),  # bronze
+        (1.00, (0x8b, 0x5e, 0x28)),  # deep gold
+    ]
+
+    def _gold_at(t):
+        t = max(0.0, min(1.0, t))
+        for i in range(len(_gold_stops) - 1):
+            t0, c0 = _gold_stops[i]
+            t1, c1 = _gold_stops[i + 1]
+            if t <= t1:
+                f = (t - t0) / max(0.001, t1 - t0)
+                return tuple(int(c0[j] + (c1[j] - c0[j]) * f) for j in range(3))
+        return _gold_stops[-1][1]
+
+    # Glimmer: a diagonal bright streak across the T (like light catching metal)
+    glimmer_cx = size * 0.38   # center of glimmer band (x)
+    glimmer_cy = size * 0.30   # center of glimmer band (y)
+    glimmer_w = size * 0.12    # width of glimmer band
+    glimmer_angle = math.radians(35)  # diagonal angle
+    cos_a, sin_a = math.cos(glimmer_angle), math.sin(glimmer_angle)
+
+    # Sparkle points: small bright stars
+    sparkles = [
+        (int(size * 0.30), int(size * 0.20), max(2, int(size * 0.03))),  # top-left of crossbar
+        (int(size * 0.70), int(size * 0.15), max(2, int(size * 0.025))),  # top-right
+        (int(size * 0.50), int(size * 0.42), max(1, int(size * 0.018))),  # where stem meets bar
+    ]
+
+    # Render
     for y in range(size):
         for x in range(size):
-            in_bar = bar_left <= x < bar_right and bar_top <= y < bar_bottom
-            in_stem = stem_left <= x < stem_right and stem_top <= y < stem_bottom
-            if in_bar or in_stem:
-                gold = _gold_at_y(y)
-                pixels[y * size + x] = gold + (255,)
+            cov = _in_T(x, y)
+            if cov > 0.001:
+                t = (y - bT) / max(1, sB - bT)
+                gold = _gold_at(t)
 
-    # Add subtle glow around the T
-    glow_radius = max(2, size // 30)
-    glow_color = (0xda, 0xb0, 0x60)
-    # Simple box-blur glow pass
-    alpha_map = [0.0] * (size * size)
-    for y in range(size):
-        for x in range(size):
-            if pixels[y * size + x][:3] != bg_color:
-                alpha_map[y * size + x] = 1.0
-    # Skip heavy blur for speed — just add a 1px border glow
-    for y in range(1, size - 1):
-        for x in range(1, size - 1):
-            if alpha_map[y * size + x] == 0:
-                # Check if adjacent to the letter
-                neighbors = (
-                    alpha_map[(y-1)*size+x] + alpha_map[(y+1)*size+x] +
-                    alpha_map[y*size+x-1] + alpha_map[y*size+x+1]
-                )
-                if neighbors > 0:
-                    a = int(neighbors * 25)
-                    pixels[y * size + x] = glow_color + (min(255, a),)
+                # Diagonal glimmer: brighten pixels near the glimmer line
+                # Project point onto the glimmer axis
+                dx = x - glimmer_cx
+                dy = y - glimmer_cy
+                # Distance along the perpendicular to the glimmer band
+                perp_dist = abs(-sin_a * dx + cos_a * dy)
+                if perp_dist < glimmer_w:
+                    glimmer_strength = (1.0 - perp_dist / glimmer_w) ** 2 * 0.55
+                    gold = tuple(min(255, int(g + (255 - g) * glimmer_strength)) for g in gold)
+
+                # Composite with anti-aliasing
+                a = int(cov * 255)
+                if a >= 255:
+                    px[y * size + x] = gold + (255,)
+                else:
+                    # Blend with bg
+                    f = a / 255.0
+                    blended = tuple(int(bg[i] * (1 - f) + gold[i] * f) for i in range(3))
+                    px[y * size + x] = blended + (255,)
+
+    # Glow: soft outer glow around the T shape (2-pass for softness)
+    glow_r = max(3, size // 25)
+    glow_col = (0xda, 0xb0, 0x60)
+    # Build distance field (simplified: check if near T edge)
+    for _pass in range(2):
+        for y in range(glow_r, size - glow_r):
+            for x in range(glow_r, size - glow_r):
+                if px[y * size + x][:3] != bg:
+                    continue
+                # Check distance to nearest T pixel
+                min_d2 = glow_r * glow_r + 1
+                for dy in range(-glow_r, glow_r + 1, max(1, glow_r // 2)):
+                    for dx in range(-glow_r, glow_r + 1, max(1, glow_r // 2)):
+                        ny, nx = y + dy, x + dx
+                        if 0 <= ny < size and 0 <= nx < size and px[ny * size + nx][:3] != bg:
+                            d2 = dx * dx + dy * dy
+                            if d2 < min_d2:
+                                min_d2 = d2
+                if min_d2 <= glow_r * glow_r:
+                    dist = math.sqrt(min_d2)
+                    strength = (1.0 - dist / glow_r) ** 2 * 0.25
+                    blended = tuple(int(bg[i] + (glow_col[i] - bg[i]) * strength) for i in range(3))
+                    px[y * size + x] = blended + (255,)
+
+    # Draw sparkle stars (4-pointed)
+    for sx, sy, sr in sparkles:
+        for dy in range(-sr * 3, sr * 3 + 1):
+            for dx in range(-sr * 3, sr * 3 + 1):
+                ny, nx = sy + dy, sx + dx
+                if not (0 <= ny < size and 0 <= nx < size):
+                    continue
+                ax, ay = abs(dx), abs(dy)
+                # Star shape: 4-pointed — bright along axes, fading diagonally
+                on_h = (ay <= max(1, sr // 3)) and ax <= sr * 2.5
+                on_v = (ax <= max(1, sr // 3)) and ay <= sr * 2.5
+                on_core = (ax + ay) <= sr
+                if on_h or on_v or on_core:
+                    if on_core:
+                        dist = (ax + ay) / max(1, sr)
+                    elif on_h:
+                        dist = ax / (sr * 2.5)
+                    else:
+                        dist = ay / (sr * 2.5)
+                    bright = max(0.0, (1.0 - dist) ** 1.5)
+                    old = px[ny * size + nx]
+                    sparked = tuple(min(255, int(old[i] + (255 - old[i]) * bright * 0.9)) for i in range(3))
+                    px[ny * size + nx] = sparked + (255,)
 
     # Encode to PNG
     raw = bytearray()
     for y in range(size):
         raw.append(0)  # filter byte
         for x in range(size):
-            r, g, b, a = pixels[y * size + x]
+            r, g, b, a = px[y * size + x]
             raw.extend((r, g, b, a))
 
     def _chunk(tag, data):
@@ -10677,8 +10777,10 @@ def settled_positions():
                     elif _jrec.get("game_state") == "post":
                         _edge_reasons.append("Game finished, settling")
                         _game_state_at_entry = "post"
-                    # Strategy reasoning
+                    # Strategy reasoning — also update trade_strategy from journal if still unknown
                     _strat = _jrec.get("strategy", "")
+                    if _strat and trade_strategy == "unknown":
+                        trade_strategy = _strat
                     if _strat == "live_sniper":
                         _edge_reasons.append(f"Sniper: favorite at {entry_cents}¢ (65-85¢ range)")
                     elif _strat == "moonshark":
@@ -19831,8 +19933,8 @@ function renderClosedBets() {
     }
 
     // Strategy badge
-    var stratLabels = {live_sniper:'SNIPER', sniper:'SNIPER', moonshark:'MOON', closegame:'CLOSE', manual:'MANUAL'};
-    var stratColors = {live_sniper:'#ffb400', sniper:'#ffb400', moonshark:'#e040fb', closegame:'#00d4ff', manual:'#5abf5a'};
+    var stratLabels = {live_sniper:'SNIPER', sniper:'SNIPER', moonshark:'MOON', closegame:'CLOSE', floor:'FLOOR', swing:'SWING', goalie:'GOALIE', manual:'MANUAL'};
+    var stratColors = {live_sniper:'#ffb400', sniper:'#ffb400', moonshark:'#e040fb', closegame:'#00d4ff', floor:'#00e5ff', swing:'#ff9100', goalie:'#76ff03', manual:'#5abf5a'};
     var strat = s.strategy || 'unknown';
     var stratLabel = stratLabels[strat] || strat.toUpperCase();
     var stratColor = stratColors[strat] || '#555';
