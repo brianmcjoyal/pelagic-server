@@ -3179,6 +3179,7 @@ def run_bot_scan():
         _price_averages.clear()
         _volatility_scores.clear()
         _price_history.clear()
+        _price_move_history.clear()
         _known_fill_ids.clear()
         _resting_sells.clear()
         _orderbook_cache.clear()
@@ -15614,7 +15615,14 @@ def _check_arbitrage():
                             )
                             arbs.append({"ticker": ticker, "filled": filled, "profit": profit})
                         if yes_filled > no_filled:
-                            _log_activity(f"ARB WARNING: {ticker} — YES filled {yes_filled} but NO only filled {no_filled}. {yes_filled - no_filled} unhedged contracts!", "error")
+                            unhedged = yes_filled - no_filled
+                            _log_activity(f"ARB WARNING: {ticker} — YES filled {yes_filled} but NO only filled {no_filled}. Selling {unhedged} unhedged YES contracts!", "error")
+                            # Auto-sell unhedged contracts to avoid directional risk
+                            try:
+                                sell_kalshi_position(ticker, "yes", yes_ask, count=unhedged)
+                                _log_activity(f"ARB: Auto-sold {unhedged} unhedged YES contracts for {ticker}", "info")
+                            except Exception as _sell_e:
+                                _log_activity(f"ARB: Failed to auto-sell unhedged contracts: {_sell_e}", "error")
                 except Exception as e:
                     print(f"[ARB] Order error: {e}")
 
