@@ -2393,6 +2393,12 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
         _PRETRADE_STATS["reasons"]["bad_price"] = _PRETRADE_STATS["reasons"].get("bad_price", 0) + 1
         return False, f"Price {price_cents}c outside valid range 1-99"
 
+    # GLOBAL MINIMUM PRICE FLOOR — sub-15c contracts are net-negative longshots
+    if price_cents < 15:
+        _PRETRADE_STATS["blocked"] += 1
+        _PRETRADE_STATS["reasons"]["below_price_floor"] = _PRETRADE_STATS["reasons"].get("below_price_floor", 0) + 1
+        return False, f"Price {price_cents}c below 15c minimum floor"
+
     if count < 1:
         _PRETRADE_STATS["blocked"] += 1
         _PRETRADE_STATS["reasons"]["bad_count"] = _PRETRADE_STATS["reasons"].get("bad_count", 0) + 1
@@ -3269,7 +3275,7 @@ BOT_STATE["floor_daily_spent"] = 0.0
 BOT_STATE["floor_date"] = None
 
 # MoonShark settings — KELLY-SIZED: fewer bets, larger when edge is real
-MOONSHARK_MIN_PRICE = 25   # cents — skip sub-25c lottery tickets
+MOONSHARK_MIN_PRICE = 25   # cents — MoonShark only on 25c+ contracts (higher conviction)
 MOONSHARK_MAX_PRICE = 35   # cents — tightened from 40 (sweet spot is 25-30, cap at 35)
 MOONSHARK_MAX_DAILY = 50.0  # daily safety cap — reduced to 25% of bankroll total across strategies
 MOONSHARK_BET_USD = 3.0     # fallback only — Kelly sizes most bets
@@ -5538,7 +5544,7 @@ def closegame_snipe():
 
 FLOOR_MAX_DAILY_USD = 30.0  # total cap for the floor strategy per day
 FLOOR_BET_USD = 3.0         # default bet size — small so losses stay small
-FLOOR_MIN_PRICE = 20        # widest allowed range — 20c to 88c
+FLOOR_MIN_PRICE = 15        # widest allowed range — 15c to 88c (floor at 15c minimum)
 FLOOR_MAX_PRICE = 88
 FLOOR_MIN_EDGE = 0.05       # 5% ESPN edge minimum — same bar as moonshark, no charity bets
 FLOOR_MIN_CONVICTION = 3    # relaxed but not reckless — 2 was too loose
@@ -5898,7 +5904,7 @@ SWING_MAX_DAILY_USD = 40.0
 SWING_MAX_TRADES = 8
 SWING_BET_USD = 6.0          # slightly larger than floor — this is higher conviction
 SWING_MIN_EDGE = 0.06        # 6% — must be a real overreaction, not noise
-SWING_MIN_PRICE = 18
+SWING_MIN_PRICE = 15
 SWING_MAX_PRICE = 62         # only buy the trailing side at a discount
 BOT_STATE.setdefault("swing_trades_today", [])
 BOT_STATE.setdefault("swing_daily_spent", 0.0)
@@ -6247,7 +6253,7 @@ GOALIE_MAX_DAILY_USD = 20.0
 GOALIE_MAX_TRADES = 5
 GOALIE_BET_USD = 4.0
 GOALIE_MIN_EDGE = 0.05  # 5% — this is a fast-moving microstructure bet
-GOALIE_MIN_PRICE = 8
+GOALIE_MIN_PRICE = 15
 GOALIE_MAX_PRICE = 92
 BOT_STATE.setdefault("goalie_trades_today", [])
 BOT_STATE.setdefault("goalie_daily_spent", 0.0)
@@ -8803,7 +8809,7 @@ def _learning_multiplier(ticker, title, price_cents=None, game_info=None, espn_e
     _utc_hour = datetime.datetime.utcnow().hour
     _pacific_hour = datetime.datetime.now(tz=_PACIFIC).hour
     if 18 <= _pacific_hour <= 23:  # 6pm-midnight Pacific
-        multipliers.append(0.5)  # 50% size reduction during worst hours
+        return 0.0  # HARD BLOCK: 97% of losses happen 6pm-midnight, zero tolerance
 
     # High-price penalty — settled data shows 0% WR above 60c. Require much stronger
     # signals to bet on favorites (the market is more efficient on favorites).
