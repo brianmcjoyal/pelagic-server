@@ -227,6 +227,12 @@ _LEARNING_STATE = {
 _SKIP_REASONS_TODAY = {}  # {strategy: {reason: count}}
 _SKIP_REASONS_LOCK = None  # lazy-init (threading not imported yet at this point)
 
+# Paper trading — declared early so _load_state() can restore them
+_PAPER_TRADES = []       # list of paper trade dicts
+_PAPER_TRADES_MAX = 500  # keep last 500
+_PAPER_SEEN = set()      # tickers already paper-traded this cycle (dedup)
+_PAPER_COOLDOWN = {}     # ticker -> timestamp of last paper trade (avoid spam)
+
 def _save_state():
     """Persist trade data to disk.
     NOTE: /tmp does NOT survive Railway deploys. This cache only helps within a
@@ -8020,10 +8026,6 @@ def _compute_bucket_stats(trades, key_fn):
 # strategy WOULD do, without placing actual orders. Measures CLV
 # (Closing Line Value) to determine if the edge is real.
 
-_PAPER_TRADES = []       # list of paper trade dicts
-_PAPER_TRADES_MAX = 500  # keep last 500
-_PAPER_SEEN = set()      # tickers already paper-traded this cycle (dedup)
-_PAPER_COOLDOWN = {}     # ticker -> timestamp of last paper trade (avoid spam)
 
 def _paper_trade_sniper():
     """Paper-trade the live game latency signal. No real money.
@@ -8145,10 +8147,14 @@ def _paper_trade_sniper():
                 period = _espn_data.get("period", "?")
                 clock = _espn_data.get("clock", "?")
 
+                # Extract sport from ESPN data for display
+                _sport = (_espn_data.get("league") or "").upper()
+
                 paper = {
                     "ticker": ticker,
                     "title": title[:60],
                     "side": side,
+                    "sport": _sport,
                     "entry_price": price,
                     "espn_prob": round(our_prob, 3),
                     "kalshi_implied": round(kalshi_implied, 3),
@@ -8248,10 +8254,13 @@ def _paper_trade_update():
                 pt["price_30min"] = current_price
                 pt["clv_30min"] = current_price - entry_price
 
-            # Check for settlement (price at 97+ or 3-)
+            # Check for settlement (our side's price at 97+ or 3-)
             status = m.get("status", "")
             if status in ("settled", "finalized", "closed") or current_price >= 97 or current_price <= 3:
-                won = (side == "yes" and current_price >= 97) or (side == "no" and current_price <= 3)
+                # current_price is the price of OUR side's contract
+                # >= 97 means our side won (contract pays $1)
+                # <= 3 means our side lost (contract worth ~$0)
+                won = current_price >= 97
                 pt["result"] = "win" if won else "loss"
                 pt["closing_price"] = current_price
                 pt["clv_final"] = current_price - entry_price
@@ -23660,8 +23669,8 @@ async function loadPaperTrades(force) {
         html += '<span style="color:#555;margin-left:8px">' + (t.sport || '') + '</span></div>';
         html += '<div style="flex:0.5;text-align:center"><span style="color:#00d4ff">' + (t.entry_price || '--') + 'c</span>';
         html += '<span style="color:#666;margin:0 4px">\\u2192</span>';
-        html += '<span style="color:#e040fb">' + ((t.espn_prob * 100).toFixed(0) || '--') + '%</span></div>';
-        html += '<div style="flex:0.4;text-align:center;color:#ffb400">' + ((t.edge * 100).toFixed(1) || '--') + '%</div>';
+        html += '<span style="color:#e040fb">' + (t.espn_prob ? (t.espn_prob * 100).toFixed(0) + '%' : '--') + '</span></div>';
+        html += '<div style="flex:0.4;text-align:center;color:#ffb400">' + (t.edge ? (t.edge * 100).toFixed(1) + '%' : '--') + '</div>';
         html += '<div style="flex:0.3;text-align:right"><span style="color:' + resultColor + ';font-weight:700">' + resultText + '</span>';
         if (t.result) html += '<span style="color:#666;margin-left:6px">' + pnlText + '</span>';
         html += '</div></div>';
