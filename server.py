@@ -3267,6 +3267,47 @@ def _correlation_check_ok(ticker, conviction=0):
     return True
 
 
+# ─── Strategy circuit-breaker ───
+# Auto-pauses a strategy for 2 hours after 5 consecutive losses.
+# Prevents bleeding during model failure / bad market conditions.
+_STRATEGY_PAUSE = {}  # strategy_name -> pause_until_iso
+
+def _strategy_is_paused(strategy_name):
+    """Return True if this strategy is currently paused due to consecutive losses."""
+    pause_until = _STRATEGY_PAUSE.get(strategy_name)
+    if not pause_until:
+        return False
+    now = datetime.datetime.now(tz=_PACIFIC).isoformat()
+    if now >= pause_until:
+        # Pause expired — clear it
+        _STRATEGY_PAUSE.pop(strategy_name, None)
+        _log_activity(f"⏯️ {strategy_name.upper()} circuit-breaker lifted — resuming trading", "info")
+        return False
+    return True
+
+
+def _check_consecutive_losses(strategy_name, max_consec=5, pause_hours=2):
+    """Check if the last `max_consec` trades for this strategy were ALL losses.
+    If so, pause the strategy for `pause_hours` hours.
+    """
+    if strategy_name in _STRATEGY_PAUSE:
+        return  # already paused
+    recent = []
+    with _TRADE_JOURNAL_LOCK:
+        for t in reversed(_TRADE_JOURNAL):
+            if t.get("strategy") == strategy_name and t.get("result") in ("win", "loss"):
+                recent.append(t["result"])
+                if len(recent) >= max_consec:
+                    break
+    if len(recent) >= max_consec and all(r == "loss" for r in recent):
+        pause_until = (datetime.datetime.now(tz=_PACIFIC) + datetime.timedelta(hours=pause_hours)).isoformat()
+        _STRATEGY_PAUSE[strategy_name] = pause_until
+        _log_activity(
+            f"⏸️ {strategy_name.upper()} PAUSED for {pause_hours}h — {max_consec} consecutive losses detected",
+            "warn"
+        )
+
+
 def _floor_mode_active():
     """True if we should relax filters because we're behind the daily floor.
 
@@ -3292,6 +3333,8 @@ def live_game_snipe():
     Strategy: only live sports + vetted short-term markets with volume.
     Profit: 10-30c per contract on settlement."""
     if not BOT_CONFIG.get("enabled"):
+        return []
+    if _strategy_is_paused("live_sniper"):
         return []
 
     # Daily reset check (Pacific time — matches dashboard display)
@@ -3662,7 +3705,7 @@ def live_game_snipe():
                 _snipe_fee = PLATFORM_FEES.get("kalshi", 0.07)
                 _snipe_win_est = _snipe_our_prob if (_snipe_espn_prob is not None) else (price / 100.0)
                 _snipe_ev_per = (_snipe_win_est * (100 - price) - (1 - _snipe_win_est) * price) / 100.0
-                _snipe_ev_after_fees = _snipe_ev_per - (_snipe_fee * price / 100.0)
+                _snipe_ev_after_fees = _snipe_ev_per - (_snipe_fee * _snipe_win_est * (100 - price) / 10000.0)
                 if _snipe_ev_after_fees < 0.01:  # Less than 1c EV per contract after fees
                     _log_activity(f"SNIPE SKIP: {ticker} — EV after fees {_snipe_ev_after_fees:.3f}c < 1c threshold", "info")
                     _ms_reasons["low_ev_snipe"] = _ms_reasons.get("low_ev_snipe", 0) + 1
@@ -3861,6 +3904,8 @@ def moonshark_snipe():
     Strategy: small bets on underdog outcomes in liquid, closing-soon markets.
     Profit: 70-90c per contract on settlement (rare but huge)."""
     if not BOT_CONFIG.get("enabled"):
+        return []
+    if _strategy_is_paused("moonshark"):
         return []
     if not BOT_CONFIG.get("moonshark_enabled", True):
         return []
@@ -4326,6 +4371,24 @@ def moonshark_snipe():
                             "warn"
                         )
 
+                # Signal 9: Kalshi price momentum — does market price movement confirm or oppose our bet?
+                try:
+                    _ms_mom = get_momentum(ticker)
+                    if _ms_mom and _ms_mom.get("direction") != "flat":
+                        _ms_buying_yes = (side == "yes")
+                        _ms_mom_up = (_ms_mom["direction"] == "up")
+                        # If we're buying YES and price is trending UP = momentum confirms
+                        # If we're buying YES and price is trending DOWN = market disagrees
+                        if (_ms_buying_yes and _ms_mom_up) or (not _ms_buying_yes and not _ms_mom_up):
+                            ms_conviction += 1
+                            _conv_reasons.append(f"momentum_confirms({_ms_mom['direction']})")
+                        elif abs(_ms_mom.get("velocity", 0)) > 1.0:
+                            # Strong momentum AGAINST our position — red flag
+                            ms_conviction -= 1
+                            _conv_reasons.append(f"momentum_opposes({_ms_mom['direction']} v={_ms_mom.get('velocity', 0):.1f})")
+                except Exception:
+                    pass
+
                 # Require minimum conviction — adaptive + floor relaxation
                 # Floor mode can relax by 1, but NEVER below 3 — conviction 2
                 # bets have near-random signal and bleed money.
@@ -4353,7 +4416,7 @@ def moonshark_snipe():
                 _kalshi_fee = PLATFORM_FEES.get("kalshi", 0.07)
                 _win_prob_est = _ms_our_prob if _ms_our_prob else (price / 100.0)
                 _ev_per_contract = (_win_prob_est * (100 - price) - (1 - _win_prob_est) * price) / 100.0
-                _ev_after_fees = _ev_per_contract - (_kalshi_fee * price / 100.0)
+                _ev_after_fees = _ev_per_contract - (_kalshi_fee * _win_prob_est * (100 - price) / 10000.0)
                 if _ev_after_fees < 0.015:  # Less than 1.5 cents EV per contract after fees — not worth the risk
                     _ms_reasons["low_ev"] = _ms_reasons.get("low_ev", 0) + 1
                     continue
@@ -4635,6 +4698,8 @@ def closegame_snipe():
     is often mispriced — real win probability is closer to 40-45%.
     Key: ONLY bet when the game is tight AND late."""
     if not BOT_CONFIG.get("enabled"):
+        return []
+    if _strategy_is_paused("closegame"):
         return []
     if not BOT_CONFIG.get("closegame_enabled", True):
         return []
@@ -4999,6 +5064,14 @@ def closegame_snipe():
 
                 estimated_win_prob = espn_win_prob_cg if espn_win_prob_cg else kalshi_implied
                 edge = espn_edge_cg if espn_edge_cg else _cg_spread_edge
+
+                # EV after fees filter — skip negative-EV bets
+                _cg_fee = PLATFORM_FEES.get("kalshi", 0.07)
+                _cg_ev = (estimated_win_prob * (100 - price) - (1 - estimated_win_prob) * price) / 100.0
+                _cg_ev_after_fees = _cg_ev - (_cg_fee * estimated_win_prob * (100 - price) / 10000.0)
+                if _cg_ev_after_fees < 0.01:
+                    _log_activity(f"CLOSEGAME SKIP: {ticker} — EV after fees {_cg_ev_after_fees:.3f} < 1c threshold", "info")
+                    continue
 
                 # Size the bet
                 remaining = CLOSEGAME_MAX_DAILY - BOT_STATE.get("closegame_daily_spent", 0)
@@ -5529,6 +5602,8 @@ def momentum_swing_snipe():
     """
     if not BOT_CONFIG.get("enabled"):
         return []
+    if _strategy_is_paused("momentum_swing"):
+        return []
     if not BOT_CONFIG.get("swing_enabled", True):
         return []
 
@@ -5711,7 +5786,24 @@ def momentum_swing_snipe():
                 except Exception:
                     pass
 
-            # Size — half Kelly against our edge, capped by strategy budget
+            # EV after fees filter — skip negative-EV bets
+            _sw_fee = PLATFORM_FEES.get("kalshi", 0.07)
+            _sw_ev = (live_prob * (100 - price) - (1 - live_prob) * price) / 100.0
+            _sw_ev_after_fees = _sw_ev - (_sw_fee * live_prob * (100 - price) / 10000.0)
+            if _sw_ev_after_fees < 0.01:
+                continue
+
+            # Momentum filter — if price is still crashing (velocity > 2c/min against us),
+            # the rout isn't over yet. Wait for stabilization.
+            try:
+                _sw_mom = get_momentum(ticker)
+                if _sw_mom and _sw_mom.get("direction") == "down" and _sw_mom.get("velocity", 0) < -2.0:
+                    _log_activity(f"SWING SKIP: {ticker} — price still falling fast (v={_sw_mom['velocity']:.1f}c/min), wait for stabilization", "info")
+                    continue
+            except Exception:
+                pass
+
+            # Size — Kelly against our edge, capped by strategy budget
             remaining_daily = SWING_MAX_DAILY_USD - BOT_STATE.get("swing_daily_spent", 0)
             profit_if_win = (100 - price) / 100.0
             odds_decimal = profit_if_win / implied
@@ -5856,6 +5948,8 @@ def goalie_pulled_snipe():
     by GOALIE_MIN_EDGE we buy the mispriced side.
     """
     if not BOT_CONFIG.get("enabled"):
+        return []
+    if _strategy_is_paused("goalie_pulled"):
         return []
     if not BOT_CONFIG.get("goalie_enabled", True):
         return []
@@ -8027,6 +8121,20 @@ def _learning_multiplier(ticker, title, price_cents=None, game_info=None, espn_e
         # Floor at 0.15 — don't fully block any hour
         multipliers.append(max(hour_w["weight"], 0.15))
 
+    # Loss pattern penalty — if dominant loss pattern for this sport/category is
+    # stale_edge or blowout, penalize trades matching that profile
+    _loss_cats = _LEARNING_STATE.get("loss_categories", {})
+    _total_tagged = sum(_loss_cats.values()) if _loss_cats else 0
+    if _total_tagged >= 5:
+        _stale_count = _loss_cats.get("stale_edge", 0)
+        _blowout_count = _loss_cats.get("blowout", 0)
+        # If >40% of losses are stale_edge, penalize all trades (model is often wrong)
+        if _stale_count / max(1, _total_tagged) > 0.40:
+            multipliers.append(0.5)  # 50% penalty
+        # If >30% are blowouts, the model is entering too early / wrong games
+        if _blowout_count / max(1, _total_tagged) > 0.30:
+            multipliers.append(0.6)  # 40% penalty
+
     if not multipliers:
         return 1.0  # no data for any dimension
 
@@ -8147,6 +8255,17 @@ def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, stra
             hs = int(game_info.get("home_score", 0))
             as_ = int(game_info.get("away_score", 0))
             _gs["game_margin"] = abs(hs - as_)
+        except Exception:
+            pass
+        # Track seconds remaining at entry — key signal for learning engine
+        try:
+            _period_str = game_info.get("clock", "") or game_info.get("period", "")
+            _game_league = (game_info.get("league", "") or "").lower()
+            _sport_for_clock = {"nba": "nba", "ncaab": "nba", "ncaawb": "nba", "nhl": "nhl", "mlb": "mlb"}.get(_game_league)
+            if _period_str and _sport_for_clock:
+                _secs = _parse_clock_to_seconds(_period_str, sport=_sport_for_clock)
+                if _secs is not None:
+                    _gs["seconds_remaining_at_entry"] = _secs
         except Exception:
             pass
 
@@ -9494,6 +9613,12 @@ def _ensure_bg_thread():
                 _learn_cycle += 1
                 _learning_engine()
                 _auto_tune_thresholds()
+                # Circuit-breaker: check each strategy for consecutive loss streaks
+                for _cb_strat in ["live_sniper", "moonshark", "closegame", "momentum_swing", "goalie_pulled"]:
+                    try:
+                        _check_consecutive_losses(_cb_strat, max_consec=5, pause_hours=2)
+                    except Exception:
+                        pass
                 # rollback check gets fresher stats (2d window) so it can
                 # react quickly when a bad tune tanks a strategy.
                 try:
