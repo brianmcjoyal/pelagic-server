@@ -10111,7 +10111,7 @@ def _icon_response(png_bytes):
     return app.response_class(
         response=png_bytes,
         mimetype="image/png",
-        headers={"Cache-Control": "public, max-age=604800"},
+        headers={"Cache-Control": "public, max-age=86400"},
     )
 
 @app.route("/apple-touch-icon.png")
@@ -10147,8 +10147,8 @@ def tradeshark_manifest():
         "background_color": "#0d0d0d",
         "theme_color": "#c9963a",
         "icons": [
-            {"src": "/apple-touch-icon.png", "sizes": "180x180", "type": "image/png", "purpose": "any"},
-            {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+            {"src": "/apple-touch-icon.png?v=2", "sizes": "180x180", "type": "image/png", "purpose": "any"},
+            {"src": "/icon-192.png?v=2", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
         ],
     })
 
@@ -17446,10 +17446,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>TradeShark</title>
 <!-- PWA / iOS Add-to-Home-Screen -->
-<link rel="icon" type="image/png" href="/favicon.ico">
-<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
-<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png">
-<link rel="manifest" href="/manifest.json">
+<link rel="icon" type="image/png" href="/favicon.ico?v=2">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=2">
+<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=2">
+<link rel="manifest" href="/manifest.json?v=2">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
