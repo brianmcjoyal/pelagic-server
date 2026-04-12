@@ -21127,24 +21127,32 @@ function drawPerfLineChart() {
   var minV = Math.min.apply(null, vals);
   var maxV = Math.max.apply(null, vals);
   var range = maxV - minV;
-  if (range < 0.5) { minV -= 1; maxV += 1; range = maxV - minV; }
+  // Dynamic padding: add 10% above and below so the line never hugs edges
+  // Minimum range of $5 so small moves don't look like earthquakes
+  if (range < 5) { var mid = (minV + maxV) / 2; minV = mid - 2.5; maxV = mid + 2.5; range = 5; }
+  var yPad = range * 0.10;
+  minV -= yPad; maxV += yPad; range = maxV - minV;
   var pad = { top: 20, right: 15, bottom: 8, left: 50 };
 
   function xPos(i) { return pad.left + (i / (pts.length - 1)) * (w - pad.left - pad.right); }
   function yPos(v) { return pad.top + (1 - (v - minV) / range) * (h - pad.top - pad.bottom); }
 
-  // Y-axis grid lines & labels
+  // Y-axis grid lines & labels — use "nice" round numbers
   var gridLines = 5;
+  var rawStep = range / gridLines;
+  // Round step to nearest nice number (1, 2, 5, 10, 20, 50...)
+  var mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+  var niceStep = rawStep / mag >= 5 ? 5 * mag : rawStep / mag >= 2 ? 2 * mag : mag;
+  var gridStart = Math.ceil(minV / niceStep) * niceStep;
   ctx.strokeStyle = '#1a1a1a';
   ctx.lineWidth = 0.5;
   ctx.fillStyle = '#555';
   ctx.font = '9px -apple-system, sans-serif';
   ctx.textAlign = 'right';
-  for (var g = 0; g <= gridLines; g++) {
-    var gVal = minV + (g / gridLines) * range;
+  for (var gVal = gridStart; gVal <= maxV; gVal += niceStep) {
     var gY = yPos(gVal);
     ctx.beginPath(); ctx.moveTo(pad.left, gY); ctx.lineTo(w - pad.right, gY); ctx.stroke();
-    ctx.fillText('$' + gVal.toFixed(2), pad.left - 4, gY + 3);
+    ctx.fillText('$' + gVal.toFixed(gVal >= 100 ? 0 : 2), pad.left - 4, gY + 3);
   }
 
   // Starting balance reference line
@@ -21165,13 +21173,24 @@ function drawPerfLineChart() {
   var lastVal = pts[pts.length - 1].value;
   var isUp = lastVal >= firstVal;
   var lineColor = isUp ? '#00dc5a' : '#ff5000';
-  var fillColorTop = isUp ? 'rgba(0,220,90,0.15)' : 'rgba(255,80,0,0.15)';
-  var fillColorBot = isUp ? 'rgba(0,220,90,0.0)' : 'rgba(255,80,0,0.0)';
+  var fillColorTop = isUp ? 'rgba(0,220,90,0.18)' : 'rgba(255,80,0,0.18)';
+  var fillColorBot = 'rgba(0,0,0,0)';
 
-  // Area fill
+  // Smooth the line with cubic bezier curves for a professional look
+  function drawSmoothLine(points, close) {
+    if (points.length < 2) return;
+    ctx.moveTo(xPos(0), yPos(points[0].value));
+    for (var i = 1; i < points.length; i++) {
+      var prev = { x: xPos(i - 1), y: yPos(points[i - 1].value) };
+      var curr = { x: xPos(i), y: yPos(points[i].value) };
+      var cpx = (prev.x + curr.x) / 2;
+      ctx.bezierCurveTo(cpx, prev.y, cpx, curr.y, curr.x, curr.y);
+    }
+  }
+
+  // Area fill — gradient from line to bottom
   ctx.beginPath();
-  ctx.moveTo(xPos(0), yPos(firstVal));
-  for (var i = 0; i < pts.length; i++) ctx.lineTo(xPos(i), yPos(pts[i].value));
+  drawSmoothLine(pts);
   ctx.lineTo(xPos(pts.length - 1), h - pad.bottom);
   ctx.lineTo(xPos(0), h - pad.bottom);
   ctx.closePath();
@@ -21181,15 +21200,13 @@ function drawPerfLineChart() {
   ctx.fillStyle = grad;
   ctx.fill();
 
-  // Line
+  // Line — smooth bezier curve
   ctx.beginPath();
-  for (var i = 0; i < pts.length; i++) {
-    if (i === 0) ctx.moveTo(xPos(i), yPos(pts[i].value));
-    else ctx.lineTo(xPos(i), yPos(pts[i].value));
-  }
+  drawSmoothLine(pts);
   ctx.strokeStyle = lineColor;
-  ctx.lineWidth = 2;
+  ctx.lineWidth = 2.5;
   ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
   ctx.stroke();
 
   // End dot (pulsing)
@@ -21232,21 +21249,21 @@ function drawPerfLineChart() {
     headerChg.style.color = chgColor;
   }
 
-  // Store for hover
+  // Store for hover/touch interaction
   canvas._perfPts = pts;
   canvas._perfXPos = xPos;
   canvas._perfYPos = yPos;
   canvas._perfPad = pad;
   canvas._perfW = w;
   canvas._perfH = h;
-  // Snapshot the rendered chart so mousemove can restore without full redraw
+  // Snapshot the rendered chart so interaction can restore without full redraw
   try { canvas._perfSnapshot = ctx.getImageData(0, 0, canvas.width, canvas.height); } catch(e) {}
 
-  // Ensure tooltip bindings are attached
+  // Ensure interaction bindings are attached
   _initPerfTooltip();
 }
 
-// Hover tooltip for performance chart (init on first draw or DOM ready)
+// Interactive tooltip for performance chart — works on both mouse and touch
 var _perfTooltipBound = false;
 function _initPerfTooltip() {
   if (_perfTooltipBound) return;
@@ -21255,10 +21272,10 @@ function _initPerfTooltip() {
   _perfTooltipBound = true;
   var tooltip = document.getElementById('perf-chart-tooltip');
 
-  canvas.addEventListener('mousemove', function(e) {
+  function showTooltipAt(clientX, clientY) {
     if (!canvas._perfPts || canvas._perfPts.length < 2 || !tooltip) return;
     var rect = canvas.getBoundingClientRect();
-    var mx = e.clientX - rect.left;
+    var mx = clientX - rect.left;
     var pts = canvas._perfPts;
     var pad = canvas._perfPad;
     var xPos = canvas._perfXPos;
@@ -21270,7 +21287,7 @@ function _initPerfTooltip() {
       var dist = Math.abs(xPos(i) - mx);
       if (dist < closestDist) { closestDist = dist; closest = i; }
     }
-    if (closestDist > 30) { tooltip.style.display = 'none'; return; }
+    if (closestDist > 50) { tooltip.style.display = 'none'; return; }
 
     var p = pts[closest];
     var d = new Date(p.ts);
@@ -21278,40 +21295,86 @@ function _initPerfTooltip() {
     hr = hr % 12 || 12;
     var timeStr = (d.getMonth()+1) + '/' + d.getDate() + ' ' + hr + ':' + (mn < 10 ? '0' : '') + mn + ' ' + ampm;
     var chgFromStart = p.value - pts[0].value;
-    tooltip.innerHTML = '<div style="font-weight:700;color:#fff">$' + p.value.toFixed(2) + '</div>' +
+    var chgPct = pts[0].value > 0 ? (chgFromStart / pts[0].value * 100) : 0;
+    tooltip.innerHTML = '<div style="font-weight:700;color:#fff;font-size:13px">$' + p.value.toFixed(2) + '</div>' +
       '<div style="color:#888;font-size:9px">' + timeStr + '</div>' +
-      '<div style="color:' + (chgFromStart >= 0 ? '#00dc5a' : '#ff5000') + ';font-size:9px">' +
-      (chgFromStart >= 0 ? '+$' : '-$') + Math.abs(chgFromStart).toFixed(2) + ' from start</div>';
+      '<div style="color:' + (chgFromStart >= 0 ? '#00dc5a' : '#ff5000') + ';font-size:10px;font-weight:600">' +
+      (chgFromStart >= 0 ? '+$' : '-$') + Math.abs(chgFromStart).toFixed(2) +
+      ' (' + (chgPct >= 0 ? '+' : '') + chgPct.toFixed(1) + '%)</div>';
 
     var tx = xPos(closest);
     var ty = yPos(p.value);
     tooltip.style.display = 'block';
-    tooltip.style.left = Math.min(tx + 10, canvas._perfW - 140) + 'px';
-    tooltip.style.top = Math.max(ty - 50, 0) + 'px';
+    // Position tooltip — keep on screen, prefer right side of point
+    var ttLeft = tx + 12;
+    if (ttLeft + 130 > canvas._perfW) ttLeft = tx - 142;
+    tooltip.style.left = Math.max(4, ttLeft) + 'px';
+    tooltip.style.top = Math.max(0, Math.min(ty - 40, canvas._perfH - 60)) + 'px';
 
-    // Restore saved chart image (avoids full redraw on every mouse move)
-    var ctx = canvas.getContext('2d');
+    // Restore saved chart image (avoids full redraw on every move)
+    var ctx2 = canvas.getContext('2d');
     var dpr = window.devicePixelRatio || 1;
     if (canvas._perfSnapshot) {
-      ctx.putImageData(canvas._perfSnapshot, 0, 0);
+      ctx2.putImageData(canvas._perfSnapshot, 0, 0);
     }
-    ctx.save();
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    // Draw crosshair
-    ctx.strokeStyle = '#444';
-    ctx.lineWidth = 0.5;
-    ctx.setLineDash([2, 2]);
-    ctx.beginPath(); ctx.moveTo(tx, pad.top); ctx.lineTo(tx, canvas._perfH - pad.bottom); ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.beginPath();
-    ctx.arc(tx, ty, 5, 0, Math.PI * 2);
-    ctx.fillStyle = '#fff';
-    ctx.fill();
-    ctx.restore();
-  });
+    ctx2.save();
+    ctx2.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // Draw crosshair vertical line
+    ctx2.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx2.lineWidth = 1;
+    ctx2.setLineDash([3, 3]);
+    ctx2.beginPath(); ctx2.moveTo(tx, pad.top); ctx2.lineTo(tx, canvas._perfH - pad.bottom); ctx2.stroke();
+    // Draw horizontal guide to Y-axis
+    ctx2.beginPath(); ctx2.moveTo(pad.left, ty); ctx2.lineTo(tx, ty); ctx2.stroke();
+    ctx2.setLineDash([]);
+    // Selection circle — outer glow + inner dot
+    ctx2.beginPath();
+    ctx2.arc(tx, ty, 8, 0, Math.PI * 2);
+    ctx2.fillStyle = 'rgba(255,255,255,0.1)';
+    ctx2.fill();
+    ctx2.beginPath();
+    ctx2.arc(tx, ty, 4, 0, Math.PI * 2);
+    ctx2.fillStyle = '#fff';
+    ctx2.fill();
+    ctx2.strokeStyle = chgFromStart >= 0 ? '#00dc5a' : '#ff5000';
+    ctx2.lineWidth = 2;
+    ctx2.stroke();
+    // Y-axis price label
+    ctx2.fillStyle = '#111';
+    ctx2.fillRect(0, ty - 8, pad.left - 2, 16);
+    ctx2.fillStyle = '#fff';
+    ctx2.font = '9px -apple-system, sans-serif';
+    ctx2.textAlign = 'right';
+    ctx2.fillText('$' + p.value.toFixed(2), pad.left - 4, ty + 3);
+    ctx2.restore();
+  }
 
-  canvas.addEventListener('mouseleave', function() {
+  function hideTooltip() {
     if (tooltip) tooltip.style.display = 'none';
+    // Restore clean chart
+    if (canvas._perfSnapshot) {
+      var ctx2 = canvas.getContext('2d');
+      ctx2.putImageData(canvas._perfSnapshot, 0, 0);
+    }
+  }
+
+  // Mouse events
+  canvas.addEventListener('mousemove', function(e) { showTooltipAt(e.clientX, e.clientY); });
+  canvas.addEventListener('mouseleave', hideTooltip);
+  canvas.addEventListener('click', function(e) { showTooltipAt(e.clientX, e.clientY); });
+
+  // Touch events — full mobile support
+  canvas.addEventListener('touchstart', function(e) {
+    e.preventDefault(); // prevent scroll while interacting with chart
+    if (e.touches.length > 0) showTooltipAt(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: false });
+  canvas.addEventListener('touchmove', function(e) {
+    e.preventDefault();
+    if (e.touches.length > 0) showTooltipAt(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: false });
+  canvas.addEventListener('touchend', function() {
+    // Keep tooltip visible for 2 seconds after finger lifts, then hide
+    setTimeout(hideTooltip, 2000);
   });
 }
 // Init tooltip bindings after DOM is ready and on first chart draw
