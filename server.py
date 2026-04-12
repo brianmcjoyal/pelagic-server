@@ -76,7 +76,7 @@ BOT_CONFIG = {
     "min_volume": 50,             # include smaller markets
     "scan_interval_seconds": 45,  # faster scanning during game hours
     "max_category_exposure": 3,   # max 3 positions per category — diversified
-    "blocked_categories": ["weather", "golf", "politics", "economics", "nfl"],  # block proven losers: golf 0/18, politics 0/4, economics 0/2, NFL offseason
+    "blocked_categories": ["weather", "golf", "politics", "economics", "nfl", "other"],  # block proven losers: golf 0/18, politics 0/4, other 2/25, economics 0/2, NFL offseason
     "blocked_keywords": ["title holder", "title on dec", "prime minister", "next president", "ipo first", "gas price", "billboard", "netflix", "spotify", "golf", "pga", "lpga", "masters", "election", "congress", "senate", "governor"],  # block long-dated + losing categories
     "moonshark_enabled": True,  # MoonShark longshot sniper toggle
     "sport_exposure_cap_pct": 0.40, # max 40% of daily budget on any single sport (NBA correlation, MLB night, etc.)
@@ -519,11 +519,26 @@ def _hydrate_from_kalshi():
                              "KXNHL", "KXMLB", "KXUFC", "KXMMA", "KXEPL",
                              "KXNFL", "KXMLS", "KXWNBA", "KXSOCCER", "KXPGA")
             if any(_tk_upper.startswith(p) for p in _bot_prefixes) or (_is_today and action == "buy"):
-                # Use price paid to infer which strategy placed the trade
-                if 25 <= price_cents <= 45:
+                # First check trade journal for the real strategy label
+                _found_strat = None
+                with _TRADE_JOURNAL_LOCK:
+                    for _jr in reversed(_TRADE_JOURNAL):
+                        if _jr.get("ticker") == ticker and _jr.get("strategy"):
+                            _found_strat = _jr["strategy"]
+                            break
+                if _found_strat:
+                    _inferred_strategy = _found_strat
+                # Fallback: use price range to infer strategy
+                elif 25 <= price_cents <= 45:
                     _inferred_strategy = "moonshark"  # MoonShark/CloseGame range
+                elif 45 < price_cents < 60:
+                    _inferred_strategy = "closegame"  # CloseGame middle range
                 elif 60 <= price_cents <= 85:
                     _inferred_strategy = "live_sniper"  # Sniper range
+                elif price_cents < 25:
+                    _inferred_strategy = "moonshark"  # Deep longshot = MoonShark
+                elif price_cents > 85:
+                    _inferred_strategy = "live_sniper"  # High conviction sniper
                 else:
                     _inferred_strategy = "unknown"
             trade_rec = {
@@ -3055,7 +3070,11 @@ LIVE_GAME_SERIES = [
     "KXNCAAMBGAME",        # NCAA Men's Basketball game winners
     "KXNCAAWBGAME",        # NCAA Women's Basketball game winners
     "KXKBLGAME",           # KBO Korean baseball (morning hours, less competition)
-    # REMOVED: Tennis (0% win rate), Soccer (low volume), NFL (off-season)
+    "KXUFCFIGHT",          # UFC — runs nearly every weekend year-round
+    "KXMLSGAME",           # MLS — season March-October
+    "KXEPLGAME",           # EPL — season Aug-May
+    "KXSOCCERGAME",        # Other soccer markets
+    # REMOVED: Tennis (0% win rate), NFL (off-season)
 ]
 
 # Sniper settings
@@ -6919,7 +6938,8 @@ def enhanced_auto_exit():
             elif action == "time_exit":
                 sell_price = max(1, current - 3)
             else:
-                sell_price = max(1, entry + 1) if entry else max(1, current - 3)
+                # Take profit: sell near current market, NOT entry+1 (that gives away profit)
+                sell_price = max(1, current - 2)
 
             result = sell_kalshi_position(ticker, side, sell_price, sell_count)
             success = "error" not in result
@@ -8124,8 +8144,16 @@ def _auto_tune_thresholds():
             clv = s.get("clv_avg")
 
             if sample < 10:
-                delta = -1
-                reason = f"{strat} needs volume ({sample} settled in 7d)"
+                # Low sample: only loosen if the few trades we have are winning.
+                # If we have losses on a small sample, HOLD — don't make it easier to lose more.
+                _low_sample_wr = s.get("win_rate")
+                if sample == 0:
+                    delta = -1  # no data at all → loosen to get data
+                elif _low_sample_wr is not None and _low_sample_wr >= 0.40:
+                    delta = -1  # winning on small sample → loosen
+                else:
+                    delta = 0   # losing on small sample → hold, don't loosen into losses
+                reason = f"{strat} needs volume ({sample} settled in 7d, wr={_low_sample_wr})"
             elif wr is None:
                 continue
             else:
@@ -8361,6 +8389,19 @@ def _learning_multiplier(ticker, title, price_cents=None, game_info=None, espn_e
             _sp_key = f"{strategy}:{sport}"
             if _sp_key in _sp_penalties:
                 multipliers.append(_sp_penalties[_sp_key])
+
+    # Evening penalty — settled data shows 7.1% WR from 6pm-midnight Pacific
+    # which is 1am-7am UTC. Apply a sizing penalty during these hours so the bot
+    # bets smaller when our historical edge is weakest.
+    _utc_hour = datetime.datetime.utcnow().hour
+    _pacific_hour = datetime.datetime.now(tz=_PACIFIC).hour
+    if 18 <= _pacific_hour <= 23:  # 6pm-midnight Pacific
+        multipliers.append(0.5)  # 50% size reduction during worst hours
+
+    # High-price penalty — settled data shows 0% WR above 60c. Require much stronger
+    # signals to bet on favorites (the market is more efficient on favorites).
+    if price_cents and price_cents > 60:
+        multipliers.append(0.5)  # 50% size reduction for favorites
 
     # CLV-weighted sizing — strategies with proven closing line value get a boost
     if strategy:
@@ -8666,10 +8707,23 @@ def _journal_settle(ticker, won, pnl_usd, closing_price_cents=None):
                                           headers=_clv_h, timeout=5)
                     if _clv_r.ok:
                         _clv_mkt = _clv_r.json().get("market", {})
-                        # Use last_price or result price as closing line
-                        _last = _clv_mkt.get("last_price") or _clv_mkt.get("previous_price")
-                        if _last:
-                            closing_price_cents = int(round(float(str(_last))))
+                        # Try multiple fields — Kalshi v2 uses dollar amounts
+                        for _clv_field in ("last_price", "previous_price", "last_price_dollars",
+                                           "previous_price_dollars", "previous_yes_ask",
+                                           "previous_yes_bid"):
+                            _last = _clv_mkt.get(_clv_field)
+                            if _last is not None:
+                                _last_f = float(str(_last))
+                                # Kalshi v2 returns dollars (0.65); v1 returns cents (65)
+                                closing_price_cents = int(round(_last_f * 100)) if _last_f < 1.0 else int(round(_last_f))
+                                break
+                        # Fallback: derive from result. Won=100c YES, Lost=0c YES
+                        if closing_price_cents is None:
+                            _result = _clv_mkt.get("result")
+                            if _result == "yes":
+                                closing_price_cents = 97  # near-settlement YES price
+                            elif _result == "no":
+                                closing_price_cents = 3   # near-settlement YES price
                 except Exception:
                     pass
             if closing_price_cents is not None:
@@ -9813,8 +9867,9 @@ def _background_loop():
             print(f"[BG] Error in background loop: {e}")
             traceback.print_exc()
         # Dynamic scan interval — 10s during game hours for fast edge capture
+        # Include early morning (1-6am PT) for KBO Korean baseball games
         _now_pt = datetime.datetime.now(tz=_PACIFIC)
-        _is_game_hours = 10 <= _now_pt.hour <= 23
+        _is_game_hours = (1 <= _now_pt.hour <= 6) or (10 <= _now_pt.hour <= 23)
         _sleep_time = 10 if _is_game_hours else 60
         _time.sleep(_sleep_time)
 
@@ -9851,8 +9906,20 @@ def _ensure_bg_thread():
                 # Blowout exit every 30s (every 3rd cycle)
                 if _cg_cycle % 3 == 0:
                     _blowout_exit()
-                # Smart position management every 90s (every 9th cycle) — was 30s, too many API calls
-                if _cg_cycle % 9 == 0:
+                # Smart position management — 30s during final periods, 90s otherwise
+                # Final periods = Q4/OT (NBA), P3/OT (NHL), 7th+ inning (MLB)
+                _spm_interval = 9  # default: every 90s (9 * 10s cycle)
+                try:
+                    _scores_for_spm = _get_espn_scores()
+                    if _scores_for_spm:
+                        for _sg in _scores_for_spm.values():
+                            _sp = _sg.get("period", "")
+                            if any(kw in str(_sp).lower() for kw in ("q4", "ot", "p3", "so", "9th", "8th", "7th", "extra")):
+                                _spm_interval = 3  # every 30s during crunch time
+                                break
+                except Exception:
+                    pass
+                if _cg_cycle % _spm_interval == 0:
                     try:
                         _smart_position_management()
                     except Exception as _sme:
@@ -15213,6 +15280,41 @@ def _smart_position_management():
         reason = None
         sell_count = count
         sell_price = current
+
+        # 0. HEDGE CHECK — if we can buy the opposite side for guaranteed profit, do it.
+        # e.g., hold YES at 70c entry, NO ask at 25c → 70+25=95c cost, $1 payout = 5c profit guaranteed
+        try:
+            _opp_side = "no" if side == "yes" else "yes"
+            _hedge_mkt_path = f"/markets/{ticker}"
+            _hedge_h = signed_headers("GET", _hedge_mkt_path)
+            _hedge_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + _hedge_mkt_path,
+                                    headers=_hedge_h, timeout=3)
+            if _hedge_r.ok:
+                _hedge_mkt = _hedge_r.json().get("market", {})
+                _opp_ask_raw = _hedge_mkt.get(f"{_opp_side}_ask_dollars") or _hedge_mkt.get(f"{_opp_side}_ask")
+                if _opp_ask_raw:
+                    _opp_ask = int(round(float(str(_opp_ask_raw)) * 100)) if float(str(_opp_ask_raw)) < 1.5 else int(round(float(str(_opp_ask_raw))))
+                    _total_cost = entry + _opp_ask
+                    _guaranteed_profit_cents = 100 - _total_cost
+                    if _guaranteed_profit_cents >= 3 and count >= 1:  # at least 3c guaranteed profit per contract
+                        # Buy opposite side to lock in guaranteed profit
+                        _hedge_result = place_kalshi_order(ticker, _opp_side, _opp_ask, count=count)
+                        if "error" not in _hedge_result:
+                            _hedge_filled = 0
+                            try:
+                                _hedge_filled = int(float(str(_hedge_result.get("order", {}).get("filled_count_fp") or 0)))
+                            except Exception:
+                                pass
+                            if _hedge_filled > 0:
+                                _hedge_profit = _guaranteed_profit_cents * _hedge_filled / 100
+                                _log_activity(
+                                    f"🔒 HEDGE LOCK: {ticker} bought {_hedge_filled}x {_opp_side.upper()} @ {_opp_ask}c "
+                                    f"(entry {side.upper()} @ {entry}c) — guaranteed +${_hedge_profit:.2f}",
+                                    "success"
+                                )
+                                continue  # skip normal exit logic, hedge handles it
+        except Exception:
+            pass
 
         # 1. TAKE PROFIT ladder
         if current >= 85:
