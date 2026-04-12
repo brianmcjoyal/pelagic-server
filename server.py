@@ -2496,21 +2496,26 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
             _PRETRADE_STATS["blocked"] += 1
             _PRETRADE_STATS["reasons"]["low_balance"] = _PRETRADE_STATS["reasons"].get("low_balance", 0) + 1
             return False, f"Balance ${bal:.0f} below minimum ${min_bal:.0f}"
-    except Exception:
-        pass  # can't check balance, allow trade
+    except Exception as _be:
+        # FAIL CLOSED — if we can't verify balance, don't trade
+        _PRETRADE_STATS["blocked"] += 1
+        _PRETRADE_STATS["reasons"]["balance_error"] = _PRETRADE_STATS["reasons"].get("balance_error", 0) + 1
+        return False, f"Balance check failed: {str(_be)[:50]}"
 
     # 8. LEARNING MULTIPLIER: if the learning engine says skip (0.0), skip
-    try:
-        mult = _learning_multiplier(ticker, title, price_cents=price_cents, strategy=strategy)
-        if mult <= 0.05:  # effectively zero
+    # 8. LEARNING MULTIPLIER — skip for arb/hedge (guaranteed profit, time doesn't matter)
+    if strategy not in ("arb", "hedge"):
+        try:
+            mult = _learning_multiplier(ticker, title, price_cents=price_cents, strategy=strategy)
+            if mult <= 0.05:  # effectively zero
+                _PRETRADE_STATS["blocked"] += 1
+                _PRETRADE_STATS["reasons"]["learning_blocked"] = _PRETRADE_STATS["reasons"].get("learning_blocked", 0) + 1
+                return False, f"Learning engine blocked (multiplier={mult:.2f})"
+        except Exception as _le:
+            # FAIL CLOSED — if learning engine crashes, block the trade (don't let bad bets through)
             _PRETRADE_STATS["blocked"] += 1
-            _PRETRADE_STATS["reasons"]["learning_blocked"] = _PRETRADE_STATS["reasons"].get("learning_blocked", 0) + 1
-            return False, f"Learning engine blocked (multiplier={mult:.2f})"
-    except Exception as _le:
-        # FAIL CLOSED — if learning engine crashes, block the trade (don't let bad bets through)
-        _PRETRADE_STATS["blocked"] += 1
-        _PRETRADE_STATS["reasons"]["learning_error"] = _PRETRADE_STATS["reasons"].get("learning_error", 0) + 1
-        return False, f"Learning engine error: {str(_le)[:50]}"
+            _PRETRADE_STATS["reasons"]["learning_error"] = _PRETRADE_STATS["reasons"].get("learning_error", 0) + 1
+            return False, f"Learning engine error: {str(_le)[:50]}"
 
     # ALL CHECKS PASSED
     _PRETRADE_STATS["passed"] += 1
@@ -7515,7 +7520,10 @@ def place_orders_parallel(orders):
     def _exec_order(order):
         result = place_kalshi_order(
             order["ticker"], order["side"], order["price_cents"],
-            count=order.get("count", 1)
+            count=order.get("count", 1),
+            strategy=order.get("strategy", "batch"),
+            win_prob=order.get("win_prob"),
+            edge=order.get("edge"),
         )
         return {
             "order": order,
@@ -16741,7 +16749,7 @@ def quick_bet():
     except Exception as e:
         return jsonify({"error": f"Balance check failed: {e}. Cannot place trade without balance verification."}), 500
 
-    result = place_kalshi_order(ticker, side, price_cents, count=count)
+    result = place_kalshi_order(ticker, side, price_cents, count=count, strategy="manual_trade")
     success = "error" not in result
 
     if success:
@@ -17697,7 +17705,7 @@ def quant_bet():
     count = max(1, int(bet_size * 100 / price_cents))
     cost = (price_cents * count) / 100.0
 
-    result = place_kalshi_order(ticker, side, price_cents, count=count)
+    result = place_kalshi_order(ticker, side, price_cents, count=count, strategy="manual_quant")
     success = "error" not in result
 
     if success:
@@ -18463,7 +18471,7 @@ def execute_trade():
     daily_max = BOT_CONFIG.get("max_daily_usd", 125)
     if daily_spent + cost_usd > daily_max:
         return jsonify({"error": f"Would exceed daily limit (${daily_spent:.2f} + ${cost_usd:.2f} > ${daily_max:.2f})"}), 400
-    result = place_kalshi_order(ticker, side, pc, count=count)
+    result = place_kalshi_order(ticker, side, pc, count=count, strategy="manual_execute")
     trade_record = {
         "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "ticker": ticker,
