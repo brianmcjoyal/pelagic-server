@@ -276,6 +276,8 @@ def _save_state():
             "goalie_daily_spent": BOT_STATE.get("goalie_daily_spent", 0.0),
             "goalie_trades_today": BOT_STATE.get("goalie_trades_today", []),
             "goalie_date": BOT_STATE.get("goalie_date"),
+            # Misc spending (quant, arb, manual /trade)
+            "misc_daily_spent": BOT_STATE.get("misc_daily_spent", 0.0),
             # Learning engine state
             "learning_state": _LEARNING_STATE,
             # Per-game exposure tracking
@@ -354,6 +356,8 @@ def _load_state():
             BOT_STATE["goalie_daily_spent"] = data.get("goalie_daily_spent", 0.0)
             BOT_STATE["goalie_trades_today"] = data.get("goalie_trades_today", [])
             BOT_STATE["goalie_date"] = today_str
+            # Restore misc spending (quant, arb, manual) for same-day
+            BOT_STATE["misc_daily_spent"] = data.get("misc_daily_spent", 0.0)
             # Restore manual trades for same-day
             BOT_STATE["manual_trades_today"] = data.get("manual_trades_today", [])
             # Restore per-game exposure for same-day
@@ -8135,7 +8139,7 @@ def _watchdog_check():
         if any("BUDGET" in a or "LOW WIN RATE" in a for a in alerts):
             try:
                 _discord_msg = "🚨 **WATCHDOG ALERTS**\n" + "\n".join(f"• {a}" for a in alerts)
-                send_discord_alert(_discord_msg)
+                _send_discord(_discord_msg, color=0xff0000)
             except Exception:
                 pass
     else:
@@ -15742,8 +15746,10 @@ def _smart_position_management():
                     _opp_ask = int(round(float(str(_opp_ask_raw)) * 100)) if float(str(_opp_ask_raw)) < 1.5 else int(round(float(str(_opp_ask_raw))))
                     _total_cost = entry + _opp_ask
                     _guaranteed_profit_cents = 100 - _total_cost
-                    # After 7% fee on the winning side: net = profit - 0.07 * profit = 0.93 * profit
-                    _net_after_fee = _guaranteed_profit_cents * 0.93
+                    # After 7% fee: fee is on the WINNING side's profit (100 - cost of that side)
+                    # Worst case is whichever side has larger profit margin
+                    _worst_case_fee = 0.07 * max(100 - entry, 100 - _opp_ask)
+                    _net_after_fee = _guaranteed_profit_cents - _worst_case_fee
                     if _net_after_fee >= 12 and count >= 1:  # ~13c gross, ~12c net — real profit
                         _hedge_result = place_kalshi_order(ticker, _opp_side, _opp_ask, count=count)
                         if "error" not in _hedge_result:
