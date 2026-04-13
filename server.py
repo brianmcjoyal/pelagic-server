@@ -22837,14 +22837,15 @@ async function loadPerformance() {
     var portfolioPnlColor = portfolioPnl >= 0 ? '#00dc5a' : '#ff5000';
     var portfolioRoi = DAY1_STARTING_BALANCE > 0 ? (portfolioPnl / DAY1_STARTING_BALANCE * 100) : roi;
     var portfolioRoiColor = portfolioRoi >= 0 ? '#00dc5a' : '#ff5000';
-    var _dailyPl = (portfolioData || {}).daily_pnl_usd || (portfolioData || {}).total_unrealized_usd || 0;
+    var _dpRaw = (portfolioData || {}).daily_pnl_usd;
+    var _dailyPl = (_dpRaw !== undefined && _dpRaw !== null) ? _dpRaw : ((portfolioData || {}).total_unrealized_usd || 0);
 
     var khtml = '';
     // Row 1: Core trading metrics
     khtml += kpi('Total P&L', (portfolioPnl >= 0 ? '+$' : '-$') + Math.abs(portfolioPnl).toFixed(2), portfolioPnlColor, total > 0 ? wins + 'W / ' + losses + 'L' : 'portfolio vs $' + DAY1_STARTING_BALANCE.toFixed(0) + ' start');
     khtml += kpi('Win Rate', total > 0 ? winRate.toFixed(1) + '%' : '--', total > 0 ? wrColor : '#888', total > 0 ? total + ' settled' : 'no settled trades yet');
     khtml += kpi('ROI', portfolioRoi.toFixed(1) + '%', portfolioRoiColor, '$' + DAY1_STARTING_BALANCE.toFixed(0) + ' starting balance');
-    khtml += kpi('Daily P&L', (_dailyPl >= 0 ? '+$' : '-$') + Math.abs(_dailyPl).toFixed(2), _dailyPl >= 0 ? '#00dc5a' : '#ff5000', 'unrealized today');
+    khtml += kpi('Daily P&L', (_dailyPl >= 0 ? '+$' : '-$') + Math.abs(_dailyPl).toFixed(2), _dailyPl >= 0 ? '#00dc5a' : '#ff5000', 'since midnight PT');
     khtml += kpi('Expectancy', total > 0 ? ((expectancy >= 0 ? '+$' : '-$') + Math.abs(expectancy).toFixed(2)) : '--', total > 0 ? expColor : '#888', total > 0 ? 'per trade' : '');
 
     // Row 2
