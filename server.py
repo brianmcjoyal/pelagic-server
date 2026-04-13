@@ -11333,13 +11333,13 @@ def _build_tradeshark_icon_png(size=180):
     #   Teeth line the inside of both jaws
     jaw_cx = size / 2.0
     jaw_w = size - pad * 2             # total jaw width
-    jaw_hinge_y = int(size * 0.28)     # y where upper and lower jaws meet (the corners of the mouth)
+    jaw_hinge_y = int(size * 0.25)     # y where upper and lower jaws meet (the corners of the mouth)
     jaw_thick = max(3, int(size * 0.035))  # thickness of the gold jaw bone
 
-    # Upper jaw — wide arch, highest point at center
-    upper_peak_y = pad                 # top of the arch at center
-    # Lower jaw — U shape, lowest point at center
-    lower_dip_y = int(size * 0.44)     # bottom of the U at center
+    # Upper jaw — wide arch, highest point at center (less curve)
+    upper_peak_y = int(size * 0.16)    # top of the arch at center (closer to hinge = flatter)
+    # Lower jaw — U shape, lowest point at center (less curve)
+    lower_dip_y = int(size * 0.38)     # bottom of the U at center (closer to hinge = flatter)
 
     # Tooth dimensions — big and prominent
     tooth_h = int(size * 0.05)
@@ -11972,7 +11972,7 @@ def tradeshark_manifest():
         "background_color": "#0d0d0d",
         "theme_color": "#c9963a",
         "icons": [
-            {"src": "/apple-touch-icon.png?v=14", "sizes": "180x180", "type": "image/png", "purpose": "any"},
+            {"src": "/apple-touch-icon.png?v=15", "sizes": "180x180", "type": "image/png", "purpose": "any"},
             {"src": "/icon-192.png?v=2", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
         ],
     })
@@ -19599,8 +19599,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <title>TradeShark</title>
 <!-- PWA / iOS Add-to-Home-Screen -->
 <link rel="icon" type="image/png" href="/favicon.ico?v=2">
-<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=14">
-<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=14">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=15">
+<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=15">
 <link rel="manifest" href="/manifest.json?v=2">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
