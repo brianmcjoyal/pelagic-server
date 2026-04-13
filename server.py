@@ -21704,7 +21704,69 @@ function renderClosedBets() {
     var count = s.count || 0;
     var side = (s.side || 'yes').toUpperCase();
 
-    html += '<div style="display:flex;align-items:center;gap:10px;border-left:3px solid ' + borderColor + ';background:' + bgColor + ';border-radius:6px;padding:8px 12px">';
+    // Entry time
+    var entryTimeStr = '';
+    if (s.entry_time) {
+      try {
+        var de = new Date(s.entry_time);
+        var hre = de.getHours(), ampme = hre >= 12 ? 'pm' : 'am';
+        hre = hre % 12 || 12;
+        var mine = de.getMinutes();
+        entryTimeStr = hre + ':' + (mine < 10 ? '0' : '') + mine + ampme;
+      } catch(e) {}
+    }
+
+    // Build edge analysis tooltip
+    var edgeReasons = s.edge_reasons || [];
+    var espnEdge = s.espn_edge;
+    var conviction = s.conviction || 0;
+    var gameState = s.game_state_at_entry || '';
+
+    // Why we had an edge
+    var whyEdge = '';
+    if (espnEdge) whyEdge += 'ESPN edge: +' + (espnEdge * 100).toFixed(1) + '% over Kalshi implied prob\\n';
+    if (edgeReasons.length > 0) whyEdge += edgeReasons.join('\\n') + '\\n';
+    if (gameState === 'live') whyEdge += 'Entered during LIVE game (latency advantage)\\n';
+    else if (gameState === 'post') whyEdge += 'Entered after game ended\\n';
+    if (conviction > 0) whyEdge += 'Conviction score: ' + conviction + '/10\\n';
+    whyEdge += 'Entry: ' + side + ' at ' + entryCents + 'c x' + count + ' ($' + (entryCents * count / 100).toFixed(2) + ')\\n';
+    if (!whyEdge) whyEdge = 'No edge data recorded for this trade\\n';
+
+    // What we learned
+    var learned = '';
+    if (isWin) {
+      if (espnEdge && espnEdge > 0.10) learned += 'Strong ESPN signal (+' + (espnEdge*100).toFixed(0) + '%) correctly predicted outcome\\n';
+      else if (espnEdge) learned += 'Modest ESPN edge was enough at this price point\\n';
+      if (entryCents <= 40) learned += 'Low entry price (' + entryCents + 'c) = high payout ratio on win\\n';
+      else if (entryCents > 55) learned += 'High entry (' + entryCents + 'c) still won but payout was limited\\n';
+      if (gameState === 'live') learned += 'Live game entry validated: latency edge worked here\\n';
+      learned += 'Profit after 7% fee: ' + pnlStr + ' on $' + (entryCents * count / 100).toFixed(2) + ' risk\\n';
+    } else {
+      if (entryCents > 55) learned += 'High entry price (' + entryCents + 'c) = most of the risk, little upside\\n';
+      if (espnEdge && espnEdge < 0.05) learned += 'ESPN edge was thin (' + (espnEdge*100).toFixed(1) + '%) — noise, not signal\\n';
+      else if (espnEdge && espnEdge > 0.10) learned += 'ESPN showed strong edge but outcome went against us — variance\\n';
+      if (gameState !== 'live') learned += 'Non-live entry: no latency advantage available\\n';
+      learned += 'Lost full entry: $' + (entryCents * count / 100).toFixed(2) + '\\n';
+    }
+    if (!learned) learned = isWin ? 'Win at ' + entryCents + 'c entry\\n' : 'Loss at ' + entryCents + 'c entry\\n';
+
+    // What to do differently
+    var forward = '';
+    if (isWin) {
+      if (gameState === 'live' && espnEdge && espnEdge > 0.08) forward += 'Keep targeting live games with strong ESPN divergence\\n';
+      if (entryCents <= 35) forward += 'Sweet spot price range — continue buying 25-35c underdogs with edge\\n';
+      forward += 'Strategy ' + stratLabel + ' is working in this range\\n';
+    } else {
+      if (entryCents > 60) forward += 'Avoid entries above 60c — risk/reward unfavorable\\n';
+      if (gameState !== 'live') forward += 'Prioritize LIVE game entries for latency edge\\n';
+      if (espnEdge && espnEdge < 0.05) forward += 'Require stronger ESPN edge (5%+) before entry\\n';
+      forward += 'Track CLV on paper trades to validate ' + stratLabel + ' strategy\\n';
+    }
+    if (!forward) forward = 'Monitor paper trading results for this strategy\\n';
+
+    var tooltipText = '=== WHY WE HAD AN EDGE ===\\n' + whyEdge + '\\n=== WHAT WE LEARNED ===\\n' + learned + '\\n=== GOING FORWARD ===\\n' + forward;
+
+    html += '<div style="display:flex;align-items:center;gap:10px;border-left:3px solid ' + borderColor + ';background:' + bgColor + ';border-radius:6px;padding:8px 12px;cursor:pointer;position:relative" title="' + tooltipText.replace(/"/g, '&quot;') + '" onclick="toggleBetInsight(this)">';
     // Result icon
     html += '<div style="color:' + pnlColor + ';font-size:14px;font-weight:800;min-width:18px;text-align:center">' + resultIcon + '</div>';
     // Main info
@@ -21713,17 +21775,50 @@ function renderClosedBets() {
     html += '<span style="font-size:8px;padding:1px 5px;background:' + stratColor + '22;border:1px solid ' + stratColor + '44;border-radius:3px;color:' + stratColor + ';font-weight:700">' + stratLabel + '</span>';
     html += '<span style="color:#ddd;font-size:11px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (s.title || s.ticker || '') + '</span>';
     html += '</div>';
-    html += '<div style="color:#666;font-size:9px">' + side + ' ' + entryCents + '&cent; x' + count + (timeStr ? ' &middot; ' + timeStr : '') + '</div>';
+    html += '<div style="color:#666;font-size:9px">';
+    html += side + ' ' + entryCents + '&cent; x' + count;
+    if (entryTimeStr) html += ' &middot; entered ' + entryTimeStr;
+    if (timeStr) html += ' &middot; closed ' + timeStr;
+    html += '</div>';
     html += '</div>';
     // P&L
     html += '<div style="text-align:right;flex-shrink:0">';
     html += '<div style="color:' + pnlColor + ';font-size:14px;font-weight:800">' + pnlStr + '</div>';
     html += '<div style="color:' + pnlColor + ';font-size:8px;font-weight:700;letter-spacing:0.5px">' + resultText + '</div>';
     html += '</div>';
+    // Hidden insight panel (shown on click)
+    html += '<div class="bet-insight" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:10;background:#1a1a2e;border:1px solid #333;border-radius:8px;padding:12px;margin-top:4px;box-shadow:0 4px 16px rgba(0,0,0,0.5)">';
+    html += '<div style="color:#ffb400;font-size:10px;font-weight:700;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">Why We Had An Edge</div>';
+    html += '<div style="color:#ccc;font-size:11px;margin-bottom:10px;line-height:1.5;white-space:pre-line">' + whyEdge + '</div>';
+    html += '<div style="color:' + (isWin ? '#00dc5a' : '#ff5000') + ';font-size:10px;font-weight:700;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">What We Learned</div>';
+    html += '<div style="color:#ccc;font-size:11px;margin-bottom:10px;line-height:1.5;white-space:pre-line">' + learned + '</div>';
+    html += '<div style="color:#00d4ff;font-size:10px;font-weight:700;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">Going Forward</div>';
+    html += '<div style="color:#ccc;font-size:11px;line-height:1.5;white-space:pre-line">' + forward + '</div>';
+    html += '</div>';
     html += '</div>';
   });
 
   el.innerHTML = html;
+}
+
+function toggleBetInsight(el) {
+  var panel = el.querySelector('.bet-insight');
+  if (!panel) return;
+  var isOpen = panel.style.display !== 'none';
+  // Close all other open panels first
+  document.querySelectorAll('.bet-insight').forEach(function(p) { p.style.display = 'none'; });
+  if (!isOpen) {
+    panel.style.display = 'block';
+    // Close on outside click
+    setTimeout(function() {
+      document.addEventListener('click', function closePanel(ev) {
+        if (!el.contains(ev.target)) {
+          panel.style.display = 'none';
+          document.removeEventListener('click', closePanel);
+        }
+      });
+    }, 10);
+  }
 }
 
 async function loadPerfHistory() {
