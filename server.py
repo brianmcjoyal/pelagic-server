@@ -11407,8 +11407,8 @@ def _build_tradeshark_icon_png(size=180):
     # Lower jaw droops DOWN in the center (convex, frown shape)
     jaw_cx = (bL + bR) / 2.0
     jaw_hw = (bR - bL) / 2.0
-    jaw_curve_amt = size * 0.08  # how much the jaw curves (more aggressive)
-    jaw_connect_w = int(size * 0.04)  # width of connector at each end
+    jaw_curve_amt = size * 0.12  # how much the jaw curves (aggressive oval shape)
+    jaw_connect_w = int(size * 0.06)  # wider connector at each end for smooth oval join
 
     def _upper_curve(x):
         """How much the upper jaw lifts UP at position x. Max at center, 0 at edges."""
@@ -11999,7 +11999,7 @@ def tradeshark_manifest():
         "background_color": "#0d0d0d",
         "theme_color": "#c9963a",
         "icons": [
-            {"src": "/apple-touch-icon.png?v=10", "sizes": "180x180", "type": "image/png", "purpose": "any"},
+            {"src": "/apple-touch-icon.png?v=11", "sizes": "180x180", "type": "image/png", "purpose": "any"},
             {"src": "/icon-192.png?v=2", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
         ],
     })
@@ -19626,8 +19626,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <title>TradeShark</title>
 <!-- PWA / iOS Add-to-Home-Screen -->
 <link rel="icon" type="image/png" href="/favicon.ico?v=2">
-<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=10">
-<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=10">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=11">
+<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=11">
 <link rel="manifest" href="/manifest.json?v=2">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
