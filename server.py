@@ -11391,7 +11391,8 @@ def _build_tradeshark_icon_png(size=180):
     # Lower jaw droops DOWN in the center (convex, frown shape)
     jaw_cx = (bL + bR) / 2.0
     jaw_hw = (bR - bL) / 2.0
-    jaw_curve_amt = size * 0.04  # how much the jaw curves
+    jaw_curve_amt = size * 0.08  # how much the jaw curves (more aggressive)
+    jaw_connect_w = int(size * 0.04)  # width of connector at each end
 
     def _upper_curve(x):
         """How much the upper jaw lifts UP at position x. Max at center, 0 at edges."""
@@ -11402,6 +11403,35 @@ def _build_tradeshark_icon_png(size=180):
         """How much the lower jaw droops DOWN at position x. Max at center, 0 at edges."""
         dx = abs(x - jaw_cx) / jaw_hw
         return -jaw_curve_amt * (1.0 - dx * dx)  # negative = moves DOWN (lip drops)
+
+    def _in_jaw_connector(x, y):
+        """Gold vertical connectors at left and right edges where jaws meet."""
+        # Left connector
+        if bL <= x < bL + jaw_connect_w:
+            # Spans from upper lip to lower lip at this x
+            uc = _upper_curve(x)
+            lc = _lower_curve(x)
+            local_top = jaw_top + uc
+            local_bot = jaw_bot - lc
+            if y >= local_top - 0.5 and y < local_bot + 0.5:
+                if y < local_top + 0.5:
+                    return y - (local_top - 0.5)
+                if y >= local_bot - 0.5:
+                    return local_bot + 0.5 - y
+                return 1.0
+        # Right connector
+        if bR - jaw_connect_w <= x < bR:
+            uc = _upper_curve(x)
+            lc = _lower_curve(x)
+            local_top = jaw_top + uc
+            local_bot = jaw_bot - lc
+            if y >= local_top - 0.5 and y < local_bot + 0.5:
+                if y < local_top + 0.5:
+                    return y - (local_top - 0.5)
+                if y >= local_bot - 0.5:
+                    return local_bot + 0.5 - y
+                return 1.0
+        return 0.0
 
     def _in_upper_lip(x, y):
         """Gold upper lip — curves down in the middle (concave)."""
@@ -11482,10 +11512,11 @@ def _build_tradeshark_icon_png(size=180):
         """Coverage of (x,y) inside the T shape."""
         a_upper_lip = _in_upper_lip(x, y)
         a_lower_lip = _in_lower_lip(x, y)
+        a_connector = _in_jaw_connector(x, y)
         a_stem = _in_rounded_rect(x, y, sL, sT, sR, sB, cr)
         a_teeth_d = _in_teeth_down(x, y)
         a_teeth_u = _in_teeth_up(x, y)
-        return min(1.0, a_upper_lip + a_lower_lip + a_stem + a_teeth_d + a_teeth_u)
+        return min(1.0, a_upper_lip + a_lower_lip + a_connector + a_stem + a_teeth_d + a_teeth_u)
 
     def _is_tooth_pixel(x, y):
         """Check if this pixel is part of any tooth (for green coloring)."""
@@ -11543,8 +11574,8 @@ def _build_tradeshark_icon_png(size=180):
                     # Green teeth — brighter at base, darker at tip
                     mid_y = (mouth_top + mouth_bot) / 2.0
                     dist_from_mid = abs(y - mid_y) / max(1, tooth_h + mouth_h)
-                    brightness = 1.0 - 0.35 * (1.0 - dist_from_mid)
-                    color = tuple(int(tooth_color[i] * brightness) for i in range(3))
+                    brightness = max(0.3, min(1.0, 1.0 - 0.35 * (1.0 - dist_from_mid)))
+                    color = tuple(max(0, min(255, int(tooth_color[i] * brightness))) for i in range(3))
                 else:
                     t = (y - jaw_top) / max(1, sB - jaw_top)
                     color = _gold_at(t)
@@ -11916,7 +11947,7 @@ def tradeshark_manifest():
         "background_color": "#0d0d0d",
         "theme_color": "#c9963a",
         "icons": [
-            {"src": "/apple-touch-icon.png?v=8", "sizes": "180x180", "type": "image/png", "purpose": "any"},
+            {"src": "/apple-touch-icon.png?v=9", "sizes": "180x180", "type": "image/png", "purpose": "any"},
             {"src": "/icon-192.png?v=2", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
         ],
     })
@@ -19543,8 +19574,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <title>TradeShark</title>
 <!-- PWA / iOS Add-to-Home-Screen -->
 <link rel="icon" type="image/png" href="/favicon.ico?v=2">
-<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=8">
-<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=8">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=9">
+<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=9">
 <link rel="manifest" href="/manifest.json?v=2">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
