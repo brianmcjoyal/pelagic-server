@@ -10688,14 +10688,27 @@ def _background_loop():
 
                 _total_unrealized = round(sum((p.get("unrealized_pnl_cents") or 0) for p in _pos2) / 100, 2)
 
-                # Calculate true daily P&L: today's settled results + current unrealized
-                _daily_pnl = _total_unrealized
+                # Calculate true daily P&L: current portfolio value minus value at midnight PT
+                _daily_pnl = 0
                 try:
                     _today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
-                    for _jt in _pf_journal:
-                        if _jt.get("result") is not None and str(_jt.get("settlement_time") or "")[:10] == _today_str:
-                            _daily_pnl += float(_jt.get("pnl_usd") or _jt.get("pnl") or 0)
-                    _daily_pnl = round(_daily_pnl, 2)
+                    # Find the earliest perf_history entry from today as baseline
+                    _day_start_value = None
+                    with _PERF_HISTORY_LOCK:
+                        for _ph in _PERF_HISTORY:
+                            _ph_date = (_ph.get("ts") or "")[:10]
+                            if _ph_date == _today_str:
+                                _day_start_value = _ph.get("value", 0)
+                                break  # first entry today = closest to midnight
+                    if _day_start_value and _day_start_value > 0:
+                        _daily_pnl = round(_pf_value2 - _day_start_value, 2)
+                    else:
+                        # Fallback: unrealized + today's settled (old method)
+                        _daily_pnl = _total_unrealized
+                        for _jt in _pf_journal:
+                            if _jt.get("result") is not None and str(_jt.get("settlement_time") or "")[:10] == _today_str:
+                                _daily_pnl += float(_jt.get("pnl_usd") or _jt.get("pnl") or 0)
+                        _daily_pnl = round(_daily_pnl, 2)
                 except Exception:
                     pass
 
