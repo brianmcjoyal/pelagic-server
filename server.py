@@ -4115,6 +4115,10 @@ def live_game_snipe():
                 if not _correlation_check_ok(ticker, conviction):
                     continue
 
+                try:
+                    _log_paper_trade(ticker, title, side, price, _snipe_our_prob or implied_prob_snipe, (_snipe_our_prob - implied_prob_snipe) if _snipe_our_prob else 0, _snipe_ev_after_fees * 100 if _snipe_ev_after_fees else 0, strategy="sniper", game_state=_snipe_game.get("clock", "") if _snipe_game else "", sport=_snipe_league if _snipe_league else "")
+                except Exception:
+                    pass
                 result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_snipe_ob_pre,
                                            win_prob=_snipe_our_prob, edge=(_snipe_our_prob - implied_prob_snipe) if _snipe_our_prob else None, strategy="live_sniper")
                 success = "error" not in result
@@ -4918,6 +4922,10 @@ def moonshark_snipe():
                 if not _correlation_check_ok(ticker, ms_conviction):
                     continue
 
+                try:
+                    _log_paper_trade(ticker, title, side, price, win_prob, espn_edge or 0, _ev_after_fees * 100 if _ev_after_fees else 0, strategy="moonshark", sport=_league if _league else "")
+                except Exception:
+                    pass
                 result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob,
                                            win_prob=_model_prob if _model_prob else None, edge=espn_edge, strategy="moonshark")
                 success = "error" not in result
@@ -5478,6 +5486,10 @@ def closegame_snipe():
                 if not _correlation_check_ok(ticker, _cg_conv_est):
                     continue
 
+                try:
+                    _log_paper_trade(ticker, title, side, price, estimated_win_prob, edge, _cg_ev_after_fees * 100 if _cg_ev_after_fees else 0, strategy="closegame", game_state=score_str, sport=cg.get("sport", ""))
+                except Exception:
+                    pass
                 result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_cg_ob,
                                            win_prob=espn_win_prob_cg, edge=espn_edge_cg, strategy="closegame")
                 success = "error" not in result
@@ -5854,6 +5866,10 @@ def floor_quota_snipe():
             f"🎯 FLOOR {side.upper()} {title[:35]} @ {price}c x{count} (${cost_usd:.2f}) edge={edge:+.1%}",
             "info"
         )
+        try:
+            _log_paper_trade(ticker, title, side, price, cand.get("our_prob", 0), edge, edge * 100, strategy="floor")
+        except Exception:
+            pass
         result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob,
                                    win_prob=cand.get("our_prob"), edge=edge, strategy="floor")
         if "error" in result:
@@ -6204,6 +6220,10 @@ def momentum_swing_snipe():
                 "info"
             )
 
+            try:
+                _log_paper_trade(ticker, title, side, price, live_prob, edge, _sw_ev_after_fees * 100 if _sw_ev_after_fees else 0, strategy="swing", game_state=f"{margin}pt deficit {period}", sport=league)
+            except Exception:
+                pass
             result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob,
                                        win_prob=live_prob, edge=edge, strategy="momentum_swing")
             if "error" in result:
@@ -6530,6 +6550,10 @@ def goalie_pulled_snipe():
             f"(${cost_usd:.2f}) | {away_abbrev} {away_score}-{home_score} {home_abbrev} {period} ({secs_left}s) | edge=+{edge:.1%}",
             "info"
         )
+        try:
+            _log_paper_trade(ticker, title, side, price, best["our_prob"], edge, _gl_ev_after_fees * 100 if _gl_ev_after_fees else 0, strategy="goalie", game_state=f"{away_abbrev} {away_score}-{home_score} {home_abbrev} {period} ({secs_left}s)", sport="nhl")
+        except Exception:
+            pass
         result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob,
                                    win_prob=best["our_prob"], edge=edge, strategy="goalie_pulled")
         if "error" in result:
@@ -8146,48 +8170,13 @@ def _paper_trade_sniper():
                 if ev_cents <= 0:
                     continue
 
-                # PAPER TRADE — log it
+                # PAPER TRADE — log it using shared function
                 game_info = f"{_espn_data.get('home_abbrev', '?')} {_espn_data.get('home_score', '?')}-{_espn_data.get('away_score', '?')} {_espn_data.get('away_abbrev', '?')}"
                 period = _espn_data.get("period", "?")
                 clock = _espn_data.get("clock", "?")
-
-                # Extract sport from ESPN data for display
                 _sport = (_espn_data.get("league") or "").upper()
-
-                paper = {
-                    "ticker": ticker,
-                    "title": title[:60],
-                    "side": side,
-                    "sport": _sport,
-                    "entry_price": price,
-                    "espn_prob": round(our_prob, 3),
-                    "kalshi_implied": round(kalshi_implied, 3),
-                    "edge": round(edge, 3),
-                    "ev_cents": round(ev_cents, 2),
-                    "game_state": f"{game_info} {period} {clock}",
-                    "entry_time": now.isoformat(),
-                    "entry_ts": now_ts,
-                    # CLV tracking — filled in later
-                    "price_5min": None,
-                    "price_15min": None,
-                    "price_30min": None,
-                    "clv_5min": None,
-                    "clv_15min": None,
-                    "clv_30min": None,
-                    "closing_price": None,
-                    "clv_final": None,
-                    "result": None,  # win/loss — filled when market settles
-                    "pnl_cents": None,
-                }
-
-                with _PAPER_TRADES_LOCK:
-                    _PAPER_TRADES.append(paper)
-                    # Keep list bounded
-                    if len(_PAPER_TRADES) > _PAPER_TRADES_MAX:
-                        _PAPER_TRADES[:] = _PAPER_TRADES[-_PAPER_TRADES_MAX:]
-                _PAPER_COOLDOWN[ticker] = now_ts
-
-                print(f"[PAPER] {side.upper()} {ticker} @ {price}c | ESPN={our_prob:.0%} Kalshi={kalshi_implied:.0%} edge={edge:.0%} EV={ev_cents:.1f}c | {game_info}")
+                _log_paper_trade(ticker, title, side, price, our_prob, edge, ev_cents,
+                                 strategy="latency", game_state=f"{game_info} {period} {clock}", sport=_sport)
 
             except Exception as e:
                 print(f"[PAPER] Error processing {ticker}: {e}")
@@ -8278,6 +8267,51 @@ def _paper_trade_update():
         print(f"[PAPER] Update error: {e}")
 
 
+def _log_paper_trade(ticker, title, side, price, win_prob, edge, ev_cents, strategy, game_state="", sport=""):
+    """Log a paper trade from ANY strategy. Shared by all paper trade functions.
+    Called when a strategy finds a signal that passes EV/edge checks."""
+    now = datetime.datetime.now(tz=_PACIFIC)
+    now_ts = _time.time()
+
+    # Cooldown: max 1 paper trade per ticker per strategy per 10 minutes
+    _cooldown_key = f"{ticker}_{strategy}"
+    if _cooldown_key in _PAPER_COOLDOWN and now_ts - _PAPER_COOLDOWN[_cooldown_key] < 600:
+        return
+
+    paper = {
+        "ticker": ticker,
+        "title": (title or "")[:60],
+        "side": side,
+        "sport": sport,
+        "strategy": strategy,
+        "entry_price": price,
+        "espn_prob": round(win_prob, 3) if win_prob else 0,
+        "kalshi_implied": round(price / 100.0, 3),
+        "edge": round(edge, 3) if edge else 0,
+        "ev_cents": round(ev_cents, 2) if ev_cents else 0,
+        "game_state": game_state,
+        "entry_time": now.isoformat(),
+        "entry_ts": now_ts,
+        "price_5min": None,
+        "price_15min": None,
+        "price_30min": None,
+        "clv_5min": None,
+        "clv_15min": None,
+        "clv_30min": None,
+        "closing_price": None,
+        "clv_final": None,
+        "result": None,
+        "pnl_cents": None,
+    }
+
+    with _PAPER_TRADES_LOCK:
+        _PAPER_TRADES.append(paper)
+        if len(_PAPER_TRADES) > _PAPER_TRADES_MAX:
+            _PAPER_TRADES[:] = _PAPER_TRADES[-_PAPER_TRADES_MAX:]
+    _PAPER_COOLDOWN[_cooldown_key] = now_ts
+    print(f"[PAPER] {strategy} {side.upper()} {ticker} @ {price}c | prob={win_prob:.0%} edge={edge:.0%} EV={ev_cents:.1f}c | {game_state}")
+
+
 def _paper_trade_stats():
     """Compute paper trading statistics."""
     with _PAPER_TRADES_LOCK:
@@ -8318,6 +8352,38 @@ def _paper_trade_stats():
     elif len(settled) >= 10:
         verdict = f"EARLY DATA — {len(settled)} settled, need 20+ for confidence"
 
+    # Per-strategy breakdown
+    _strategies = {}
+    for p in _pts:
+        strat = p.get("strategy", "unknown")
+        if strat not in _strategies:
+            _strategies[strat] = {"total": 0, "wins": 0, "losses": 0, "pending": 0, "pnl_cents": 0, "clv_5_sum": 0, "clv_5_count": 0}
+        _strategies[strat]["total"] += 1
+        if p.get("result") == "win":
+            _strategies[strat]["wins"] += 1
+            _strategies[strat]["pnl_cents"] += p.get("pnl_cents", 0) or 0
+        elif p.get("result") == "loss":
+            _strategies[strat]["losses"] += 1
+            _strategies[strat]["pnl_cents"] += p.get("pnl_cents", 0) or 0
+        else:
+            _strategies[strat]["pending"] += 1
+        if p.get("clv_5min") is not None:
+            _strategies[strat]["clv_5_sum"] += p["clv_5min"]
+            _strategies[strat]["clv_5_count"] += 1
+
+    by_strategy = {}
+    for strat, s in _strategies.items():
+        _s_settled = s["wins"] + s["losses"]
+        by_strategy[strat] = {
+            "total": s["total"],
+            "wins": s["wins"],
+            "losses": s["losses"],
+            "pending": s["pending"],
+            "win_rate": round(s["wins"] / max(1, _s_settled) * 100, 1),
+            "pnl_cents": round(s["pnl_cents"], 1),
+            "clv_5min_avg": round(s["clv_5_sum"] / s["clv_5_count"], 2) if s["clv_5_count"] > 0 else None,
+        }
+
     return {
         "total": total,
         "settled": len(settled),
@@ -8332,6 +8398,7 @@ def _paper_trade_stats():
         "clv_30min_avg": avg_clv_30,
         "clv_5min_count": len(clv_5),
         "verdict": verdict,
+        "by_strategy": by_strategy,
         "trades": _pts[-20:],  # last 20 for display
     }
 
@@ -20041,6 +20108,14 @@ a:hover { color: #7da5f5; }
     </div>
   </div>
 
+  <!-- Per-Strategy Breakdown -->
+  <div class="section" style="margin-bottom:16px;padding:16px">
+    <div style="color:#ffb400;font-size:14px;font-weight:700;margin-bottom:10px">Strategy Comparison — Which Has Real Edge?</div>
+    <div id="paper-strategy-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px">
+      <div style="color:#555;font-size:12px;text-align:center;padding:20px">Waiting for data...</div>
+    </div>
+  </div>
+
   <!-- Recent Paper Trades -->
   <div class="section" style="padding:16px">
     <div style="color:#ccc;font-size:14px;font-weight:700;margin-bottom:10px">Recent Paper Trades</div>
@@ -23704,6 +23779,33 @@ async function loadPaperTrades(force) {
     setCLV('paper-clv5', data.clv_5min_avg, 'paper-clv5-n', data.clv_5min_count);
     setCLV('paper-clv15', data.clv_15min_avg, 'paper-clv15-n', data.clv_15min_count);
     setCLV('paper-clv30', data.clv_30min_avg, 'paper-clv30-n', data.clv_30min_count);
+    // Strategy breakdown grid
+    var stratGrid = document.getElementById('paper-strategy-grid');
+    var byStrat = data.by_strategy || {};
+    var stratKeys = Object.keys(byStrat);
+    if (stratKeys.length > 0) {
+      var sh = '';
+      stratKeys.sort(function(a,b){ return (byStrat[b].total||0)-(byStrat[a].total||0); });
+      for (var si = 0; si < stratKeys.length; si++) {
+        var sk = stratKeys[si];
+        var sv = byStrat[sk];
+        var sSettled = (sv.wins||0) + (sv.losses||0);
+        var sWR = sSettled > 0 ? ((sv.wins||0)/sSettled*100).toFixed(0) : '--';
+        var sClv = sv.clv_5min_avg;
+        var sClvStr = sClv !== null && sClv !== undefined ? ((sClv>=0?'+':'')+sClv+'c') : '--';
+        var sClvColor = sClv > 0 ? '#00dc5a' : sClv < 0 ? '#ff4444' : '#888';
+        var sPnl = sv.pnl_cents ? ((sv.pnl_cents/100).toFixed(2)) : '0.00';
+        var sPnlColor = (sv.pnl_cents||0) >= 0 ? '#00dc5a' : '#ff4444';
+        sh += '<div style="background:#111;border-radius:8px;padding:12px">';
+        sh += '<div style="color:#fff;font-weight:700;font-size:13px;margin-bottom:6px;text-transform:uppercase">' + sk + '</div>';
+        sh += '<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px"><span style="color:#666">Trades</span><span style="color:#fff">' + (sv.total||0) + ' (' + (sv.pending||0) + ' pending)</span></div>';
+        sh += '<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px"><span style="color:#666">W/L</span><span>' + (sv.wins||0) + 'W / ' + (sv.losses||0) + 'L (' + sWR + '%)</span></div>';
+        sh += '<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px"><span style="color:#666">CLV 5min</span><span style="color:' + sClvColor + ';font-weight:700">' + sClvStr + '</span></div>';
+        sh += '<div style="display:flex;justify-content:space-between;font-size:11px"><span style="color:#666">P&L</span><span style="color:' + sPnlColor + '">' + ((sv.pnl_cents||0)>=0?'+$':'-$') + Math.abs(sPnl) + '</span></div>';
+        sh += '</div>';
+      }
+      stratGrid.innerHTML = sh;
+    }
     // Recent trades list
     var trades = data.trades || [];
     var listEl = document.getElementById('paper-trades-list');
@@ -23718,7 +23820,8 @@ async function loadPaperTrades(force) {
         var pnlText = t.pnl_cents ? ((t.pnl_cents >= 0 ? '+' : '') + (t.pnl_cents / 100).toFixed(2)) : '--';
         html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #1a1a2e;font-size:12px">';
         html += '<div style="flex:1"><span style="color:#fff;font-weight:600">' + (t.ticker || 'unknown') + '</span>';
-        html += '<span style="color:#555;margin-left:8px">' + (t.sport || '') + '</span></div>';
+        html += '<span style="color:#e040fb;margin-left:6px;font-size:10px;text-transform:uppercase">' + (t.strategy || '') + '</span>';
+        html += '<span style="color:#555;margin-left:6px">' + (t.sport || '') + '</span></div>';
         html += '<div style="flex:0.5;text-align:center"><span style="color:#00d4ff">' + (t.entry_price || '--') + 'c</span>';
         html += '<span style="color:#666;margin:0 4px">\\u2192</span>';
         html += '<span style="color:#e040fb">' + (t.espn_prob ? (t.espn_prob * 100).toFixed(0) + '%' : '--') + '</span></div>';
