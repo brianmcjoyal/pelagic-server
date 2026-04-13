@@ -533,18 +533,18 @@ def _hydrate_from_kalshi():
             _bot_prefixes = ("KXKBL", "KXATP", "KXWTA", "KXNCAA", "KXNBA",
                              "KXNHL", "KXMLB", "KXUFC", "KXMMA", "KXEPL",
                              "KXNFL", "KXMLS", "KXWNBA", "KXSOCCER", "KXPGA")
-            if any(_tk_upper.startswith(p) for p in _bot_prefixes) or (_is_today and action == "buy"):
-                # First check trade journal for the real strategy label
-                _found_strat = None
-                with _TRADE_JOURNAL_LOCK:
-                    for _jr in reversed(_TRADE_JOURNAL):
-                        if _jr.get("ticker") == ticker and _jr.get("strategy"):
-                            _found_strat = _jr["strategy"]
-                            break
-                if _found_strat:
-                    _inferred_strategy = _found_strat
+            # First check trade journal for the real strategy label
+            _found_strat = None
+            with _TRADE_JOURNAL_LOCK:
+                for _jr in reversed(_TRADE_JOURNAL):
+                    if _jr.get("ticker") == ticker and _jr.get("strategy"):
+                        _found_strat = _jr["strategy"]
+                        break
+            if _found_strat:
+                _inferred_strategy = _found_strat
+            elif any(_tk_upper.startswith(p) for p in _bot_prefixes) or (_is_today and action == "buy"):
                 # Fallback: use price range to infer strategy
-                elif 25 <= price_cents <= 45:
+                if 25 <= price_cents <= 45:
                     _inferred_strategy = "moonshark"  # MoonShark/CloseGame range
                 elif 45 < price_cents < 60:
                     _inferred_strategy = "closegame"  # CloseGame middle range
@@ -555,7 +555,15 @@ def _hydrate_from_kalshi():
                 elif price_cents > 85:
                     _inferred_strategy = "live_sniper"  # High conviction sniper
                 else:
-                    _inferred_strategy = "unknown"
+                    _inferred_strategy = "live_sniper"  # shouldn't reach here
+            else:
+                # Not a recognized prefix and not today — still infer from price
+                if price_cents <= 45:
+                    _inferred_strategy = "moonshark"
+                elif price_cents < 60:
+                    _inferred_strategy = "closegame"
+                else:
+                    _inferred_strategy = "live_sniper"
             trade_rec = {
                 "timestamp": created,
                 "ticker": ticker,
@@ -12302,6 +12310,15 @@ def settled_positions():
                     entry_cents = int(round(_avg_no * 100))
             except Exception:
                 pass
+
+            # If strategy still unknown, infer from entry price
+            if trade_strategy == "unknown" or trade_strategy is None:
+                if entry_cents <= 45:
+                    trade_strategy = "moonshark"
+                elif entry_cents < 60:
+                    trade_strategy = "closegame"
+                else:
+                    trade_strategy = "live_sniper"
 
             # Calculate actual cost wagered (entry_price * count)
             actual_cost = (entry_cents * count) / 100 if entry_cents > 0 and count > 0 else traded_cents / 100
