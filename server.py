@@ -253,6 +253,12 @@ def _save_state():
             BOT_STATE["all_trades"] = BOT_STATE["all_trades"][-500:]
         with _TRADE_JOURNAL_LOCK:
             _journal_for_save = _TRADE_JOURNAL[-500:]  # keep last 500 journal entries
+        with _CATEGORY_STATS_LOCK:
+            _cat_stats_for_save = dict(_CATEGORY_STATS)
+        with _PERF_HISTORY_LOCK:
+            _perf_for_save = list(_PERF_HISTORY[-_PERF_HISTORY_MAX:])
+        with _PAPER_TRADES_LOCK:
+            _paper_for_save = list(_PAPER_TRADES[-_PAPER_TRADES_MAX:])
         data = {
             "all_trades": BOT_STATE["all_trades"],
             "trades_today": BOT_STATE["trades_today"],
@@ -261,7 +267,7 @@ def _save_state():
             "pick_history": BOT_STATE.get("pick_history", [])[-500:],  # keep last 500
             # Persist trade journal & category stats so they survive in-deployment restarts
             "trade_journal": _journal_for_save,
-            "category_stats": _CATEGORY_STATS,
+            "category_stats": _cat_stats_for_save,
             # Persist snipe daily counters
             "snipe_daily_spent": BOT_STATE.get("snipe_daily_spent", 0.0),
             "snipe_trades_today": BOT_STATE.get("snipe_trades_today", []),
@@ -295,10 +301,10 @@ def _save_state():
             # Per-game exposure tracking
             "game_exposure": _GAME_EXPOSURE,
             # Performance history for line chart (keep last _PERF_HISTORY_MAX)
-            "perf_history": _PERF_HISTORY[-_PERF_HISTORY_MAX:],
+            "perf_history": _perf_for_save,
             # HWM removed — raw Kalshi data is source of truth now
             # Paper trades (persist across restarts, not day-dependent)
-            "paper_trades": _PAPER_TRADES[-_PAPER_TRADES_MAX:],
+            "paper_trades": _paper_for_save,
             # Timestamp for date-check on load
             "save_date": datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d"),
         }
@@ -414,9 +420,10 @@ def _load_state():
 
         saved_cat_stats = data.get("category_stats", {})
         if saved_cat_stats:
-            _CATEGORY_STATS.clear()
-            _CATEGORY_STATS.update(saved_cat_stats)
-            print(f"[STATE] Restored {len(_CATEGORY_STATS)} category stats from disk")
+            with _CATEGORY_STATS_LOCK:
+                _CATEGORY_STATS.clear()
+                _CATEGORY_STATS.update(saved_cat_stats)
+            print(f"[STATE] Restored {len(saved_cat_stats)} category stats from disk")
 
         saved_learning = data.get("learning_state", {})
         if saved_learning:
@@ -973,7 +980,8 @@ def _rebuild_journal_from_kalshi():
         print(f"[JOURNAL-REBUILD] Fetched market info for {len(title_map)}/{len(unique_tickers)} tickers")
 
         # Rebuild category stats from scratch using ALL settled positions
-        _CATEGORY_STATS.clear()
+        with _CATEGORY_STATS_LOCK:
+            _CATEGORY_STATS.clear()
 
         for pos in positions_list:
             ticker = pos.get("ticker", "")
@@ -1045,13 +1053,14 @@ def _rebuild_journal_from_kalshi():
 
             # Update category stats for ALL settled positions
             cat = classify_market_category(title, ticker)
-            if cat not in _CATEGORY_STATS:
-                _CATEGORY_STATS[cat] = {"wins": 0, "losses": 0, "pnl": 0.0}
-            if pnl_usd > 0.005:
-                _CATEGORY_STATS[cat]["wins"] += 1
-            elif pnl_usd < -0.005:
-                _CATEGORY_STATS[cat]["losses"] += 1
-            _CATEGORY_STATS[cat]["pnl"] += pnl_usd
+            with _CATEGORY_STATS_LOCK:
+                if cat not in _CATEGORY_STATS:
+                    _CATEGORY_STATS[cat] = {"wins": 0, "losses": 0, "pnl": 0.0}
+                if pnl_usd > 0.005:
+                    _CATEGORY_STATS[cat]["wins"] += 1
+                elif pnl_usd < -0.005:
+                    _CATEGORY_STATS[cat]["losses"] += 1
+                _CATEGORY_STATS[cat]["pnl"] += pnl_usd
 
             # Add to journal if not already present
             if ticker in existing_tickers:
@@ -2685,10 +2694,11 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
     except requests.exceptions.HTTPError as e:
         body = ""
         try:
-            body = e.response.text[:300]
+            body = (e.response.text if e.response else str(e))[:300]
         except Exception:
             pass
-        print(f"[ORDER] REJECT {e.response.status_code}: {ticker} {side} @ {fill_price}c — {body}")
+        _status = e.response.status_code if e.response else "N/A"
+        print(f"[ORDER] REJECT {_status}: {ticker} {side} @ {fill_price}c — {body}")
         return {"error": str(e), "response_body": body}
     except Exception as e:
         return {"error": str(e)}
@@ -2734,7 +2744,7 @@ def sell_kalshi_position(ticker, side, price_cents, count=1, resting=False):
     except requests.exceptions.HTTPError as e:
         body = ""
         try:
-            body = e.response.text
+            body = (e.response.text if e.response else str(e))[:300]
         except Exception:
             pass
         return {"error": str(e), "response_body": body}
@@ -3350,6 +3360,7 @@ _LEARNING_STATE_LOCK = _threading.Lock() # protects _LEARNING_STATE updates from
 _PERF_HISTORY_LOCK = _threading.Lock()   # protects _PERF_HISTORY from concurrent read/write
 _STATE_FILE_LOCK = _threading.Lock()     # protects _save_state() from concurrent writes (bg thread + request handlers)
 _PAPER_TRADES_LOCK = _threading.Lock()   # protects _PAPER_TRADES from concurrent bg thread write + Flask read
+_CATEGORY_STATS_LOCK = _threading.Lock() # protects _CATEGORY_STATS from concurrent read/write
 _EVENTS_BET_TODAY = set()  # shared across all strategies
 _similarity_local = _threading.local()
 
@@ -7909,13 +7920,14 @@ _known_settled = set()  # tickers we already processed
 def _update_category_stats(ticker, title, won, pnl_usd):
     """Track win rate by category for auto-adjustment."""
     cat = classify_market_category(title or "", ticker or "")
-    if cat not in _CATEGORY_STATS:
-        _CATEGORY_STATS[cat] = {"wins": 0, "losses": 0, "pnl": 0.0}
-    if won:
-        _CATEGORY_STATS[cat]["wins"] += 1
-    else:
-        _CATEGORY_STATS[cat]["losses"] += 1
-    _CATEGORY_STATS[cat]["pnl"] += pnl_usd
+    with _CATEGORY_STATS_LOCK:
+        if cat not in _CATEGORY_STATS:
+            _CATEGORY_STATS[cat] = {"wins": 0, "losses": 0, "pnl": 0.0}
+        if won:
+            _CATEGORY_STATS[cat]["wins"] += 1
+        else:
+            _CATEGORY_STATS[cat]["losses"] += 1
+        _CATEGORY_STATS[cat]["pnl"] += pnl_usd
 
 def _category_multiplier(ticker, title):
     """Dynamic bet size multiplier based on ACTUAL category performance.
@@ -7924,9 +7936,10 @@ def _category_multiplier(ticker, title):
     Needs 3+ bets in a category before adjusting — avoids overreacting to 1 win.
     """
     cat = classify_market_category(title or "", ticker or "")
-    stats = _CATEGORY_STATS.get(cat, {})
-    wins = stats.get("wins", 0)
-    losses = stats.get("losses", 0)
+    with _CATEGORY_STATS_LOCK:
+        stats = _CATEGORY_STATS.get(cat, {})
+        wins = stats.get("wins", 0)
+        losses = stats.get("losses", 0)
     total = wins + losses
 
     # Not enough data — use neutral multiplier
@@ -8697,7 +8710,8 @@ def _learning_engine():
 
     # 1. Category performance
     cat_weights = _compute_bucket_stats(settled, lambda t: t.get("category", "other"))
-    _LEARNING_STATE["parameters"]["category_weights"] = cat_weights
+    with _LEARNING_STATE_LOCK:
+        _LEARNING_STATE["parameters"]["category_weights"] = cat_weights
     # Find best/worst categories
     for cat, stats in sorted(cat_weights.items(), key=lambda x: x[1]["win_rate"], reverse=True):
         if stats["confidence"] >= 0.5:
@@ -8708,11 +8722,13 @@ def _learning_engine():
 
     # 2. Sport type performance
     sport_weights = _compute_bucket_stats(settled, lambda t: t.get("sport_type", "other"))
-    _LEARNING_STATE["parameters"]["sport_weights"] = sport_weights
+    with _LEARNING_STATE_LOCK:
+        _LEARNING_STATE["parameters"]["sport_weights"] = sport_weights
 
     # 3. Price range performance
     price_weights = _compute_bucket_stats(settled, lambda t: _price_bucket(t.get("price_cents")))
-    _LEARNING_STATE["parameters"]["price_range_weights"] = price_weights
+    with _LEARNING_STATE_LOCK:
+        _LEARNING_STATE["parameters"]["price_range_weights"] = price_weights
     best_price = max(price_weights.items(), key=lambda x: x[1]["win_rate"], default=(None, None))
     if best_price[1] and best_price[1]["confidence"] >= 0.5:
         insights.append(f"💰 Best price range: {best_price[0]}¢ ({best_price[1]['win_rate']:.0%} win rate)")
@@ -8721,7 +8737,8 @@ def _learning_engine():
     game_trades = [t for t in settled if t.get("game_margin") is not None]
     if len(game_trades) >= 5:
         game_weights = _compute_bucket_stats(game_trades, _game_situation_key)
-        _LEARNING_STATE["parameters"]["game_situation_weights"] = game_weights
+        with _LEARNING_STATE_LOCK:
+            _LEARNING_STATE["parameters"]["game_situation_weights"] = game_weights
 
     # 5. ESPN edge performance
     edge_trades = [t for t in settled if t.get("espn_edge") is not None]
@@ -8739,7 +8756,8 @@ def _learning_engine():
             else:
                 return "20%+"
         edge_weights = _compute_bucket_stats(edge_trades, _edge_bucket)
-        _LEARNING_STATE["parameters"]["edge_weights"] = edge_weights
+        with _LEARNING_STATE_LOCK:
+            _LEARNING_STATE["parameters"]["edge_weights"] = edge_weights
         # Find minimum profitable edge
         for bucket in ["negative", "0-5%", "5-10%", "10-20%", "20%+"]:
             if bucket in edge_weights and edge_weights[bucket].get("win_rate", 0) >= 0.10:
@@ -8748,15 +8766,18 @@ def _learning_engine():
 
     # 6. Time of day performance
     hour_weights = _compute_bucket_stats(settled, lambda t: str(t.get("entry_hour", "?")))
-    _LEARNING_STATE["parameters"]["hour_weights"] = hour_weights
+    with _LEARNING_STATE_LOCK:
+        _LEARNING_STATE["parameters"]["hour_weights"] = hour_weights
 
     # 7. Strategy performance
     strat_weights = _compute_bucket_stats(settled, lambda t: t.get("strategy", "unknown"))
-    _LEARNING_STATE["parameters"]["strategy_weights"] = strat_weights
+    with _LEARNING_STATE_LOCK:
+        _LEARNING_STATE["parameters"]["strategy_weights"] = strat_weights
 
     # 8. Market type performance
     mtype_weights = _compute_bucket_stats(settled, lambda t: t.get("market_type", "unknown"))
-    _LEARNING_STATE["parameters"]["market_type_weights"] = mtype_weights
+    with _LEARNING_STATE_LOCK:
+        _LEARNING_STATE["parameters"]["market_type_weights"] = mtype_weights
 
     # 9a. Hours-to-close bucketing — discover optimal entry timing relative to settlement
     def _htc_bucket(t):
@@ -8776,7 +8797,8 @@ def _learning_engine():
     htc_trades = [t for t in settled if t.get("hours_to_close") is not None]
     if len(htc_trades) >= 5:
         htc_weights = _compute_bucket_stats(htc_trades, _htc_bucket)
-        _LEARNING_STATE["parameters"]["hours_to_close_weights"] = htc_weights
+        with _LEARNING_STATE_LOCK:
+            _LEARNING_STATE["parameters"]["hours_to_close_weights"] = htc_weights
         best_htc = max(htc_weights.items(), key=lambda x: x[1]["win_rate"], default=(None, None))
         if best_htc[1] and best_htc[1]["confidence"] >= 0.5:
             insights.append(f"⏰ Best entry window: {best_htc[0]} before close ({best_htc[1]['win_rate']:.0%} WR)")
@@ -8799,7 +8821,8 @@ def _learning_engine():
     secs_trades = [t for t in settled if t.get("seconds_remaining_at_entry") is not None]
     if len(secs_trades) >= 5:
         secs_weights = _compute_bucket_stats(secs_trades, lambda t: _secs_bucket(t) or "unknown")
-        _LEARNING_STATE["parameters"]["seconds_remaining_weights"] = secs_weights
+        with _LEARNING_STATE_LOCK:
+            _LEARNING_STATE["parameters"]["seconds_remaining_weights"] = secs_weights
 
     # 9c. CLV (closing line value) by strategy — strategies with positive CLV
     # are genuinely skilled even if variance hides it. Use this as a secondary
@@ -8830,7 +8853,8 @@ def _learning_engine():
                 insights.append(f"🎯 CLV+ strategy: {strat} avg {avg:.1f}c over {b['count']} trades")
             elif avg <= -1.0:
                 insights.append(f"⚠️  CLV- strategy: {strat} avg {avg:.1f}c over {b['count']} trades")
-    _LEARNING_STATE["clv_by_strategy"] = clv_summary
+    with _LEARNING_STATE_LOCK:
+        _LEARNING_STATE["clv_by_strategy"] = clv_summary
 
     # 10. Mark-to-market entry timing skill (per strategy)
     # Positions that draw down immediately after entry signal bad timing even
@@ -8860,7 +8884,8 @@ def _learning_engine():
         }
         if avg_worst <= -25 and b["n"] >= 10:
             insights.append(f"⏰ Bad entry timing: {strat} avg -{abs(avg_worst)}% drawdown on entry")
-    _LEARNING_STATE["mtm_by_strategy"] = mtm_summary
+    with _LEARNING_STATE_LOCK:
+        _LEARNING_STATE["mtm_by_strategy"] = mtm_summary
 
     # 11. Loss post-mortem breakdown
     loss_tags = {}
@@ -8869,7 +8894,8 @@ def _learning_engine():
             continue
         tag = t.get("loss_category") or "untagged"
         loss_tags[tag] = loss_tags.get(tag, 0) + 1
-    _LEARNING_STATE["loss_categories"] = loss_tags
+    with _LEARNING_STATE_LOCK:
+        _LEARNING_STATE["loss_categories"] = loss_tags
     if loss_tags:
         top_loss = max(loss_tags.items(), key=lambda x: x[1])
         if top_loss[1] >= 5:
@@ -8893,7 +8919,8 @@ def _learning_engine():
             "win_rate": round(w / len(trades), 3),
             "sample_size": len(trades),
         }
-    _LEARNING_STATE["consensus_divergence"] = divergence_stats
+    with _LEARNING_STATE_LOCK:
+        _LEARNING_STATE["consensus_divergence"] = divergence_stats
     # If "wide" divergence wins MORE than "tight" -> model is alpha; else overfitting
     if "wide" in divergence_stats and "tight" in divergence_stats:
         _wr_wide = divergence_stats["wide"]["win_rate"]
@@ -8904,9 +8931,10 @@ def _learning_engine():
             insights.append(f"⚠️  Model overfitting: wide divergence LOSES ({_wr_wide:.0%} vs {_wr_tight:.0%})")
 
     # Update state
-    _LEARNING_STATE["version"] = _LEARNING_STATE.get("version", 0) + 1
-    _LEARNING_STATE["last_run"] = datetime.datetime.utcnow().isoformat() + "Z"
-    _LEARNING_STATE["insights"] = insights[-25:]  # keep last 25 (grew from 20)
+    with _LEARNING_STATE_LOCK:
+        _LEARNING_STATE["version"] = _LEARNING_STATE.get("version", 0) + 1
+        _LEARNING_STATE["last_run"] = datetime.datetime.utcnow().isoformat() + "Z"
+        _LEARNING_STATE["insights"] = insights[-25:]  # keep last 25 (grew from 20)
 
     _log_activity(
         f"🧠 Learning v{_LEARNING_STATE['version']}: {len(settled)} trades analyzed, "
