@@ -13152,32 +13152,32 @@ def settled_positions():
             c["win_rate"] = round(c["wins"] / max(1, c["wins"] + c["losses"]) * 100, 1)
             c["pnl_usd"] = round(c["pnl_usd"], 2)
 
-        # Bot-only filtered stats (excludes manual, moonshark_manual, wta_wheel, quant, kalshi_fill)
-        _bot_exclude = {'manual', 'moonshark_manual', 'wta_wheel', 'quant'}
-        _bot_settled = [s for s in settled if s.get("strategy", "") not in _bot_exclude and s.get("source") != "kalshi_fill"]
-        _bot_wins = sum(1 for s in _bot_settled if s.get("won") is True)
-        _bot_losses = sum(1 for s in _bot_settled if s.get("won") is False)
-        _bot_pnl = round(sum(s.get("pnl_usd", 0) for s in _bot_settled), 2)
-        _bot_total = _bot_wins + _bot_losses
-
-        # Use TRADE JOURNAL if it has settled data, otherwise fall back to
-        # Kalshi reconstruction (which overcounts but is better than 0W/0L)
-        _journal_wins = sum(1 for jt in _journal_snap if jt.get("result") == "win")
-        _journal_losses = sum(1 for jt in _journal_snap if jt.get("result") == "loss")
-        _journal_pnl = round(sum(float(jt.get("pnl_usd") or jt.get("pnl") or 0) for jt in _journal_snap if jt.get("result") in ("win", "loss")), 2)
-        _journal_total = _journal_wins + _journal_losses
-        if _journal_total > 0:
-            # Journal has settled data — use it (more accurate)
-            _final_wins = _journal_wins
-            _final_losses = _journal_losses
-            _final_pnl = _journal_pnl
-        else:
-            # Journal empty (after deploy wipe) — use reconstruction as fallback
-            _final_wins = _bot_wins
-            _final_losses = _bot_losses
-            _final_pnl = _bot_pnl
+        # ── SINGLE SOURCE OF TRUTH for W/L ──
+        # Count directly from the settled[] array (which has all 3 stages of
+        # reconstruction already merged).  This is the SAME array the Performance
+        # tab JS iterates, so header and Performance will always agree.
+        _final_wins = sum(1 for s in settled if s.get("won") is True)
+        _final_losses = sum(1 for s in settled if s.get("won") is False)
+        _final_pnl = round(sum(s.get("pnl_usd", 0) for s in settled if s.get("won") is not None), 2)
         _final_total = _final_wins + _final_losses
-        print(f"[SETTLED] Journal: {_journal_wins}W/{_journal_losses}L | Reconstruction: {_bot_wins}W/{_bot_losses}L | Using: {'journal' if _journal_total > 0 else 'reconstruction'}")
+
+        # High-water mark: W/L counts should NEVER go down.  Kalshi can prune
+        # old positions or zero out data over time; HWM protects against that.
+        if _final_wins > _SETTLED_HWM["wins"]:
+            _SETTLED_HWM["wins"] = _final_wins
+        if _final_losses > _SETTLED_HWM["losses"]:
+            _SETTLED_HWM["losses"] = _final_losses
+        if _final_pnl < _SETTLED_HWM.get("total_pnl", 0.0) and _final_total < (_SETTLED_HWM["wins"] + _SETTLED_HWM["losses"]):
+            # Fewer trades than HWM = Kalshi pruned data; use HWM
+            _final_wins = _SETTLED_HWM["wins"]
+            _final_losses = _SETTLED_HWM["losses"]
+            _final_total = _final_wins + _final_losses
+            print(f"[SETTLED] HWM triggered: using {_final_wins}W/{_final_losses}L (Kalshi returned fewer trades)")
+        else:
+            # Normal — update HWM
+            _SETTLED_HWM["total_pnl"] = _final_pnl
+
+        print(f"[SETTLED] Final W/L from settled array: {_final_wins}W/{_final_losses}L (${_final_pnl:.2f}) from {len(settled)} settled trades")
 
         result = {
             "settled": settled,
