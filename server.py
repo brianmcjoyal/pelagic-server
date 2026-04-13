@@ -11343,10 +11343,26 @@ def _build_tradeshark_icon_png(size=180):
     lower_lip_top = lower_teeth_top + tooth_h  # top of lower lip (base of lower teeth)
     jaw_bot = lower_lip_top + lip_thick        # bottom of lower lip
 
-    # Stem — extra slim, starts from bottom of jaw
-    sL = int(size * 0.45)
-    sR = int(size * 0.55)
-    sT, sB = jaw_bot, size - pad
+    # Stem — green trading candle (thick body + thin wicks)
+    candle_top = jaw_bot                        # top of entire candle (upper wick tip)
+    candle_bot = size - pad                     # bottom of entire candle (lower wick tip)
+    candle_h = candle_bot - candle_top
+
+    # Wick (thin line top and bottom)
+    wick_hw = max(1, int(size * 0.012))         # half-width of wick
+    wick_cx = size // 2                         # center x
+    wick_top = candle_top                       # upper wick starts at jaw
+    wick_bot = candle_bot                       # lower wick goes to bottom
+
+    # Body (thick rectangle, ~60% of candle height, centered)
+    body_hw = int(size * 0.06)                  # half-width of body
+    body_top = candle_top + int(candle_h * 0.15)  # body starts 15% down
+    body_bot = candle_bot - int(candle_h * 0.12)  # body ends 12% from bottom
+
+    # For stem hit-testing (used by teeth to skip stem area)
+    sL = wick_cx - body_hw
+    sR = wick_cx + body_hw
+    sT, sB = candle_top, candle_bot
 
     # Tooth positions across the jaw
     tooth_w = int(size * 0.035)
@@ -11508,15 +11524,38 @@ def _build_tradeshark_icon_png(size=180):
                 return allowed_half + 0.5 - ddx
         return 0.0
 
+    def _in_candle_wick(x, y):
+        """Thin wick line above and below the candle body."""
+        if y < wick_top or y >= wick_bot:
+            return 0.0
+        # Only draw wick OUTSIDE the body area
+        if body_top <= y < body_bot:
+            return 0.0
+        ddx = abs(x - wick_cx)
+        if ddx <= wick_hw + 0.5:
+            if ddx <= wick_hw - 0.5:
+                return 1.0
+            return wick_hw + 0.5 - ddx
+        return 0.0
+
+    def _in_candle_body(x, y):
+        """Thick candle body rectangle."""
+        return _in_rounded_rect(x, y, wick_cx - body_hw, body_top, wick_cx + body_hw, body_bot, cr)
+
     def _in_T(x, y):
         """Coverage of (x,y) inside the T shape."""
         a_upper_lip = _in_upper_lip(x, y)
         a_lower_lip = _in_lower_lip(x, y)
         a_connector = _in_jaw_connector(x, y)
-        a_stem = _in_rounded_rect(x, y, sL, sT, sR, sB, cr)
+        a_wick = _in_candle_wick(x, y)
+        a_body = _in_candle_body(x, y)
         a_teeth_d = _in_teeth_down(x, y)
         a_teeth_u = _in_teeth_up(x, y)
-        return min(1.0, a_upper_lip + a_lower_lip + a_connector + a_stem + a_teeth_d + a_teeth_u)
+        return min(1.0, a_upper_lip + a_lower_lip + a_connector + a_wick + a_body + a_teeth_d + a_teeth_u)
+
+    def _is_candle_pixel(x, y):
+        """Check if this pixel is part of the green candle (body or wick)."""
+        return _in_candle_body(x, y) > 0.001 or _in_candle_wick(x, y) > 0.001
 
     def _is_tooth_pixel(x, y):
         """Check if this pixel is part of any tooth (for green coloring)."""
@@ -11559,16 +11598,19 @@ def _build_tradeshark_icon_png(size=180):
         (int(size * 0.50), int(size * 0.42), max(1, int(size * 0.018))),  # where stem meets bar
     ]
 
-    # Green color for shark teeth (TradeShark green)
-    tooth_color = (0x00, 0xdc, 0x5a)
+    # Green colors
+    tooth_color = (0x00, 0xdc, 0x5a)       # TradeShark green for teeth
+    candle_body_color = (0x00, 0xc8, 0x4e)  # Candle body green (slightly deeper)
+    candle_wick_color = (0x00, 0xa0, 0x3e)  # Wick green (darker/thinner look)
 
     # Render
     for y in range(size):
         for x in range(size):
             cov = _in_T(x, y)
             if cov > 0.001:
-                # Determine if this pixel is a tooth
                 is_tooth = _is_tooth_pixel(x, y)
+                is_candle = _is_candle_pixel(x, y)
+                is_body = _in_candle_body(x, y) > 0.001
 
                 if is_tooth:
                     # Green teeth — brighter at base, darker at tip
@@ -11576,8 +11618,18 @@ def _build_tradeshark_icon_png(size=180):
                     dist_from_mid = abs(y - mid_y) / max(1, tooth_h + mouth_h)
                     brightness = max(0.3, min(1.0, 1.0 - 0.35 * (1.0 - dist_from_mid)))
                     color = tuple(max(0, min(255, int(tooth_color[i] * brightness))) for i in range(3))
+                elif is_candle:
+                    if is_body:
+                        # Candle body — solid green with subtle left-to-right shading
+                        dx_frac = (x - (wick_cx - body_hw)) / max(1, body_hw * 2)
+                        shade = 0.85 + 0.15 * (1.0 - abs(dx_frac - 0.4) * 1.5)
+                        shade = max(0.7, min(1.0, shade))
+                        color = tuple(max(0, min(255, int(candle_body_color[i] * shade))) for i in range(3))
+                    else:
+                        # Wick — darker green thin line
+                        color = candle_wick_color
                 else:
-                    t = (y - jaw_top) / max(1, sB - jaw_top)
+                    t = (y - jaw_top) / max(1, candle_bot - jaw_top)
                     color = _gold_at(t)
 
                     # Diagonal glimmer: brighten pixels near the glimmer line
@@ -11947,7 +11999,7 @@ def tradeshark_manifest():
         "background_color": "#0d0d0d",
         "theme_color": "#c9963a",
         "icons": [
-            {"src": "/apple-touch-icon.png?v=9", "sizes": "180x180", "type": "image/png", "purpose": "any"},
+            {"src": "/apple-touch-icon.png?v=10", "sizes": "180x180", "type": "image/png", "purpose": "any"},
             {"src": "/icon-192.png?v=2", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
         ],
     })
@@ -19574,8 +19626,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <title>TradeShark</title>
 <!-- PWA / iOS Add-to-Home-Screen -->
 <link rel="icon" type="image/png" href="/favicon.ico?v=2">
-<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=9">
-<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=9">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=10">
+<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=10">
 <link rel="manifest" href="/manifest.json?v=2">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
