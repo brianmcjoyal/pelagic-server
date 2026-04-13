@@ -11322,131 +11322,30 @@ def _build_tradeshark_icon_png(size=180):
     # Build RGBA pixel buffer
     px = [bg + (255,)] * (size * size)
 
-    # T dimensions — shark jaw crossbar + slim stem
+    # T dimensions — crossbar with shark teeth + slim stem
     pad = int(size * 0.14)
     cr = max(3, int(size * 0.04))  # corner radius
 
-    # Crossbar (jaw) dimensions
-    bL, bR = pad, size - pad          # full width
-    bT = pad                           # top of jaw
-    jaw_thick = int(size * 0.08)       # thickness of the upper/lower jaw bands
-    jaw_gap = int(size * 0.10)         # hollow opening height in the middle
-    bB = bT + jaw_thick * 2 + jaw_gap  # total jaw height
+    # Crossbar — gold horizontal bar
+    bL, bR = pad, size - pad
+    bT, bB = pad, pad + int(size * 0.17)
+    bar_mid_y = (bT + bB) / 2.0  # vertical center of crossbar
 
-    # The jaw has 3 zones:
-    #   Upper jaw:  bT  to  bT + jaw_thick  (solid band, curves up at edges)
-    #   Hollow:     bT + jaw_thick  to  bT + jaw_thick + jaw_gap  (empty / mouth opening)
-    #   Lower jaw:  bT + jaw_thick + jaw_gap  to  bB  (solid band with teeth hanging off it)
-    upper_top = bT
-    upper_bot = bT + jaw_thick
-    lower_top = bT + jaw_thick + jaw_gap
-    lower_bot = bB
-
-    # The upper jaw curves upward at the edges (like a smile/open mouth)
-    # and the lower jaw curves downward at the edges
-    jaw_cx = size / 2.0     # center x of the jaw
-    jaw_hw = (bR - bL) / 2.0  # half-width of jaw
-
-    # Stem — extra slim (10% width), starts from bottom of jaw
+    # Stem — extra slim (10% width)
     sL = int(size * 0.45)
     sR = int(size * 0.55)
-    sT, sB = lower_bot, size - pad
+    sT, sB = bB, size - pad
 
-    # Shark teeth along bottom of lower jaw pointing downward (green)
-    tooth_h = int(size * 0.055)
-    tooth_w = int(size * 0.04)
+    # Tooth dimensions
+    tooth_h = int(size * 0.06)        # how far teeth extend
+    tooth_w = int(size * 0.04)        # width of each tooth base
     tooth_gap_px = max(1, int(size * 0.008))
+    # Build tooth x positions across the crossbar
     _teeth = []
     _tx = bL + tooth_w // 2 + 2
     while _tx + tooth_w // 2 < bR - 2:
         _teeth.append(_tx)
         _tx += tooth_w + tooth_gap_px
-
-    # Upper teeth (pointing UP into the mouth from the upper jaw bottom edge)
-    upper_tooth_h = int(size * 0.04)  # smaller teeth on upper jaw
-
-    def _jaw_curve(x, is_upper):
-        """Return how much the jaw edge curves at position x.
-        At the center: 0 (flat). At the edges: curves away (up for upper, down for lower).
-        This creates the open-mouth shape."""
-        dx = abs(x - jaw_cx) / jaw_hw  # 0 at center, 1 at edge
-        dx = max(0.0, min(1.0, dx))
-        # Quadratic curve — edges lift/drop more than middle
-        curve_amount = dx * dx * size * 0.06
-        return curve_amount
-
-    def _in_upper_jaw(x, y):
-        """Coverage for the upper jaw band (curves up at edges)."""
-        if x < bL or x >= bR:
-            return 0.0
-        curve = _jaw_curve(x, True)
-        local_top = upper_top - curve
-        local_bot = upper_bot - curve * 0.3  # bottom curves less so jaw gets thicker at edges
-        if y < local_top - 0.5 or y >= local_bot + 0.5:
-            return 0.0
-        # AA at edges
-        if y < local_top + 0.5:
-            return y - (local_top - 0.5)
-        if y >= local_bot - 0.5:
-            return local_bot + 0.5 - y
-        return 1.0
-
-    def _in_lower_jaw(x, y):
-        """Coverage for the lower jaw band (curves down at edges)."""
-        if x < bL or x >= bR:
-            return 0.0
-        curve = _jaw_curve(x, False)
-        local_top = lower_top + curve * 0.3
-        local_bot = lower_bot + curve
-        if y < local_top - 0.5 or y >= local_bot + 0.5:
-            return 0.0
-        if y < local_top + 0.5:
-            return y - (local_top - 0.5)
-        if y >= local_bot - 0.5:
-            return local_bot + 0.5 - y
-        return 1.0
-
-    def _in_lower_tooth(x, y):
-        """Teeth hanging DOWN from lower jaw."""
-        curve = _jaw_curve(x, False)
-        tooth_base_y = lower_bot + curve  # follows the jaw curve
-        if y < tooth_base_y or y >= tooth_base_y + tooth_h:
-            return 0.0
-        if sL - 1 <= x < sR + 1:
-            return 0.0
-        half_w = tooth_w / 2.0
-        for tcx in _teeth:
-            if sL - 2 <= tcx <= sR + 2:
-                continue
-            dy_frac = (y - tooth_base_y) / tooth_h
-            allowed_half = half_w * (1.0 - dy_frac)
-            ddx = abs(x - tcx)
-            if ddx <= allowed_half + 0.5:
-                if ddx <= allowed_half - 0.5:
-                    return 1.0
-                return allowed_half + 0.5 - ddx
-        return 0.0
-
-    def _in_upper_tooth(x, y):
-        """Teeth pointing UP from upper jaw bottom edge (into the mouth)."""
-        curve = _jaw_curve(x, True)
-        tooth_base_y = upper_bot - curve * 0.3  # follows upper jaw bottom
-        if y < tooth_base_y or y >= tooth_base_y + upper_tooth_h:
-            return 0.0
-        if sL - 1 <= x < sR + 1:
-            return 0.0
-        half_w = tooth_w / 2.0
-        for tcx in _teeth:
-            if sL - 2 <= tcx <= sR + 2:
-                continue
-            dy_frac = (y - tooth_base_y) / upper_tooth_h
-            allowed_half = half_w * (1.0 - dy_frac)
-            ddx = abs(x - tcx)
-            if ddx <= allowed_half + 0.5:
-                if ddx <= allowed_half - 0.5:
-                    return 1.0
-                return allowed_half + 0.5 - ddx
-        return 0.0
 
     def _in_rounded_rect(x, y, L, T, R, B, cr):
         """Test if (x,y) is inside a rounded rect, returns 0.0-1.0 for AA."""
@@ -11477,18 +11376,52 @@ def _build_tradeshark_icon_png(size=180):
                 return cr + 0.5 - dist
         return 1.0
 
+    def _in_top_teeth(x, y):
+        """Green teeth along TOP of crossbar pointing DOWN."""
+        if y < bT or y >= bT + tooth_h:
+            return 0.0
+        half_w = tooth_w / 2.0
+        for tcx in _teeth:
+            dy_frac = (y - bT) / tooth_h  # 0 at base (top), 1 at tip (pointing down)
+            allowed_half = half_w * (1.0 - dy_frac)
+            ddx = abs(x - tcx)
+            if ddx <= allowed_half + 0.5:
+                if ddx <= allowed_half - 0.5:
+                    return 1.0
+                return allowed_half + 0.5 - ddx
+        return 0.0
+
+    def _in_bottom_teeth(x, y):
+        """Green teeth along BOTTOM of crossbar pointing UP."""
+        if y <= bB - tooth_h or y > bB:
+            return 0.0
+        # Skip where stem connects
+        if sL - 1 <= x < sR + 1:
+            return 0.0
+        half_w = tooth_w / 2.0
+        for tcx in _teeth:
+            if sL - 2 <= tcx <= sR + 2:
+                continue
+            dy_frac = (bB - y) / tooth_h  # 0 at base (bottom), 1 at tip (pointing up)
+            allowed_half = half_w * (1.0 - dy_frac)
+            ddx = abs(x - tcx)
+            if ddx <= allowed_half + 0.5:
+                if ddx <= allowed_half - 0.5:
+                    return 1.0
+                return allowed_half + 0.5 - ddx
+        return 0.0
+
     def _in_T(x, y):
-        """Coverage of (x,y) inside the T shape: shark jaw + stem."""
-        a_upper = _in_upper_jaw(x, y)
-        a_lower = _in_lower_jaw(x, y)
+        """Coverage of (x,y) inside the T shape."""
+        a_bar = _in_rounded_rect(x, y, bL, bT, bR, bB, cr)
         a_stem = _in_rounded_rect(x, y, sL, sT, sR, sB, cr)
-        a_lower_teeth = _in_lower_tooth(x, y)
-        a_upper_teeth = _in_upper_tooth(x, y)
-        return min(1.0, a_upper + a_lower + a_stem + a_lower_teeth + a_upper_teeth)
+        a_top_teeth = _in_top_teeth(x, y)
+        a_bot_teeth = _in_bottom_teeth(x, y)
+        return min(1.0, a_bar + a_stem + a_top_teeth + a_bot_teeth)
 
     def _is_tooth_pixel(x, y):
         """Check if this pixel is part of any tooth (for green coloring)."""
-        return _in_lower_tooth(x, y) > 0.001 or _in_upper_tooth(x, y) > 0.001
+        return _in_top_teeth(x, y) > 0.001 or _in_bottom_teeth(x, y) > 0.001
 
     # Gold gradient (top-to-bottom, 5 stops for richness)
     _gold_stops = [
@@ -11536,9 +11469,8 @@ def _build_tradeshark_icon_png(size=180):
 
                 if is_tooth:
                     # Green teeth — slight gradient darker at tip
-                    # Use vertical position within total jaw area as gradient
-                    tip_frac = min(1.0, max(0.0, (y - upper_bot) / max(1, tooth_h + jaw_gap + jaw_thick)))
-                    color = tuple(int(tooth_color[i] * (1.0 - 0.25 * tip_frac)) for i in range(3))
+                    dist_from_bar = min(abs(y - bT), abs(y - bB)) / max(1, tooth_h)
+                    color = tuple(int(tooth_color[i] * (1.0 - 0.3 * dist_from_bar)) for i in range(3))
                 else:
                     t = (y - bT) / max(1, sB - bT)
                     color = _gold_at(t)
@@ -11910,7 +11842,7 @@ def tradeshark_manifest():
         "background_color": "#0d0d0d",
         "theme_color": "#c9963a",
         "icons": [
-            {"src": "/apple-touch-icon.png?v=5", "sizes": "180x180", "type": "image/png", "purpose": "any"},
+            {"src": "/apple-touch-icon.png?v=6", "sizes": "180x180", "type": "image/png", "purpose": "any"},
             {"src": "/icon-192.png?v=2", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
         ],
     })
@@ -19537,8 +19469,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <title>TradeShark</title>
 <!-- PWA / iOS Add-to-Home-Screen -->
 <link rel="icon" type="image/png" href="/favicon.ico?v=2">
-<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=5">
-<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=5">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=6">
+<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=6">
 <link rel="manifest" href="/manifest.json?v=2">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
