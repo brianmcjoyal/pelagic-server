@@ -8385,8 +8385,10 @@ def _paper_trade_stats():
     for p in _pts:
         strat = p.get("strategy", "unknown")
         if strat not in _strategies:
-            _strategies[strat] = {"total": 0, "wins": 0, "losses": 0, "pending": 0, "pnl_cents": 0, "clv_5_sum": 0, "clv_5_count": 0}
+            _strategies[strat] = {"total": 0, "wins": 0, "losses": 0, "pending": 0, "pnl_cents": 0, "clv_5_sum": 0, "clv_5_count": 0, "entry_price_sum": 0, "edge_sum": 0}
         _strategies[strat]["total"] += 1
+        _strategies[strat]["entry_price_sum"] += p.get("entry_price", 0) or 0
+        _strategies[strat]["edge_sum"] += p.get("edge", 0) or 0
         if p.get("result") == "win":
             _strategies[strat]["wins"] += 1
             _strategies[strat]["pnl_cents"] += p.get("pnl_cents", 0) or 0
@@ -8410,6 +8412,8 @@ def _paper_trade_stats():
             "win_rate": round(s["wins"] / max(1, _s_settled) * 100, 1),
             "pnl_cents": round(s["pnl_cents"], 1),
             "clv_5min_avg": round(s["clv_5_sum"] / s["clv_5_count"], 2) if s["clv_5_count"] > 0 else None,
+            "avg_entry_price": round(s["entry_price_sum"] / max(1, s["total"]), 1),
+            "avg_edge": round(s["edge_sum"] / max(1, s["total"]) * 100, 1),
         }
 
     return {
@@ -8427,7 +8431,7 @@ def _paper_trade_stats():
         "clv_5min_count": len(clv_5),
         "verdict": verdict,
         "by_strategy": by_strategy,
-        "trades": _pts[-20:],  # last 20 for display
+        "trades": _pts[-50:],  # last 50 for display
     }
 
 
@@ -23943,6 +23947,7 @@ async function loadPaperTrades(force) {
     var stratGrid = document.getElementById('paper-strategy-grid');
     var byStrat = data.by_strategy || {};
     var stratKeys = Object.keys(byStrat);
+    var _stratColors = {sniper:'#ffb400',moonshark:'#e040fb',closegame:'#00d4ff',floor:'#00e5ff',swing:'#ff9100',goalie:'#76ff03',latency:'#00dc5a'};
     if (stratKeys.length > 0) {
       var sh = '';
       stratKeys.sort(function(a,b){ return (byStrat[b].total||0)-(byStrat[a].total||0); });
@@ -23951,44 +23956,143 @@ async function loadPaperTrades(force) {
         var sv = byStrat[sk];
         var sSettled = (sv.wins||0) + (sv.losses||0);
         var sWR = sSettled > 0 ? ((sv.wins||0)/sSettled*100).toFixed(0) : '--';
+        var sWRNum = sSettled > 0 ? (sv.wins||0)/sSettled*100 : 0;
+        var sWRColor = sWRNum >= 55 ? '#00dc5a' : sWRNum >= 45 ? '#ffb400' : sWRNum > 0 ? '#ff4444' : '#888';
         var sClv = sv.clv_5min_avg;
         var sClvStr = sClv !== null && sClv !== undefined ? ((sClv>=0?'+':'')+sClv+'c') : '--';
         var sClvColor = sClv > 0 ? '#00dc5a' : sClv < 0 ? '#ff4444' : '#888';
         var sPnl = sv.pnl_cents ? ((sv.pnl_cents/100).toFixed(2)) : '0.00';
         var sPnlColor = (sv.pnl_cents||0) >= 0 ? '#00dc5a' : '#ff4444';
+        var sBadgeColor = _stratColors[sk] || '#888';
+        var sAvgEntry = sv.avg_entry_price !== undefined ? sv.avg_entry_price + 'c' : '--';
+        var sAvgEdge = sv.avg_edge !== undefined ? sv.avg_edge + '%' : '--';
+        // Verdict per strategy
+        var sVerdict = '<span style="color:#888;font-size:10px">-- TESTING</span>';
+        if (sClv !== null && sClv !== undefined && sSettled >= 3) {
+          if (sClv > 0 && sWRNum > 50) sVerdict = '<span style="color:#00dc5a;font-size:10px">EDGE</span>';
+          else if (sClv < 0) sVerdict = '<span style="color:#ff4444;font-size:10px">NO EDGE</span>';
+          else sVerdict = '<span style="color:#ffb400;font-size:10px">TESTING</span>';
+        }
         sh += '<div style="background:#111;border-radius:8px;padding:12px">';
-        sh += '<div style="color:#fff;font-weight:700;font-size:13px;margin-bottom:6px;text-transform:uppercase">' + sk + '</div>';
+        sh += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
+        sh += '<span style="background:' + sBadgeColor + '22;color:' + sBadgeColor + ';font-weight:700;font-size:12px;padding:2px 8px;border-radius:4px;text-transform:uppercase;border:1px solid ' + sBadgeColor + '44">' + sk + '</span>';
+        sh += sVerdict;
+        sh += '</div>';
         sh += '<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px"><span style="color:#666">Trades</span><span style="color:#fff">' + (sv.total||0) + ' (' + (sv.pending||0) + ' pending)</span></div>';
-        sh += '<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px"><span style="color:#666">W/L</span><span>' + (sv.wins||0) + 'W / ' + (sv.losses||0) + 'L (' + sWR + '%)</span></div>';
+        sh += '<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px"><span style="color:#666">W/L</span><span style="color:' + sWRColor + '">' + (sv.wins||0) + 'W / ' + (sv.losses||0) + 'L (' + sWR + '%)</span></div>';
         sh += '<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px"><span style="color:#666">CLV 5min</span><span style="color:' + sClvColor + ';font-weight:700">' + sClvStr + '</span></div>';
-        sh += '<div style="display:flex;justify-content:space-between;font-size:11px"><span style="color:#666">P&L</span><span style="color:' + sPnlColor + '">' + ((sv.pnl_cents||0)>=0?'+$':'-$') + Math.abs(sPnl) + '</span></div>';
+        sh += '<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px"><span style="color:#666">P&L</span><span style="color:' + sPnlColor + '">' + ((sv.pnl_cents||0)>=0?'+$':'-$') + Math.abs(sPnl) + '</span></div>';
+        sh += '<div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px"><span style="color:#666">Avg Entry</span><span style="color:#fff">' + sAvgEntry + '</span></div>';
+        sh += '<div style="display:flex;justify-content:space-between;font-size:11px"><span style="color:#666">Avg Edge</span><span style="color:#ffb400">' + sAvgEdge + '</span></div>';
         sh += '</div>';
       }
       stratGrid.innerHTML = sh;
     }
-    // Recent trades list
+    // Strategy filter buttons
     var trades = data.trades || [];
     var listEl = document.getElementById('paper-trades-list');
-    if (trades.length === 0) {
+    var filterWrap = document.getElementById('paper-filter-buttons');
+    if (!filterWrap) {
+      filterWrap = document.createElement('div');
+      filterWrap.id = 'paper-filter-buttons';
+      filterWrap.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px';
+      listEl.parentNode.insertBefore(filterWrap, listEl);
+    }
+    var tradeStrats = {};
+    for (var fi = 0; fi < trades.length; fi++) { tradeStrats[trades[fi].strategy || 'unknown'] = true; }
+    var filterKeys = Object.keys(tradeStrats).sort();
+    var fHtml = '<button onclick="window._paperFilter=null;loadPaperTrades(true)" style="padding:4px 10px;border-radius:4px;border:1px solid #333;background:' + (!window._paperFilter ? '#333' : '#111') + ';color:#fff;font-size:11px;cursor:pointer">All</button>';
+    for (var fk = 0; fk < filterKeys.length; fk++) {
+      var fName = filterKeys[fk];
+      var fColor = _stratColors[fName] || '#888';
+      var fActive = window._paperFilter === fName;
+      fHtml += '<button onclick="window._paperFilter=\'' + fName + '\';loadPaperTrades(true)" style="padding:4px 10px;border-radius:4px;border:1px solid ' + fColor + '44;background:' + (fActive ? fColor + '33' : '#111') + ';color:' + fColor + ';font-size:11px;cursor:pointer;text-transform:uppercase;font-weight:600">' + fName + '</button>';
+    }
+    filterWrap.innerHTML = fHtml;
+    // Filter trades
+    var filteredTrades = trades;
+    if (window._paperFilter) {
+      filteredTrades = trades.filter(function(t){ return (t.strategy||'unknown') === window._paperFilter; });
+    }
+    // Recent trades list — expandable cards
+    if (filteredTrades.length === 0) {
       listEl.innerHTML = '<div style="color:#555;font-size:12px;text-align:center;padding:20px">No paper trades yet \\u2014 waiting for live games with ESPN divergence</div>';
     } else {
       var html = '';
-      for (var i = trades.length - 1; i >= 0; i--) {
-        var t = trades[i];
+      for (var i = filteredTrades.length - 1; i >= 0; i--) {
+        var t = filteredTrades[i];
         var resultColor = t.result === 'win' ? '#00dc5a' : t.result === 'loss' ? '#ff4444' : '#888';
         var resultText = t.result ? t.result.toUpperCase() : 'PENDING';
-        var pnlText = t.pnl_cents ? ((t.pnl_cents >= 0 ? '+' : '') + (t.pnl_cents / 100).toFixed(2)) : '--';
-        html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #1a1a2e;font-size:12px">';
-        html += '<div style="flex:1"><span style="color:#fff;font-weight:600">' + (t.ticker || 'unknown') + '</span>';
-        html += '<span style="color:#e040fb;margin-left:6px;font-size:10px;text-transform:uppercase">' + (t.strategy || '') + '</span>';
-        html += '<span style="color:#555;margin-left:6px">' + (t.sport || '') + '</span></div>';
-        html += '<div style="flex:0.5;text-align:center"><span style="color:#00d4ff">' + (t.entry_price || '--') + 'c</span>';
-        html += '<span style="color:#666;margin:0 4px">\\u2192</span>';
-        html += '<span style="color:#e040fb">' + (t.espn_prob ? (t.espn_prob * 100).toFixed(0) + '%' : '--') + '</span></div>';
-        html += '<div style="flex:0.4;text-align:center;color:#ffb400">' + (t.edge ? (t.edge * 100).toFixed(1) + '%' : '--') + '</div>';
-        html += '<div style="flex:0.3;text-align:right"><span style="color:' + resultColor + ';font-weight:700">' + resultText + '</span>';
-        if (t.result) html += '<span style="color:#666;margin-left:6px">' + pnlText + '</span>';
+        var pnlText = t.pnl_cents ? ('$' + Math.abs(t.pnl_cents / 100).toFixed(2)) : '';
+        var pnlSign = t.pnl_cents ? (t.pnl_cents >= 0 ? '+' : '-') : '';
+        var tBadgeColor = _stratColors[t.strategy] || '#888';
+        // Format entry time
+        var tTime = '';
+        if (t.entry_time) {
+          try {
+            var dt = new Date(t.entry_ts ? t.entry_ts * 1000 : t.entry_time);
+            if (!isNaN(dt.getTime())) {
+              var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+              var hr = dt.getHours(); var ampm = hr >= 12 ? 'pm' : 'am'; hr = hr % 12 || 12;
+              var mn = dt.getMinutes(); var mnStr = mn < 10 ? '0' + mn : '' + mn;
+              tTime = months[dt.getMonth()] + ' ' + dt.getDate() + ', ' + hr + ':' + mnStr + ampm;
+            }
+          } catch(e){}
+        }
+        // Build insight panel content
+        var espnPct = t.espn_prob ? (t.espn_prob * 100).toFixed(1) + '%' : '--';
+        var kalshiPct = t.kalshi_implied ? (t.kalshi_implied * 100).toFixed(1) + '%' : (t.entry_price ? t.entry_price + '%' : '--');
+        var edgePct = t.edge ? (t.edge * 100).toFixed(1) + '%' : '--';
+        var gameState = t.game_state || 'unknown';
+        // "What We Learned" analysis
+        var learned = '';
+        if (t.result === 'win') {
+          learned = 'Trade won. ';
+          if (t.clv_5min && t.clv_5min > 0) learned += 'CLV confirms the entry was well-timed \\u2014 price moved ' + t.clv_5min + 'c in our favor within 5 min.';
+          else if (t.clv_5min && t.clv_5min <= 0) learned += 'Won despite negative CLV \\u2014 may have been lucky rather than skilled.';
+          else learned += 'Result validates the edge signal at ' + edgePct + ' edge.';
+        } else if (t.result === 'loss') {
+          learned = 'Trade lost. ';
+          if (t.edge && t.edge < 0.05) learned += 'Edge was thin at ' + edgePct + ' \\u2014 consider raising minimum edge threshold.';
+          else if (t.clv_5min && t.clv_5min < -3) learned += 'Heavy negative CLV (' + t.clv_5min + 'c) suggests the market was ahead of ESPN.';
+          else learned += 'Loss at ' + (t.entry_price||'--') + 'c entry. Review if game state (' + gameState + ') was too volatile.';
+        } else {
+          learned = 'Trade still pending settlement. CLV tracking in progress.';
+        }
+        // "Going Forward" insight
+        var forward = '';
+        if (t.result === 'win' && t.clv_5min && t.clv_5min > 0) forward = 'This strategy/game-state combo looks promising. Keep tracking for consistency.';
+        else if (t.result === 'loss' && t.edge && t.edge < 0.05) forward = 'Consider tightening edge threshold for ' + (t.strategy||'this strategy') + ' to avoid marginal entries.';
+        else if (t.clv_5min && t.clv_5min < -3) forward = 'Negative CLV pattern \\u2014 if this persists, the model may be too slow for this market type.';
+        else forward = 'Continue collecting data points. Need more trades in similar conditions to draw conclusions.';
+
+        html += '<div onclick="toggleBetInsight(this)" style="background:#0a0a1a;border:1px solid #1a1a2e;border-radius:8px;padding:10px 12px;margin-bottom:6px;cursor:pointer;transition:border-color 0.2s" onmouseover="this.style.borderColor=\'#333\'" onmouseout="this.style.borderColor=\'#1a1a2e\'">';
+        // Header row
+        html += '<div style="display:flex;justify-content:space-between;align-items:center">';
+        html += '<div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">';
+        html += '<span style="background:' + tBadgeColor + '22;color:' + tBadgeColor + ';font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px;text-transform:uppercase;white-space:nowrap">' + (t.strategy||'?') + '</span>';
+        html += '<span style="color:#fff;font-weight:600;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (t.title || t.ticker || 'unknown') + '</span>';
+        html += '</div>';
+        html += '<div style="display:flex;align-items:center;gap:10px;flex-shrink:0">';
+        html += '<span style="color:' + resultColor + ';font-weight:700;font-size:11px;padding:2px 6px;border-radius:3px;background:' + resultColor + '18">' + resultText + '</span>';
+        if (t.result && pnlText) html += '<span style="color:' + (t.pnl_cents>=0?'#00dc5a':'#ff4444') + ';font-size:11px;font-weight:600">' + pnlSign + pnlText + '</span>';
         html += '</div></div>';
+        // Sub row
+        html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;font-size:11px">';
+        html += '<span style="color:#666">' + (t.side||'') + ' @ <span style="color:#00d4ff">' + (t.entry_price||'--') + 'c</span></span>';
+        html += '<span style="color:#ffb400">Edge: ' + edgePct + '</span>';
+        if (tTime) html += '<span style="color:#555">' + tTime + '</span>';
+        html += '</div>';
+        // Insight panel (hidden by default)
+        html += '<div class="bet-insight" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid #1a1a2e">';
+        html += '<div style="margin-bottom:8px"><div style="color:#00d4ff;font-weight:700;font-size:11px;margin-bottom:4px">WHY WE HAD AN EDGE</div>';
+        html += '<div style="color:#aaa;font-size:11px;line-height:1.5">ESPN: <span style="color:#e040fb">' + espnPct + '</span> vs Kalshi: <span style="color:#00d4ff">' + kalshiPct + '</span> = <span style="color:#ffb400">' + edgePct + ' edge</span><br>Game state: <span style="color:#fff">' + gameState + '</span></div></div>';
+        html += '<div style="margin-bottom:8px"><div style="color:#e040fb;font-weight:700;font-size:11px;margin-bottom:4px">WHAT WE LEARNED</div>';
+        html += '<div style="color:#aaa;font-size:11px;line-height:1.5">' + learned + '</div></div>';
+        html += '<div><div style="color:#ffb400;font-weight:700;font-size:11px;margin-bottom:4px">GOING FORWARD</div>';
+        html += '<div style="color:#aaa;font-size:11px;line-height:1.5">' + forward + '</div></div>';
+        html += '</div>';
+        html += '</div>';
       }
       listEl.innerHTML = html;
     }
