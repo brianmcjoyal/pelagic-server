@@ -8325,6 +8325,11 @@ def _log_paper_trade(ticker, title, side, price, win_prob, edge, ev_cents, strat
             _PAPER_TRADES[:] = _PAPER_TRADES[-_PAPER_TRADES_MAX:]
     _PAPER_COOLDOWN[_cooldown_key] = now_ts
     print(f"[PAPER] {strategy} {side.upper()} {ticker} @ {price}c | prob={win_prob:.0%} edge={edge:.0%} EV={ev_cents:.1f}c | {game_state}")
+    # Persist immediately so paper trades survive deploys/restarts
+    try:
+        _save_state()
+    except Exception:
+        pass
 
 
 def _paper_trade_stats():
@@ -10583,6 +10588,14 @@ def _background_loop():
 
             _trade_time = _time.time() - _cycle_start
             print(f"[CYCLE {cycle}] Trading: {_trade_time:.1f}s")
+
+            # === PERIODIC STATE SAVE (every 10 cycles ~5 min) ===
+            # Safety net: ensures paper trades, perf history, etc. survive deploys
+            if cycle % 10 == 0:
+                try:
+                    _save_state()
+                except Exception:
+                    pass
 
             # === SLOW ANALYTICS (less frequent) ===
             # Bot scan — every 5 cycles (~2.5 min)
