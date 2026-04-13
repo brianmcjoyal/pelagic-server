@@ -11386,22 +11386,22 @@ def _build_tradeshark_icon_png(size=180):
                 return cr + 0.5 - dist
         return 1.0
 
-    # Jaw curvature — makes the jaw concave like a real shark mouth
-    # Upper jaw curves DOWN in the center (concave, frown shape)
-    # Lower jaw curves UP in the center (concave, smile shape)
+    # Jaw curvature — shark mouth shape
+    # Upper jaw arches UP in the center (convex, smile shape)
+    # Lower jaw droops DOWN in the center (convex, frown shape)
     jaw_cx = (bL + bR) / 2.0
     jaw_hw = (bR - bL) / 2.0
     jaw_curve_amt = size * 0.04  # how much the jaw curves
 
     def _upper_curve(x):
-        """How much the upper jaw dips down at position x. Max at center, 0 at edges."""
+        """How much the upper jaw lifts UP at position x. Max at center, 0 at edges."""
         dx = abs(x - jaw_cx) / jaw_hw  # 0 at center, 1 at edges
-        return jaw_curve_amt * (1.0 - dx * dx)  # parabolic: max dip at center
+        return -jaw_curve_amt * (1.0 - dx * dx)  # negative = moves UP
 
     def _lower_curve(x):
-        """How much the lower jaw rises up at position x. Max at center, 0 at edges."""
+        """How much the lower jaw droops DOWN at position x. Max at center, 0 at edges."""
         dx = abs(x - jaw_cx) / jaw_hw
-        return jaw_curve_amt * (1.0 - dx * dx)
+        return -jaw_curve_amt * (1.0 - dx * dx)  # negative = moves DOWN (lip drops)
 
     def _in_upper_lip(x, y):
         """Gold upper lip — curves down in the middle (concave)."""
@@ -11916,7 +11916,7 @@ def tradeshark_manifest():
         "background_color": "#0d0d0d",
         "theme_color": "#c9963a",
         "icons": [
-            {"src": "/apple-touch-icon.png?v=7", "sizes": "180x180", "type": "image/png", "purpose": "any"},
+            {"src": "/apple-touch-icon.png?v=8", "sizes": "180x180", "type": "image/png", "purpose": "any"},
             {"src": "/icon-192.png?v=2", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
         ],
     })
@@ -19543,8 +19543,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <title>TradeShark</title>
 <!-- PWA / iOS Add-to-Home-Screen -->
 <link rel="icon" type="image/png" href="/favicon.ico?v=2">
-<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=7">
-<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=7">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=8">
+<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=8">
 <link rel="manifest" href="/manifest.json?v=2">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
