@@ -11402,89 +11402,59 @@ def _build_tradeshark_icon_png(size=180):
                 return cr + 0.5 - dist
         return 1.0
 
-    # Jaw curvature — shark mouth shape
-    # Upper jaw arches UP in the center (convex, smile shape)
-    # Lower jaw droops DOWN in the center (convex, frown shape)
-    jaw_cx = (bL + bR) / 2.0
-    jaw_hw = (bR - bL) / 2.0
-    jaw_curve_amt = size * 0.12  # how much the jaw curves (aggressive oval shape)
-    jaw_connect_w = int(size * 0.06)  # wider connector at each end for smooth oval join
+    # Jaw — smooth ellipse outline (like a horizontal oval / shark jaw)
+    # The jaw is an elliptical ring: gold outline, green teeth inside, black mouth center
+    jaw_cx = (bL + bR) / 2.0           # center x of ellipse
+    jaw_cy = (jaw_top + jaw_bot) / 2.0  # center y of ellipse
+    jaw_rx = (bR - bL) / 2.0           # horizontal radius (wide)
+    jaw_ry = (jaw_bot - jaw_top) / 2.0  # vertical radius (shorter, oblong)
+    jaw_thickness = lip_thick           # thickness of the gold outline
 
-    def _upper_curve(x):
-        """How much the upper jaw lifts UP at position x. Max at center, 0 at edges."""
-        dx = abs(x - jaw_cx) / jaw_hw  # 0 at center, 1 at edges
-        return -jaw_curve_amt * (1.0 - dx * dx)  # negative = moves UP
+    def _ellipse_dist(x, y):
+        """Normalized distance from ellipse edge. <0 = inside, >0 = outside."""
+        dx = (x - jaw_cx) / jaw_rx
+        dy = (y - jaw_cy) / jaw_ry
+        return math.sqrt(dx * dx + dy * dy) - 1.0
 
-    def _lower_curve(x):
-        """How much the lower jaw droops DOWN at position x. Max at center, 0 at edges."""
-        dx = abs(x - jaw_cx) / jaw_hw
-        return -jaw_curve_amt * (1.0 - dx * dx)  # negative = moves DOWN (lip drops)
-
-    def _in_jaw_connector(x, y):
-        """Gold vertical connectors at left and right edges where jaws meet."""
-        # Left connector
-        if bL <= x < bL + jaw_connect_w:
-            # Spans from upper lip to lower lip at this x
-            uc = _upper_curve(x)
-            lc = _lower_curve(x)
-            local_top = jaw_top + uc
-            local_bot = jaw_bot - lc
-            if y >= local_top - 0.5 and y < local_bot + 0.5:
-                if y < local_top + 0.5:
-                    return y - (local_top - 0.5)
-                if y >= local_bot - 0.5:
-                    return local_bot + 0.5 - y
-                return 1.0
-        # Right connector
-        if bR - jaw_connect_w <= x < bR:
-            uc = _upper_curve(x)
-            lc = _lower_curve(x)
-            local_top = jaw_top + uc
-            local_bot = jaw_bot - lc
-            if y >= local_top - 0.5 and y < local_bot + 0.5:
-                if y < local_top + 0.5:
-                    return y - (local_top - 0.5)
-                if y >= local_bot - 0.5:
-                    return local_bot + 0.5 - y
-                return 1.0
-        return 0.0
-
-    def _in_upper_lip(x, y):
-        """Gold upper lip — curves down in the middle (concave)."""
-        if x < bL or x >= bR:
+    def _in_jaw_outline(x, y):
+        """Gold elliptical jaw outline — a ring shape."""
+        # Normalized distance from ellipse boundary
+        dx = (x - jaw_cx) / jaw_rx
+        dy = (y - jaw_cy) / jaw_ry
+        r = math.sqrt(dx * dx + dy * dy)
+        # The outline is between r_inner and r_outer
+        t_norm = jaw_thickness / min(jaw_rx, jaw_ry)  # thickness in normalized space
+        r_outer = 1.0 + t_norm * 0.5
+        r_inner = 1.0 - t_norm * 0.5
+        if r < r_inner - 0.02 or r > r_outer + 0.02:
             return 0.0
-        c = _upper_curve(x)
-        local_top = jaw_top + c
-        local_bot = upper_lip_bot + c
-        if y < local_top - 0.5 or y >= local_bot + 0.5:
-            return 0.0
-        if y < local_top + 0.5:
-            return y - (local_top - 0.5)
-        if y >= local_bot - 0.5:
-            return local_bot + 0.5 - y
+        # AA on both edges
+        if r > r_outer - 0.02:
+            return max(0.0, (r_outer + 0.02 - r) / 0.04)
+        if r < r_inner + 0.02:
+            return max(0.0, (r - (r_inner - 0.02)) / 0.04)
         return 1.0
 
-    def _in_lower_lip(x, y):
-        """Gold lower lip — curves up in the middle (concave)."""
-        if x < bL or x >= bR:
-            return 0.0
-        c = _lower_curve(x)
-        local_top = lower_lip_top - c
-        local_bot = jaw_bot - c
-        if y < local_top - 0.5 or y >= local_bot + 0.5:
-            return 0.0
-        if y < local_top + 0.5:
-            return y - (local_top - 0.5)
-        if y >= local_bot - 0.5:
-            return local_bot + 0.5 - y
-        return 1.0
+    def _jaw_inner_edge_y(x, is_top):
+        """Get the y position of the inner edge of the jaw at position x.
+        Used to anchor teeth to the inside of the ellipse."""
+        dx = (x - jaw_cx) / jaw_rx
+        if abs(dx) >= 1.0:
+            return jaw_cy  # at the edges, inner edge is at center
+        t_norm = jaw_thickness / min(jaw_rx, jaw_ry)
+        r_inner = 1.0 - t_norm * 0.5
+        # Inner ellipse: (dx/1)^2 + (dy/1)^2 = r_inner^2
+        dy_norm = math.sqrt(max(0.0, r_inner * r_inner - dx * dx))
+        if is_top:
+            return jaw_cy - dy_norm * jaw_ry  # upper inner edge
+        else:
+            return jaw_cy + dy_norm * jaw_ry  # lower inner edge
 
     def _in_teeth_down(x, y):
-        """Green teeth hanging DOWN from upper lip into the mouth."""
-        if x < bL or x >= bR:
+        """Green teeth hanging DOWN from upper jaw inner edge."""
+        if x < bL + jaw_thickness or x >= bR - jaw_thickness:
             return 0.0
-        c = _upper_curve(x)
-        base_y = upper_lip_bot + c  # follows the curved upper lip
+        base_y = _jaw_inner_edge_y(x, True)
         tip_y = base_y + tooth_h
         if y < base_y or y >= tip_y:
             return 0.0
@@ -11500,14 +11470,12 @@ def _build_tradeshark_icon_png(size=180):
         return 0.0
 
     def _in_teeth_up(x, y):
-        """Green teeth pointing UP from lower lip into the mouth."""
-        if x < bL or x >= bR:
+        """Green teeth pointing UP from lower jaw inner edge."""
+        if x < bL + jaw_thickness or x >= bR - jaw_thickness:
             return 0.0
-        # Skip where stem connects
         if sL - 1 <= x < sR + 1:
             return 0.0
-        c = _lower_curve(x)
-        base_y = lower_lip_top - c  # follows the curved lower lip
+        base_y = _jaw_inner_edge_y(x, False)
         tip_y = base_y - tooth_h
         if y < tip_y or y >= base_y:
             return 0.0
@@ -11515,7 +11483,7 @@ def _build_tradeshark_icon_png(size=180):
         for tcx in _teeth:
             if sL - 2 <= tcx <= sR + 2:
                 continue
-            dy_frac = (base_y - y) / max(1, tooth_h)  # 0=base, 1=tip
+            dy_frac = (base_y - y) / max(1, tooth_h)
             allowed_half = half_w * (1.0 - dy_frac)
             ddx = abs(x - tcx)
             if ddx <= allowed_half + 0.5:
@@ -11544,14 +11512,12 @@ def _build_tradeshark_icon_png(size=180):
 
     def _in_T(x, y):
         """Coverage of (x,y) inside the T shape."""
-        a_upper_lip = _in_upper_lip(x, y)
-        a_lower_lip = _in_lower_lip(x, y)
-        a_connector = _in_jaw_connector(x, y)
+        a_jaw = _in_jaw_outline(x, y)
         a_wick = _in_candle_wick(x, y)
         a_body = _in_candle_body(x, y)
         a_teeth_d = _in_teeth_down(x, y)
         a_teeth_u = _in_teeth_up(x, y)
-        return min(1.0, a_upper_lip + a_lower_lip + a_connector + a_wick + a_body + a_teeth_d + a_teeth_u)
+        return min(1.0, a_jaw + a_wick + a_body + a_teeth_d + a_teeth_u)
 
     def _is_candle_pixel(x, y):
         """Check if this pixel is part of the green candle (body or wick)."""
@@ -11562,8 +11528,8 @@ def _build_tradeshark_icon_png(size=180):
         return _in_teeth_down(x, y) > 0.001 or _in_teeth_up(x, y) > 0.001
 
     def _is_lip_pixel(x, y):
-        """Check if this pixel is part of the gold jaw lips."""
-        return _in_upper_lip(x, y) > 0.001 or _in_lower_lip(x, y) > 0.001
+        """Check if this pixel is part of the gold jaw outline."""
+        return _in_jaw_outline(x, y) > 0.001
 
     # Gold gradient (top-to-bottom, 5 stops for richness)
     _gold_stops = [
@@ -11999,7 +11965,7 @@ def tradeshark_manifest():
         "background_color": "#0d0d0d",
         "theme_color": "#c9963a",
         "icons": [
-            {"src": "/apple-touch-icon.png?v=11", "sizes": "180x180", "type": "image/png", "purpose": "any"},
+            {"src": "/apple-touch-icon.png?v=12", "sizes": "180x180", "type": "image/png", "purpose": "any"},
             {"src": "/icon-192.png?v=2", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
         ],
     })
@@ -19626,8 +19592,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <title>TradeShark</title>
 <!-- PWA / iOS Add-to-Home-Screen -->
 <link rel="icon" type="image/png" href="/favicon.ico?v=2">
-<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=11">
-<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=11">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=12">
+<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=12">
 <link rel="manifest" href="/manifest.json?v=2">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
