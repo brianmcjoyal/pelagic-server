@@ -11322,28 +11322,38 @@ def _build_tradeshark_icon_png(size=180):
     # Build RGBA pixel buffer
     px = [bg + (255,)] * (size * size)
 
-    # T dimensions — crossbar with shark teeth + slim stem
+    # T dimensions — shark jaw crossbar + slim stem
+    # The crossbar is a shark jaw viewed from front:
+    #   Gold upper lip  ->  Green teeth pointing down  ->  BLACK mouth  ->  Green teeth pointing up  ->  Gold lower lip
     pad = int(size * 0.14)
     cr = max(3, int(size * 0.04))  # corner radius
 
-    # Crossbar — gold horizontal bar
-    bL, bR = pad, size - pad
-    bT, bB = pad, pad + int(size * 0.17)
-    bar_mid_y = (bT + bB) / 2.0  # vertical center of crossbar
+    # Jaw layout (top to bottom)
+    bL, bR = pad, size - pad                   # full width
+    lip_thick = int(size * 0.04)               # gold lip thickness
+    tooth_h = int(size * 0.055)                # tooth length
+    mouth_h = int(size * 0.045)                # black mouth gap
 
-    # Stem — extra slim (10% width)
+    jaw_top = pad                              # top of upper lip
+    upper_lip_bot = jaw_top + lip_thick        # bottom of upper lip
+    upper_teeth_bot = upper_lip_bot + tooth_h  # tips of upper teeth
+    mouth_top = upper_teeth_bot                # top of mouth gap
+    mouth_bot = mouth_top + mouth_h            # bottom of mouth gap
+    lower_teeth_top = mouth_bot                # tips of lower teeth
+    lower_lip_top = lower_teeth_top + tooth_h  # top of lower lip (base of lower teeth)
+    jaw_bot = lower_lip_top + lip_thick        # bottom of lower lip
+
+    # Stem — extra slim, starts from bottom of jaw
     sL = int(size * 0.45)
     sR = int(size * 0.55)
-    sT, sB = bB, size - pad
+    sT, sB = jaw_bot, size - pad
 
-    # Tooth dimensions
-    tooth_h = int(size * 0.06)        # how far teeth extend
-    tooth_w = int(size * 0.04)        # width of each tooth base
+    # Tooth positions across the jaw
+    tooth_w = int(size * 0.035)
     tooth_gap_px = max(1, int(size * 0.008))
-    # Build tooth x positions across the crossbar
     _teeth = []
-    _tx = bL + tooth_w // 2 + 2
-    while _tx + tooth_w // 2 < bR - 2:
+    _tx = bL + tooth_w // 2 + 3
+    while _tx + tooth_w // 2 < bR - 3:
         _teeth.append(_tx)
         _tx += tooth_w + tooth_gap_px
 
@@ -11376,13 +11386,65 @@ def _build_tradeshark_icon_png(size=180):
                 return cr + 0.5 - dist
         return 1.0
 
-    def _in_top_teeth(x, y):
-        """Green teeth along TOP of crossbar pointing DOWN."""
-        if y < bT or y >= bT + tooth_h:
+    # Jaw curvature — makes the jaw concave like a real shark mouth
+    # Upper jaw curves DOWN in the center (concave, frown shape)
+    # Lower jaw curves UP in the center (concave, smile shape)
+    jaw_cx = (bL + bR) / 2.0
+    jaw_hw = (bR - bL) / 2.0
+    jaw_curve_amt = size * 0.04  # how much the jaw curves
+
+    def _upper_curve(x):
+        """How much the upper jaw dips down at position x. Max at center, 0 at edges."""
+        dx = abs(x - jaw_cx) / jaw_hw  # 0 at center, 1 at edges
+        return jaw_curve_amt * (1.0 - dx * dx)  # parabolic: max dip at center
+
+    def _lower_curve(x):
+        """How much the lower jaw rises up at position x. Max at center, 0 at edges."""
+        dx = abs(x - jaw_cx) / jaw_hw
+        return jaw_curve_amt * (1.0 - dx * dx)
+
+    def _in_upper_lip(x, y):
+        """Gold upper lip — curves down in the middle (concave)."""
+        if x < bL or x >= bR:
+            return 0.0
+        c = _upper_curve(x)
+        local_top = jaw_top + c
+        local_bot = upper_lip_bot + c
+        if y < local_top - 0.5 or y >= local_bot + 0.5:
+            return 0.0
+        if y < local_top + 0.5:
+            return y - (local_top - 0.5)
+        if y >= local_bot - 0.5:
+            return local_bot + 0.5 - y
+        return 1.0
+
+    def _in_lower_lip(x, y):
+        """Gold lower lip — curves up in the middle (concave)."""
+        if x < bL or x >= bR:
+            return 0.0
+        c = _lower_curve(x)
+        local_top = lower_lip_top - c
+        local_bot = jaw_bot - c
+        if y < local_top - 0.5 or y >= local_bot + 0.5:
+            return 0.0
+        if y < local_top + 0.5:
+            return y - (local_top - 0.5)
+        if y >= local_bot - 0.5:
+            return local_bot + 0.5 - y
+        return 1.0
+
+    def _in_teeth_down(x, y):
+        """Green teeth hanging DOWN from upper lip into the mouth."""
+        if x < bL or x >= bR:
+            return 0.0
+        c = _upper_curve(x)
+        base_y = upper_lip_bot + c  # follows the curved upper lip
+        tip_y = base_y + tooth_h
+        if y < base_y or y >= tip_y:
             return 0.0
         half_w = tooth_w / 2.0
         for tcx in _teeth:
-            dy_frac = (y - bT) / tooth_h  # 0 at base (top), 1 at tip (pointing down)
+            dy_frac = (y - base_y) / max(1, tooth_h)
             allowed_half = half_w * (1.0 - dy_frac)
             ddx = abs(x - tcx)
             if ddx <= allowed_half + 0.5:
@@ -11391,18 +11453,23 @@ def _build_tradeshark_icon_png(size=180):
                 return allowed_half + 0.5 - ddx
         return 0.0
 
-    def _in_bottom_teeth(x, y):
-        """Green teeth along BOTTOM of crossbar pointing UP."""
-        if y <= bB - tooth_h or y > bB:
+    def _in_teeth_up(x, y):
+        """Green teeth pointing UP from lower lip into the mouth."""
+        if x < bL or x >= bR:
             return 0.0
         # Skip where stem connects
         if sL - 1 <= x < sR + 1:
+            return 0.0
+        c = _lower_curve(x)
+        base_y = lower_lip_top - c  # follows the curved lower lip
+        tip_y = base_y - tooth_h
+        if y < tip_y or y >= base_y:
             return 0.0
         half_w = tooth_w / 2.0
         for tcx in _teeth:
             if sL - 2 <= tcx <= sR + 2:
                 continue
-            dy_frac = (bB - y) / tooth_h  # 0 at base (bottom), 1 at tip (pointing up)
+            dy_frac = (base_y - y) / max(1, tooth_h)  # 0=base, 1=tip
             allowed_half = half_w * (1.0 - dy_frac)
             ddx = abs(x - tcx)
             if ddx <= allowed_half + 0.5:
@@ -11413,15 +11480,20 @@ def _build_tradeshark_icon_png(size=180):
 
     def _in_T(x, y):
         """Coverage of (x,y) inside the T shape."""
-        a_bar = _in_rounded_rect(x, y, bL, bT, bR, bB, cr)
+        a_upper_lip = _in_upper_lip(x, y)
+        a_lower_lip = _in_lower_lip(x, y)
         a_stem = _in_rounded_rect(x, y, sL, sT, sR, sB, cr)
-        a_top_teeth = _in_top_teeth(x, y)
-        a_bot_teeth = _in_bottom_teeth(x, y)
-        return min(1.0, a_bar + a_stem + a_top_teeth + a_bot_teeth)
+        a_teeth_d = _in_teeth_down(x, y)
+        a_teeth_u = _in_teeth_up(x, y)
+        return min(1.0, a_upper_lip + a_lower_lip + a_stem + a_teeth_d + a_teeth_u)
 
     def _is_tooth_pixel(x, y):
         """Check if this pixel is part of any tooth (for green coloring)."""
-        return _in_top_teeth(x, y) > 0.001 or _in_bottom_teeth(x, y) > 0.001
+        return _in_teeth_down(x, y) > 0.001 or _in_teeth_up(x, y) > 0.001
+
+    def _is_lip_pixel(x, y):
+        """Check if this pixel is part of the gold jaw lips."""
+        return _in_upper_lip(x, y) > 0.001 or _in_lower_lip(x, y) > 0.001
 
     # Gold gradient (top-to-bottom, 5 stops for richness)
     _gold_stops = [
@@ -11468,11 +11540,13 @@ def _build_tradeshark_icon_png(size=180):
                 is_tooth = _is_tooth_pixel(x, y)
 
                 if is_tooth:
-                    # Green teeth — slight gradient darker at tip
-                    dist_from_bar = min(abs(y - bT), abs(y - bB)) / max(1, tooth_h)
-                    color = tuple(int(tooth_color[i] * (1.0 - 0.3 * dist_from_bar)) for i in range(3))
+                    # Green teeth — brighter at base, darker at tip
+                    mid_y = (mouth_top + mouth_bot) / 2.0
+                    dist_from_mid = abs(y - mid_y) / max(1, tooth_h + mouth_h)
+                    brightness = 1.0 - 0.35 * (1.0 - dist_from_mid)
+                    color = tuple(int(tooth_color[i] * brightness) for i in range(3))
                 else:
-                    t = (y - bT) / max(1, sB - bT)
+                    t = (y - jaw_top) / max(1, sB - jaw_top)
                     color = _gold_at(t)
 
                     # Diagonal glimmer: brighten pixels near the glimmer line
@@ -11842,7 +11916,7 @@ def tradeshark_manifest():
         "background_color": "#0d0d0d",
         "theme_color": "#c9963a",
         "icons": [
-            {"src": "/apple-touch-icon.png?v=6", "sizes": "180x180", "type": "image/png", "purpose": "any"},
+            {"src": "/apple-touch-icon.png?v=7", "sizes": "180x180", "type": "image/png", "purpose": "any"},
             {"src": "/icon-192.png?v=2", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
         ],
     })
@@ -19469,8 +19543,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <title>TradeShark</title>
 <!-- PWA / iOS Add-to-Home-Screen -->
 <link rel="icon" type="image/png" href="/favicon.ico?v=2">
-<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=6">
-<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=6">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=7">
+<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=7">
 <link rel="manifest" href="/manifest.json?v=2">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
