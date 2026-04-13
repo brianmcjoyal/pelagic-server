@@ -11328,11 +11328,11 @@ def _build_tradeshark_icon_png(size=180):
     pad = int(size * 0.14)
     cr = max(3, int(size * 0.04))  # corner radius
 
-    # Jaw layout (top to bottom)
+    # Jaw layout (top to bottom) — flatter profile
     bL, bR = pad, size - pad                   # full width
-    lip_thick = int(size * 0.04)               # gold lip thickness
-    tooth_h = int(size * 0.055)                # tooth length
-    mouth_h = int(size * 0.045)                # black mouth gap
+    lip_thick = int(size * 0.035)              # gold lip thickness (thinner)
+    tooth_h = int(size * 0.04)                 # tooth length (shorter)
+    mouth_h = int(size * 0.03)                 # black mouth gap (narrower)
 
     jaw_top = pad                              # top of upper lip
     upper_lip_bot = jaw_top + lip_thick        # bottom of upper lip
@@ -11343,21 +11343,21 @@ def _build_tradeshark_icon_png(size=180):
     lower_lip_top = lower_teeth_top + tooth_h  # top of lower lip (base of lower teeth)
     jaw_bot = lower_lip_top + lip_thick        # bottom of lower lip
 
-    # Stem — green trading candle (thick body + thin wicks)
+    # Stem — green trading candle (skinnier + longer)
     candle_top = jaw_bot                        # top of entire candle (upper wick tip)
-    candle_bot = size - pad                     # bottom of entire candle (lower wick tip)
+    candle_bot = size - int(pad * 0.5)          # extend closer to bottom edge
     candle_h = candle_bot - candle_top
 
     # Wick (thin line top and bottom)
-    wick_hw = max(1, int(size * 0.012))         # half-width of wick
+    wick_hw = max(1, int(size * 0.01))          # half-width of wick (thinner)
     wick_cx = size // 2                         # center x
     wick_top = candle_top                       # upper wick starts at jaw
     wick_bot = candle_bot                       # lower wick goes to bottom
 
-    # Body (thick rectangle, ~60% of candle height, centered)
-    body_hw = int(size * 0.06)                  # half-width of body
-    body_top = candle_top + int(candle_h * 0.15)  # body starts 15% down
-    body_bot = candle_bot - int(candle_h * 0.12)  # body ends 12% from bottom
+    # Body (skinnier, taller — more of the candle height)
+    body_hw = int(size * 0.04)                  # half-width of body (skinnier)
+    body_top = candle_top + int(candle_h * 0.10)  # body starts 10% down (taller)
+    body_bot = candle_bot - int(candle_h * 0.08)  # body ends 8% from bottom (taller)
 
     # For stem hit-testing (used by teeth to skip stem area)
     sL = wick_cx - body_hw
@@ -11965,7 +11965,7 @@ def tradeshark_manifest():
         "background_color": "#0d0d0d",
         "theme_color": "#c9963a",
         "icons": [
-            {"src": "/apple-touch-icon.png?v=12", "sizes": "180x180", "type": "image/png", "purpose": "any"},
+            {"src": "/apple-touch-icon.png?v=13", "sizes": "180x180", "type": "image/png", "purpose": "any"},
             {"src": "/icon-192.png?v=2", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
         ],
     })
@@ -19592,8 +19592,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <title>TradeShark</title>
 <!-- PWA / iOS Add-to-Home-Screen -->
 <link rel="icon" type="image/png" href="/favicon.ico?v=2">
-<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=12">
-<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=12">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=13">
+<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=13">
 <link rel="manifest" href="/manifest.json?v=2">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
