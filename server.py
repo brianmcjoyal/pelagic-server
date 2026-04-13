@@ -11322,139 +11322,149 @@ def _build_tradeshark_icon_png(size=180):
     # Build RGBA pixel buffer
     px = [bg + (255,)] * (size * size)
 
-    # T dimensions — shark jaw crossbar + slim stem
-    # The crossbar is a shark jaw viewed from front:
-    #   Gold upper lip  ->  Green teeth pointing down  ->  BLACK mouth  ->  Green teeth pointing up  ->  Gold lower lip
-    pad = int(size * 0.14)
-    cr = max(3, int(size * 0.04))  # corner radius
+    # T dimensions — realistic shark jaw + green candle stem
+    pad = int(size * 0.12)
+    cr = max(3, int(size * 0.04))
 
-    # Jaw layout (top to bottom) — flatter profile
-    bL, bR = pad, size - pad                   # full width
-    lip_thick = int(size * 0.035)              # gold lip thickness (thinner)
-    tooth_h = int(size * 0.04)                 # tooth length (shorter)
-    mouth_h = int(size * 0.03)                 # black mouth gap (narrower)
+    # Shark jaw shape — like a mounted shark jaw trophy:
+    #   Upper jaw: wide flat arch across the top
+    #   Lower jaw: narrower U-shape, comes down further at center
+    #   Connected at the "hinge" points on left and right
+    #   Teeth line the inside of both jaws
+    jaw_cx = size / 2.0
+    jaw_w = size - pad * 2             # total jaw width
+    jaw_hinge_y = int(size * 0.28)     # y where upper and lower jaws meet (the corners of the mouth)
+    jaw_thick = max(3, int(size * 0.035))  # thickness of the gold jaw bone
 
-    jaw_top = pad                              # top of upper lip
-    upper_lip_bot = jaw_top + lip_thick        # bottom of upper lip
-    upper_teeth_bot = upper_lip_bot + tooth_h  # tips of upper teeth
-    mouth_top = upper_teeth_bot                # top of mouth gap
-    mouth_bot = mouth_top + mouth_h            # bottom of mouth gap
-    lower_teeth_top = mouth_bot                # tips of lower teeth
-    lower_lip_top = lower_teeth_top + tooth_h  # top of lower lip (base of lower teeth)
-    jaw_bot = lower_lip_top + lip_thick        # bottom of lower lip
+    # Upper jaw — wide arch, highest point at center
+    upper_peak_y = pad                 # top of the arch at center
+    # Lower jaw — U shape, lowest point at center
+    lower_dip_y = int(size * 0.44)     # bottom of the U at center
 
-    # Stem — green trading candle (skinnier + longer)
-    candle_top = jaw_bot                        # top of entire candle (upper wick tip)
-    candle_bot = size - int(pad * 0.5)          # extend closer to bottom edge
+    # Tooth dimensions — big and prominent
+    tooth_h = int(size * 0.05)
+    tooth_w = int(size * 0.03)
+    tooth_gap_px = max(1, int(size * 0.006))
+
+    def _upper_jaw_y(x):
+        """Y position of upper jaw outer edge at x. Arch shape: high at center, drops to hinge at edges."""
+        dx = (x - jaw_cx) / (jaw_w / 2.0)
+        dx = max(-1.0, min(1.0, dx))
+        # Parabolic arch
+        return upper_peak_y + (jaw_hinge_y - upper_peak_y) * (dx * dx)
+
+    def _lower_jaw_y(x):
+        """Y position of lower jaw outer edge at x. U shape: low at center, rises to hinge at edges."""
+        dx = (x - jaw_cx) / (jaw_w / 2.0)
+        dx = max(-1.0, min(1.0, dx))
+        # Parabolic U
+        return lower_dip_y - (lower_dip_y - jaw_hinge_y) * (dx * dx)
+
+    def _in_upper_jaw(x, y):
+        """Gold upper jaw bone — follows the arch."""
+        left_edge = pad
+        right_edge = size - pad
+        if x < left_edge or x >= right_edge:
+            return 0.0
+        outer_y = _upper_jaw_y(x)
+        inner_y = outer_y + jaw_thick
+        if y < outer_y - 0.5 or y >= inner_y + 0.5:
+            return 0.0
+        if y < outer_y + 0.5:
+            return y - (outer_y - 0.5)
+        if y >= inner_y - 0.5:
+            return inner_y + 0.5 - y
+        return 1.0
+
+    def _in_lower_jaw(x, y):
+        """Gold lower jaw bone — follows the U shape."""
+        left_edge = pad + int(jaw_w * 0.08)
+        right_edge = size - pad - int(jaw_w * 0.08)
+        if x < left_edge or x >= right_edge:
+            return 0.0
+        outer_y = _lower_jaw_y(x)
+        inner_y = outer_y - jaw_thick
+        if y < inner_y - 0.5 or y >= outer_y + 0.5:
+            return 0.0
+        if y < inner_y + 0.5:
+            return y - (inner_y - 0.5)
+        if y >= outer_y - 0.5:
+            return outer_y + 0.5 - y
+        return 1.0
+
+    def _in_jaw_hinge(x, y):
+        """Gold connectors at left and right where upper and lower jaws meet."""
+        left_edge = pad
+        right_edge = size - pad
+        hinge_w = int(jaw_w * 0.10)
+        # Left hinge
+        if left_edge <= x < left_edge + hinge_w:
+            upper_y = _upper_jaw_y(x) + jaw_thick
+            lower_y = _lower_jaw_y(x) - jaw_thick
+            if upper_y <= y < lower_y:
+                # Taper: thicker at edge, thinner toward center
+                frac = (x - left_edge) / max(1, hinge_w)
+                w = jaw_thick * (1.0 - frac * 0.7)
+                mid = (upper_y + lower_y) / 2.0
+                if abs(y - mid) < (lower_y - upper_y) / 2.0:
+                    return max(0.0, min(1.0, 1.0 - frac * 0.5))
+            return 0.0
+        # Right hinge
+        if right_edge - hinge_w <= x < right_edge:
+            upper_y = _upper_jaw_y(x) + jaw_thick
+            lower_y = _lower_jaw_y(x) - jaw_thick
+            if upper_y <= y < lower_y:
+                frac = (right_edge - x) / max(1, hinge_w)
+                return max(0.0, min(1.0, 1.0 - frac * 0.5))
+            return 0.0
+        return 0.0
+
+    # Build tooth positions
+    _teeth = []
+    _tx = pad + int(jaw_w * 0.12)
+    right_limit = size - pad - int(jaw_w * 0.12)
+    while _tx < right_limit:
+        _teeth.append(_tx)
+        _tx += tooth_w + tooth_gap_px
+
+    # Candle — green trading candle below the jaw
+    candle_top = int(lower_dip_y + jaw_thick * 0.5)
+    candle_bot = size - int(pad * 0.4)
     candle_h = candle_bot - candle_top
-
-    # Wick (thin line top and bottom)
-    wick_hw = max(1, int(size * 0.01))          # half-width of wick (thinner)
-    wick_cx = size // 2                         # center x
-    wick_top = candle_top                       # upper wick starts at jaw
-    wick_bot = candle_bot                       # lower wick goes to bottom
-
-    # Body (skinnier, taller — more of the candle height)
-    body_hw = int(size * 0.04)                  # half-width of body (skinnier)
-    body_top = candle_top + int(candle_h * 0.10)  # body starts 10% down (taller)
-    body_bot = candle_bot - int(candle_h * 0.08)  # body ends 8% from bottom (taller)
-
-    # For stem hit-testing (used by teeth to skip stem area)
+    wick_hw = max(1, int(size * 0.01))
+    wick_cx = size // 2
+    wick_top = candle_top
+    wick_bot = candle_bot
+    body_hw = int(size * 0.035)
+    body_top = candle_top + int(candle_h * 0.10)
+    body_bot = candle_bot - int(candle_h * 0.08)
     sL = wick_cx - body_hw
     sR = wick_cx + body_hw
     sT, sB = candle_top, candle_bot
 
-    # Tooth positions across the jaw
-    tooth_w = int(size * 0.035)
-    tooth_gap_px = max(1, int(size * 0.008))
-    _teeth = []
-    _tx = bL + tooth_w // 2 + 3
-    while _tx + tooth_w // 2 < bR - 3:
-        _teeth.append(_tx)
-        _tx += tooth_w + tooth_gap_px
-
     def _in_rounded_rect(x, y, L, T, R, B, cr):
-        """Test if (x,y) is inside a rounded rect, returns 0.0-1.0 for AA."""
         if x < L or x >= R or y < T or y >= B:
             return 0.0
-        corners = [
-            (L + cr, T + cr),
-            (R - cr, T + cr),
-            (L + cr, B - cr),
-            (R - cr, B - cr),
-        ]
-        for cx, cy in corners:
+        corners = [(L+cr,T+cr),(R-cr,T+cr),(L+cr,B-cr),(R-cr,B-cr)]
+        for ccx, ccy in corners:
             dx, dy = 0, 0
-            if x < L + cr and y < T + cr:
-                dx, dy = x - (L + cr), y - (T + cr)
-            elif x >= R - cr and y < T + cr:
-                dx, dy = x - (R - cr - 1), y - (T + cr)
-            elif x < L + cr and y >= B - cr:
-                dx, dy = x - (L + cr), y - (B - cr - 1)
-            elif x >= R - cr and y >= B - cr:
-                dx, dy = x - (R - cr - 1), y - (B - cr - 1)
-            else:
-                continue
-            dist = math.sqrt(dx * dx + dy * dy)
-            if dist > cr + 0.5:
-                return 0.0
-            if dist > cr - 0.5:
-                return cr + 0.5 - dist
+            if x < L+cr and y < T+cr: dx, dy = x-(L+cr), y-(T+cr)
+            elif x >= R-cr and y < T+cr: dx, dy = x-(R-cr-1), y-(T+cr)
+            elif x < L+cr and y >= B-cr: dx, dy = x-(L+cr), y-(B-cr-1)
+            elif x >= R-cr and y >= B-cr: dx, dy = x-(R-cr-1), y-(B-cr-1)
+            else: continue
+            dist = math.sqrt(dx*dx + dy*dy)
+            if dist > cr+0.5: return 0.0
+            if dist > cr-0.5: return cr+0.5-dist
         return 1.0
-
-    # Jaw — smooth ellipse outline (like a horizontal oval / shark jaw)
-    # The jaw is an elliptical ring: gold outline, green teeth inside, black mouth center
-    jaw_cx = (bL + bR) / 2.0           # center x of ellipse
-    jaw_cy = (jaw_top + jaw_bot) / 2.0  # center y of ellipse
-    jaw_rx = (bR - bL) / 2.0           # horizontal radius (wide)
-    jaw_ry = (jaw_bot - jaw_top) / 2.0  # vertical radius (shorter, oblong)
-    jaw_thickness = lip_thick           # thickness of the gold outline
-
-    def _ellipse_dist(x, y):
-        """Normalized distance from ellipse edge. <0 = inside, >0 = outside."""
-        dx = (x - jaw_cx) / jaw_rx
-        dy = (y - jaw_cy) / jaw_ry
-        return math.sqrt(dx * dx + dy * dy) - 1.0
-
-    def _in_jaw_outline(x, y):
-        """Gold elliptical jaw outline — a ring shape."""
-        # Normalized distance from ellipse boundary
-        dx = (x - jaw_cx) / jaw_rx
-        dy = (y - jaw_cy) / jaw_ry
-        r = math.sqrt(dx * dx + dy * dy)
-        # The outline is between r_inner and r_outer
-        t_norm = jaw_thickness / min(jaw_rx, jaw_ry)  # thickness in normalized space
-        r_outer = 1.0 + t_norm * 0.5
-        r_inner = 1.0 - t_norm * 0.5
-        if r < r_inner - 0.02 or r > r_outer + 0.02:
-            return 0.0
-        # AA on both edges
-        if r > r_outer - 0.02:
-            return max(0.0, (r_outer + 0.02 - r) / 0.04)
-        if r < r_inner + 0.02:
-            return max(0.0, (r - (r_inner - 0.02)) / 0.04)
-        return 1.0
-
-    def _jaw_inner_edge_y(x, is_top):
-        """Get the y position of the inner edge of the jaw at position x.
-        Used to anchor teeth to the inside of the ellipse."""
-        dx = (x - jaw_cx) / jaw_rx
-        if abs(dx) >= 1.0:
-            return jaw_cy  # at the edges, inner edge is at center
-        t_norm = jaw_thickness / min(jaw_rx, jaw_ry)
-        r_inner = 1.0 - t_norm * 0.5
-        # Inner ellipse: (dx/1)^2 + (dy/1)^2 = r_inner^2
-        dy_norm = math.sqrt(max(0.0, r_inner * r_inner - dx * dx))
-        if is_top:
-            return jaw_cy - dy_norm * jaw_ry  # upper inner edge
-        else:
-            return jaw_cy + dy_norm * jaw_ry  # lower inner edge
 
     def _in_teeth_down(x, y):
-        """Green teeth hanging DOWN from upper jaw inner edge."""
-        if x < bL + jaw_thickness or x >= bR - jaw_thickness:
+        """Green teeth hanging down from upper jaw inner edge."""
+        left_edge = pad + int(jaw_w * 0.10)
+        right_edge = size - pad - int(jaw_w * 0.10)
+        if x < left_edge or x >= right_edge:
             return 0.0
-        base_y = _jaw_inner_edge_y(x, True)
+        base_y = _upper_jaw_y(x) + jaw_thick  # inner edge of upper jaw
         tip_y = base_y + tooth_h
         if y < base_y or y >= tip_y:
             return 0.0
@@ -11470,12 +11480,14 @@ def _build_tradeshark_icon_png(size=180):
         return 0.0
 
     def _in_teeth_up(x, y):
-        """Green teeth pointing UP from lower jaw inner edge."""
-        if x < bL + jaw_thickness or x >= bR - jaw_thickness:
+        """Green teeth pointing up from lower jaw inner edge."""
+        left_edge = pad + int(jaw_w * 0.15)
+        right_edge = size - pad - int(jaw_w * 0.15)
+        if x < left_edge or x >= right_edge:
             return 0.0
         if sL - 1 <= x < sR + 1:
             return 0.0
-        base_y = _jaw_inner_edge_y(x, False)
+        base_y = _lower_jaw_y(x) - jaw_thick  # inner edge of lower jaw
         tip_y = base_y - tooth_h
         if y < tip_y or y >= base_y:
             return 0.0
@@ -11493,10 +11505,8 @@ def _build_tradeshark_icon_png(size=180):
         return 0.0
 
     def _in_candle_wick(x, y):
-        """Thin wick line above and below the candle body."""
         if y < wick_top or y >= wick_bot:
             return 0.0
-        # Only draw wick OUTSIDE the body area
         if body_top <= y < body_bot:
             return 0.0
         ddx = abs(x - wick_cx)
@@ -11507,29 +11517,26 @@ def _build_tradeshark_icon_png(size=180):
         return 0.0
 
     def _in_candle_body(x, y):
-        """Thick candle body rectangle."""
         return _in_rounded_rect(x, y, wick_cx - body_hw, body_top, wick_cx + body_hw, body_bot, cr)
 
     def _in_T(x, y):
-        """Coverage of (x,y) inside the T shape."""
-        a_jaw = _in_jaw_outline(x, y)
+        a_uj = _in_upper_jaw(x, y)
+        a_lj = _in_lower_jaw(x, y)
+        a_hinge = _in_jaw_hinge(x, y)
         a_wick = _in_candle_wick(x, y)
         a_body = _in_candle_body(x, y)
-        a_teeth_d = _in_teeth_down(x, y)
-        a_teeth_u = _in_teeth_up(x, y)
-        return min(1.0, a_jaw + a_wick + a_body + a_teeth_d + a_teeth_u)
+        a_td = _in_teeth_down(x, y)
+        a_tu = _in_teeth_up(x, y)
+        return min(1.0, a_uj + a_lj + a_hinge + a_wick + a_body + a_td + a_tu)
 
     def _is_candle_pixel(x, y):
-        """Check if this pixel is part of the green candle (body or wick)."""
         return _in_candle_body(x, y) > 0.001 or _in_candle_wick(x, y) > 0.001
 
     def _is_tooth_pixel(x, y):
-        """Check if this pixel is part of any tooth (for green coloring)."""
         return _in_teeth_down(x, y) > 0.001 or _in_teeth_up(x, y) > 0.001
 
     def _is_lip_pixel(x, y):
-        """Check if this pixel is part of the gold jaw outline."""
-        return _in_jaw_outline(x, y) > 0.001
+        return _in_upper_jaw(x, y) > 0.001 or _in_lower_jaw(x, y) > 0.001 or _in_jaw_hinge(x, y) > 0.001
 
     # Gold gradient (top-to-bottom, 5 stops for richness)
     _gold_stops = [
@@ -11580,9 +11587,9 @@ def _build_tradeshark_icon_png(size=180):
 
                 if is_tooth:
                     # Green teeth — brighter at base, darker at tip
-                    mid_y = (mouth_top + mouth_bot) / 2.0
-                    dist_from_mid = abs(y - mid_y) / max(1, tooth_h + mouth_h)
-                    brightness = max(0.3, min(1.0, 1.0 - 0.35 * (1.0 - dist_from_mid)))
+                    jaw_mid = (upper_peak_y + lower_dip_y) / 2.0
+                    dist_from_mid = abs(y - jaw_mid) / max(1, (lower_dip_y - upper_peak_y) / 2.0)
+                    brightness = max(0.5, min(1.0, 0.65 + 0.35 * dist_from_mid))
                     color = tuple(max(0, min(255, int(tooth_color[i] * brightness))) for i in range(3))
                 elif is_candle:
                     if is_body:
@@ -11595,7 +11602,7 @@ def _build_tradeshark_icon_png(size=180):
                         # Wick — darker green thin line
                         color = candle_wick_color
                 else:
-                    t = (y - jaw_top) / max(1, candle_bot - jaw_top)
+                    t = (y - upper_peak_y) / max(1, candle_bot - upper_peak_y)
                     color = _gold_at(t)
 
                     # Diagonal glimmer: brighten pixels near the glimmer line
@@ -11965,7 +11972,7 @@ def tradeshark_manifest():
         "background_color": "#0d0d0d",
         "theme_color": "#c9963a",
         "icons": [
-            {"src": "/apple-touch-icon.png?v=13", "sizes": "180x180", "type": "image/png", "purpose": "any"},
+            {"src": "/apple-touch-icon.png?v=14", "sizes": "180x180", "type": "image/png", "purpose": "any"},
             {"src": "/icon-192.png?v=2", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
         ],
     })
@@ -19592,8 +19599,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <title>TradeShark</title>
 <!-- PWA / iOS Add-to-Home-Screen -->
 <link rel="icon" type="image/png" href="/favicon.ico?v=2">
-<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=13">
-<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=13">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=14">
+<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=14">
 <link rel="manifest" href="/manifest.json?v=2">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
