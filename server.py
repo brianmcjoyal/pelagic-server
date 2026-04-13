@@ -3657,6 +3657,7 @@ def live_game_snipe():
     Strategy: only live sports + vetted short-term markets with volume.
     Profit: 10-30c per contract on settlement."""
     _paper_only = not BOT_CONFIG.get("enabled")
+    bal = 10000  # default for paper-only mode; overwritten below when bot is enabled
     if _strategy_is_paused("live_sniper"):
         return []
 
@@ -4242,6 +4243,7 @@ def moonshark_snipe():
     Strategy: small bets on underdog outcomes in liquid, closing-soon markets.
     Profit: 70-90c per contract on settlement (rare but huge)."""
     _paper_only = not BOT_CONFIG.get("enabled")
+    bal = 10000  # default for paper-only mode; overwritten below when bot is enabled
     if _strategy_is_paused("moonshark"):
         return []
     if not BOT_CONFIG.get("moonshark_enabled", True):
@@ -5063,6 +5065,7 @@ def closegame_snipe():
     is often mispriced — real win probability is closer to 40-45%.
     Key: ONLY bet when the game is tight AND late."""
     _paper_only = not BOT_CONFIG.get("enabled")
+    bal = 10000  # default for paper-only mode; overwritten below when bot is enabled
     if _strategy_is_paused("closegame"):
         return []
     if not BOT_CONFIG.get("closegame_enabled", True):
@@ -5998,6 +6001,7 @@ def momentum_swing_snipe():
     what ESPN thinks, that's an overreaction we can buy.
     """
     _paper_only = not BOT_CONFIG.get("enabled")
+    bal = 10000  # default for paper-only mode; overwritten below when bot is enabled
     if _strategy_is_paused("momentum_swing"):
         return []
     if not BOT_CONFIG.get("swing_enabled", True):
@@ -6355,6 +6359,7 @@ def goalie_pulled_snipe():
     by GOALIE_MIN_EDGE we buy the mispriced side.
     """
     _paper_only = not BOT_CONFIG.get("enabled")
+    bal = 10000  # default for paper-only mode; overwritten below when bot is enabled
     if _strategy_is_paused("goalie_pulled"):
         return []
     if not BOT_CONFIG.get("goalie_enabled", True):
@@ -10732,6 +10737,14 @@ def _background_loop():
 
                 _total_unrealized = round(sum((p.get("unrealized_pnl_cents") or 0) for p in _pos2) / 100, 2)
 
+                # Total portfolio = cash + positions.
+                # Kalshi's portfolio_value is positions-only (NOT cash+positions),
+                # so we must add cash ourselves. Fallback: cash + mark-to-market.
+                # NOTE: computed BEFORE daily P&L so _pf_value2 is current-cycle.
+                _positions_val2 = round(_kalshi_portfolio2 if _kalshi_portfolio2 > 0 else _mv2, 2)
+                _pf_value2 = round(_bal2 + _positions_val2, 2)
+                _positions_value2 = _positions_val2
+
                 # Calculate true daily P&L: current portfolio value minus value at midnight PT
                 _daily_pnl = 0
                 try:
@@ -10755,13 +10768,6 @@ def _background_loop():
                         _daily_pnl = round(_daily_pnl, 2)
                 except Exception:
                     pass
-
-                # Total portfolio = cash + positions.
-                # Kalshi's portfolio_value is positions-only (NOT cash+positions),
-                # so we must add cash ourselves. Fallback: cash + mark-to-market.
-                _positions_val2 = round(_kalshi_portfolio2 if _kalshi_portfolio2 > 0 else _mv2, 2)
-                _pf_value2 = round(_bal2 + _positions_val2, 2)
-                _positions_value2 = _positions_val2
 
                 # Guard against API hiccups: if cash returned 0 but we had good data
                 # before, keep the old value instead of flashing a $400 swing
@@ -15728,7 +15734,7 @@ def _get_espn_win_prob(event_id, league, home_team=True):
 # ---------------------------------------------------------------------------
 _ODDS_API_CACHE = {}  # sport_key -> {"data": [...], "ts": float}
 _ODDS_API_TTL = 7200  # 2-hour default cache — overridden dynamically during game hours
-_ODDS_API_TTL_GAME_HOURS = 1800  # 30-min cache during active game hours (10am-11pm PT)
+_ODDS_API_TTL_GAME_HOURS = 3600  # 60-min cache during active game hours — conserves free tier (500 req/mo)
 _ODDS_API_TTL_OFF_HOURS = 7200   # 2-hour cache during off-hours
 _ODDS_API_STATS = {
     "last_fetch": None,
