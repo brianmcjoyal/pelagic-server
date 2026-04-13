@@ -24093,9 +24093,14 @@ async function loadPaperTrades(force) {
       var fName = filterKeys[fk];
       var fColor = _stratColors[fName] || '#888';
       var fActive = window._paperFilter === fName;
-      fHtml += '<button onclick="window._paperFilter=\'' + fName + '\';loadPaperTrades(true)" style="padding:4px 10px;border-radius:4px;border:1px solid ' + fColor + '44;background:' + (fActive ? fColor + '33' : '#111') + ';color:' + fColor + ';font-size:11px;cursor:pointer;text-transform:uppercase;font-weight:600">' + fName + '</button>';
+      fHtml += '<button data-filter="' + fName + '" style="padding:4px 10px;border-radius:4px;border:1px solid ' + fColor + '44;background:' + (fActive ? fColor + '33' : '#111') + ';color:' + fColor + ';font-size:11px;cursor:pointer;text-transform:uppercase;font-weight:600">' + fName + '</button>';
     }
     filterWrap.innerHTML = fHtml;
+    // Wire up filter button clicks
+    filterWrap.querySelectorAll('button[data-filter]').forEach(function(btn) {
+      btn.addEventListener('click', function() { window._paperFilter = btn.getAttribute('data-filter'); loadPaperTrades(true); });
+    });
+    filterWrap.querySelector('button:first-child').addEventListener('click', function() { window._paperFilter = null; loadPaperTrades(true); });
     // Filter trades
     var filteredTrades = trades;
     if (window._paperFilter) {
@@ -24153,7 +24158,7 @@ async function loadPaperTrades(force) {
         else if (t.clv_5min && t.clv_5min < -3) forward = 'Negative CLV pattern \\u2014 if this persists, the model may be too slow for this market type.';
         else forward = 'Continue collecting data points. Need more trades in similar conditions to draw conclusions.';
 
-        html += '<div onclick="toggleBetInsight(this)" style="background:#0a0a1a;border:1px solid #1a1a2e;border-radius:8px;padding:10px 12px;margin-bottom:6px;cursor:pointer;transition:border-color 0.2s" onmouseover="this.style.borderColor=\'#333\'" onmouseout="this.style.borderColor=\'#1a1a2e\'">';
+        html += '<div onclick="toggleBetInsight(this)" style="background:#0a0a1a;border:1px solid #1a1a2e;border-radius:8px;padding:10px 12px;margin-bottom:6px;cursor:pointer;transition:border-color 0.2s">';
         // Header row
         html += '<div style="display:flex;justify-content:space-between;align-items:center">';
         html += '<div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">';
