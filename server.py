@@ -56,6 +56,10 @@ STOP_WORDS = {
 TIMEOUT = 8
 API_SECRET = os.environ.get("TRADESHARK_API_SECRET", "")
 ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")
+if ODDS_API_KEY:
+    print(f"[STARTUP] Odds API key configured ({len(ODDS_API_KEY)} chars)")
+else:
+    print("[STARTUP] No ODDS_API_KEY set — sportsbook cross-referencing disabled")
 
 # ---------------------------------------------------------------------------
 # Bot version — tags every trade so we can separate old vs new performance
