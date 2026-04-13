@@ -12871,18 +12871,24 @@ def settled_positions():
         _bot_pnl = round(sum(s.get("pnl_usd", 0) for s in _bot_settled), 2)
         _bot_total = _bot_wins + _bot_losses
 
-        # Use TRADE JOURNAL as source of truth for W/L counts
-        # The 3-stage Kalshi reconstruction overcounts (166W vs real 10W).
-        # Trade journal tracks actual settled results accurately.
+        # Use TRADE JOURNAL if it has settled data, otherwise fall back to
+        # Kalshi reconstruction (which overcounts but is better than 0W/0L)
         _journal_wins = sum(1 for jt in _journal_snap if jt.get("result") == "win")
         _journal_losses = sum(1 for jt in _journal_snap if jt.get("result") == "loss")
         _journal_pnl = round(sum(float(jt.get("pnl_usd") or jt.get("pnl") or 0) for jt in _journal_snap if jt.get("result") in ("win", "loss")), 2)
         _journal_total = _journal_wins + _journal_losses
-        _final_wins = _journal_wins
-        _final_losses = _journal_losses
-        _final_pnl = _journal_pnl if _journal_total > 0 else _bot_pnl
+        if _journal_total > 0:
+            # Journal has settled data — use it (more accurate)
+            _final_wins = _journal_wins
+            _final_losses = _journal_losses
+            _final_pnl = _journal_pnl
+        else:
+            # Journal empty (after deploy wipe) — use reconstruction as fallback
+            _final_wins = _bot_wins
+            _final_losses = _bot_losses
+            _final_pnl = _bot_pnl
         _final_total = _final_wins + _final_losses
-        print(f"[SETTLED] Journal: {_journal_wins}W/{_journal_losses}L P&L=${_journal_pnl:.2f} | Reconstruction: {_bot_wins}W/{_bot_losses}L P&L=${_bot_pnl:.2f}")
+        print(f"[SETTLED] Journal: {_journal_wins}W/{_journal_losses}L | Reconstruction: {_bot_wins}W/{_bot_losses}L | Using: {'journal' if _journal_total > 0 else 'reconstruction'}")
 
         result = {
             "settled": settled,
