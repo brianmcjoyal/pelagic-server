@@ -23198,6 +23198,9 @@ async function loadPerformance() {
     var streak = 0, streakType = 'none', maxStreak = 0, maxDrawdown = 0, peak = 0, cumPnl = 0;
     var dailyPnls = {};
 
+    // Same-day W/L tracking (bets placed and settled on the same calendar day)
+    var sameDayWins = 0, sameDayLosses = 0;
+
     settled.forEach(function(s) {
       var pnl = s.pnl_usd || 0;
       allPnls.push(pnl);
@@ -23216,6 +23219,14 @@ async function loadPerformance() {
         losses++;
         lossPnls.push(pnl);
         bigLoss = Math.min(bigLoss, pnl);
+      }
+
+      // Check if same-day trade (entered and settled on same calendar day)
+      var entryDay = (s.trade_date || '').slice(0, 10);
+      var settleDay = (s.settle_time || s.entry_time || '').slice(0, 10);
+      if (entryDay && settleDay && entryDay === settleDay) {
+        if (s.won === true) sameDayWins++;
+        else if (s.won === false) sameDayLosses++;
       }
 
       // Daily P&L tracking
@@ -23282,14 +23293,20 @@ async function loadPerformance() {
 
     var khtml = '';
     // Row 1: Core trading metrics
-    khtml += kpi('Total P&L', (portfolioPnl >= 0 ? '+$' : '-$') + Math.abs(portfolioPnl).toFixed(2), portfolioPnlColor, total > 0 ? wins + 'W / ' + losses + 'L' : 'portfolio vs $' + DAY1_STARTING_BALANCE.toFixed(0) + ' start');
-    khtml += kpi('Win Rate', total > 0 ? winRate.toFixed(1) + '%' : '--', total > 0 ? wrColor : '#888', total > 0 ? total + ' settled' : 'no settled trades yet');
-    khtml += kpi('ROI', portfolioRoi.toFixed(1) + '%', portfolioRoiColor, '$' + DAY1_STARTING_BALANCE.toFixed(0) + ' starting balance');
+    // Same-day stats
+    var sameDayTotal = sameDayWins + sameDayLosses;
+    var sameDayWR = sameDayTotal > 0 ? (sameDayWins / sameDayTotal * 100) : 0;
+    var sameDayWRColor = sameDayWR >= 50 ? '#00dc5a' : sameDayWR >= 30 ? '#ffb400' : '#ff5000';
+
+    khtml += kpi('Total P&L', (portfolioPnl >= 0 ? '+$' : '-$') + Math.abs(portfolioPnl).toFixed(2), portfolioPnlColor, 'portfolio vs $' + DAY1_STARTING_BALANCE.toFixed(0) + ' start');
+    khtml += kpi('All-Time W/L', total > 0 ? wins + 'W / ' + losses + 'L' : '--', total > 0 ? wrColor : '#888', total > 0 ? winRate.toFixed(1) + '% win rate (' + total + ' trades)' : 'no settled trades yet');
+    khtml += kpi('Same-Day W/L', sameDayTotal > 0 ? sameDayWins + 'W / ' + sameDayLosses + 'L' : '--', sameDayTotal > 0 ? sameDayWRColor : '#888', sameDayTotal > 0 ? sameDayWR.toFixed(1) + '% win rate (' + sameDayTotal + ' trades)' : 'bets placed & settled same day');
     khtml += kpi('Daily P&L', (_dailyPl >= 0 ? '+$' : '-$') + Math.abs(_dailyPl).toFixed(2), _dailyPl >= 0 ? '#00dc5a' : '#ff5000', 'since midnight PT');
     khtml += kpi('Expectancy', total > 0 ? ((expectancy >= 0 ? '+$' : '-$') + Math.abs(expectancy).toFixed(2)) : '--', total > 0 ? expColor : '#888', total > 0 ? 'per trade' : '');
 
     // Row 2
     khtml += kpi('Portfolio', '$' + _perfPfVal.toFixed(2), '#fff', '$' + ((portfolioData || {}).balance_usd || 0).toFixed(2) + ' cash');
+    khtml += kpi('ROI', portfolioRoi.toFixed(1) + '%', portfolioRoiColor, '$' + DAY1_STARTING_BALANCE.toFixed(0) + ' starting balance');
     khtml += kpi('Avg Win', total > 0 ? ('+$' + avgWin.toFixed(2)) : '--', '#00dc5a', bigWin > 0 ? 'best +$' + bigWin.toFixed(2) : '');
     khtml += kpi('Avg Loss', total > 0 ? ('-$' + avgLoss.toFixed(2)) : '--', '#ff5000', bigLoss < 0 ? 'worst -$' + Math.abs(bigLoss).toFixed(2) : '');
     khtml += kpi('Profit Factor', total > 0 ? profitFactor.toFixed(2) : '--', total > 0 ? pfColor : '#888', avgWin > 0 ? '$' + avgWin.toFixed(2) + ' avg W' : '');
