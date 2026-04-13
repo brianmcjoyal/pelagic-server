@@ -3644,8 +3644,7 @@ def live_game_snipe():
     """Scan LIVE SPORTS markets for high-probability outcomes (70-90c).
     Strategy: only live sports + vetted short-term markets with volume.
     Profit: 10-30c per contract on settlement."""
-    if not BOT_CONFIG.get("enabled"):
-        return []
+    _paper_only = not BOT_CONFIG.get("enabled")
     if _strategy_is_paused("live_sniper"):
         return []
 
@@ -3657,13 +3656,15 @@ def live_game_snipe():
             BOT_STATE["snipe_trades_today"] = []
             BOT_STATE["snipe_daily_spent"] = 0.0
 
-    if BOT_STATE["snipe_daily_spent"] >= SNIPE_MAX_DAILY:
-        return []
+    if not _paper_only:
+        if BOT_STATE["snipe_daily_spent"] >= SNIPE_MAX_DAILY:
+            return []
 
     # Check balance (cached across strategies within a cycle)
-    bal = _get_cached_balance()
-    if bal < BOT_CONFIG.get("min_balance_usd", 200):
-        return []
+    if not _paper_only:
+        bal = _get_cached_balance()
+        if bal < BOT_CONFIG.get("min_balance_usd", 200):
+            return []
 
     # Get existing position tickers and events to avoid doubling down
     existing_tickers = set()
@@ -4119,6 +4120,8 @@ def live_game_snipe():
                     _log_paper_trade(ticker, title, side, price, _snipe_our_prob or implied_prob_snipe, (_snipe_our_prob - implied_prob_snipe) if _snipe_our_prob else 0, _snipe_ev_after_fees * 100 if _snipe_ev_after_fees else 0, strategy="sniper", game_state=_snipe_game.get("clock", "") if _snipe_game else "", sport=_snipe_league if _snipe_league else "")
                 except Exception:
                     pass
+                if _paper_only:
+                    continue
                 result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_snipe_ob_pre,
                                            win_prob=_snipe_our_prob, edge=(_snipe_our_prob - implied_prob_snipe) if _snipe_our_prob else None, strategy="live_sniper")
                 success = "error" not in result
@@ -4226,8 +4229,7 @@ def moonshark_snipe():
     """Scan LIVE SPORTS markets for cheap longshot contracts (10-30c).
     Strategy: small bets on underdog outcomes in liquid, closing-soon markets.
     Profit: 70-90c per contract on settlement (rare but huge)."""
-    if not BOT_CONFIG.get("enabled"):
-        return []
+    _paper_only = not BOT_CONFIG.get("enabled")
     if _strategy_is_paused("moonshark"):
         return []
     if not BOT_CONFIG.get("moonshark_enabled", True):
@@ -4241,8 +4243,9 @@ def moonshark_snipe():
             BOT_STATE["moonshark_trades_today"] = []
             BOT_STATE["moonshark_daily_spent"] = 0.0
 
-    if BOT_STATE["moonshark_daily_spent"] >= MOONSHARK_MAX_DAILY:
-        return []
+    if not _paper_only:
+        if BOT_STATE["moonshark_daily_spent"] >= MOONSHARK_MAX_DAILY:
+            return []
 
     if len(BOT_STATE.get("moonshark_trades_today", [])) >= MOONSHARK_MAX_TRADES:
         return []
@@ -4252,9 +4255,10 @@ def moonshark_snipe():
         _log_activity(f"🦈 MoonShark FLOOR MODE: {_ms_count}/{MOONSHARK_MIN_TRADES} trades — relaxing filters", "info")
 
     # Check balance (cached across strategies within a cycle)
-    bal = _get_cached_balance()
-    if bal < BOT_CONFIG.get("min_balance_usd", 200):
-        return []
+    if not _paper_only:
+        bal = _get_cached_balance()
+        if bal < BOT_CONFIG.get("min_balance_usd", 200):
+            return []
 
     # Get existing position tickers and events to avoid doubling down
     existing_tickers = set()
@@ -4926,6 +4930,8 @@ def moonshark_snipe():
                     _log_paper_trade(ticker, title, side, price, win_prob, espn_edge or 0, _ev_after_fees * 100 if _ev_after_fees else 0, strategy="moonshark", sport=_league if _league else "")
                 except Exception:
                     pass
+                if _paper_only:
+                    continue
                 result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob,
                                            win_prob=_model_prob if _model_prob else None, edge=espn_edge, strategy="moonshark")
                 success = "error" not in result
@@ -5044,8 +5050,7 @@ def closegame_snipe():
     Strategy: Kalshi prices lag live action. A team down 2 in Q4 at 35c
     is often mispriced — real win probability is closer to 40-45%.
     Key: ONLY bet when the game is tight AND late."""
-    if not BOT_CONFIG.get("enabled"):
-        return []
+    _paper_only = not BOT_CONFIG.get("enabled")
     if _strategy_is_paused("closegame"):
         return []
     if not BOT_CONFIG.get("closegame_enabled", True):
@@ -5059,15 +5064,17 @@ def closegame_snipe():
             BOT_STATE["closegame_trades_today"] = []
             BOT_STATE["closegame_daily_spent"] = 0.0
 
-    if BOT_STATE.get("closegame_daily_spent", 0) >= CLOSEGAME_MAX_DAILY:
-        return []
+    if not _paper_only:
+        if BOT_STATE.get("closegame_daily_spent", 0) >= CLOSEGAME_MAX_DAILY:
+            return []
     if len(BOT_STATE.get("closegame_trades_today", [])) >= CLOSEGAME_MAX_TRADES:
         return []
 
     # Check balance (cached across strategies within a cycle)
-    bal = _get_cached_balance()
-    if bal < BOT_CONFIG.get("min_balance_usd", 200):
-        return []
+    if not _paper_only:
+        bal = _get_cached_balance()
+        if bal < BOT_CONFIG.get("min_balance_usd", 200):
+            return []
 
     # Get existing positions
     existing_tickers = set()
@@ -5490,6 +5497,8 @@ def closegame_snipe():
                     _log_paper_trade(ticker, title, side, price, estimated_win_prob, edge, _cg_ev_after_fees * 100 if _cg_ev_after_fees else 0, strategy="closegame", game_state=score_str, sport=cg.get("sport", ""))
                 except Exception:
                     pass
+                if _paper_only:
+                    continue
                 result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_cg_ob,
                                            win_prob=espn_win_prob_cg, edge=espn_edge_cg, strategy="closegame")
                 success = "error" not in result
@@ -5976,8 +5985,7 @@ def momentum_swing_snipe():
     our ground truth. When Kalshi has the trailing team priced well below
     what ESPN thinks, that's an overreaction we can buy.
     """
-    if not BOT_CONFIG.get("enabled"):
-        return []
+    _paper_only = not BOT_CONFIG.get("enabled")
     if _strategy_is_paused("momentum_swing"):
         return []
     if not BOT_CONFIG.get("swing_enabled", True):
@@ -5990,14 +5998,16 @@ def momentum_swing_snipe():
             BOT_STATE["swing_trades_today"] = []
             BOT_STATE["swing_daily_spent"] = 0.0
 
-    if BOT_STATE.get("swing_daily_spent", 0) >= SWING_MAX_DAILY_USD:
-        return []
+    if not _paper_only:
+        if BOT_STATE.get("swing_daily_spent", 0) >= SWING_MAX_DAILY_USD:
+            return []
     if len(BOT_STATE.get("swing_trades_today", [])) >= SWING_MAX_TRADES:
         return []
 
-    bal = _get_cached_balance()
-    if bal < BOT_CONFIG.get("min_balance_usd", 200):
-        return []
+    if not _paper_only:
+        bal = _get_cached_balance()
+        if bal < BOT_CONFIG.get("min_balance_usd", 200):
+            return []
 
     try:
         scores = _get_espn_scores()
@@ -6224,6 +6234,8 @@ def momentum_swing_snipe():
                 _log_paper_trade(ticker, title, side, price, live_prob, edge, _sw_ev_after_fees * 100 if _sw_ev_after_fees else 0, strategy="swing", game_state=f"{margin}pt deficit {period}", sport=league)
             except Exception:
                 pass
+            if _paper_only:
+                continue
             result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob,
                                        win_prob=live_prob, edge=edge, strategy="momentum_swing")
             if "error" in result:
@@ -6330,8 +6342,7 @@ def goalie_pulled_snipe():
     goalie-pull territory. When ESPN's live win model diverges from Kalshi
     by GOALIE_MIN_EDGE we buy the mispriced side.
     """
-    if not BOT_CONFIG.get("enabled"):
-        return []
+    _paper_only = not BOT_CONFIG.get("enabled")
     if _strategy_is_paused("goalie_pulled"):
         return []
     if not BOT_CONFIG.get("goalie_enabled", True):
@@ -6344,14 +6355,16 @@ def goalie_pulled_snipe():
             BOT_STATE["goalie_trades_today"] = []
             BOT_STATE["goalie_daily_spent"] = 0.0
 
-    if BOT_STATE.get("goalie_daily_spent", 0) >= GOALIE_MAX_DAILY_USD:
-        return []
+    if not _paper_only:
+        if BOT_STATE.get("goalie_daily_spent", 0) >= GOALIE_MAX_DAILY_USD:
+            return []
     if len(BOT_STATE.get("goalie_trades_today", [])) >= GOALIE_MAX_TRADES:
         return []
 
-    bal = _get_cached_balance()
-    if bal < BOT_CONFIG.get("min_balance_usd", 200):
-        return []
+    if not _paper_only:
+        bal = _get_cached_balance()
+        if bal < BOT_CONFIG.get("min_balance_usd", 200):
+            return []
 
     try:
         scores = _get_espn_scores()
@@ -6554,6 +6567,8 @@ def goalie_pulled_snipe():
             _log_paper_trade(ticker, title, side, price, best["our_prob"], edge, _gl_ev_after_fees * 100 if _gl_ev_after_fees else 0, strategy="goalie", game_state=f"{away_abbrev} {away_score}-{home_score} {home_abbrev} {period} ({secs_left}s)", sport="nhl")
         except Exception:
             pass
+        if _paper_only:
+            continue
         result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob,
                                    win_prob=best["our_prob"], edge=edge, strategy="goalie_pulled")
         if "error" in result:
