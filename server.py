@@ -11329,9 +11329,9 @@ def _build_tradeshark_icon_png(size=180):
     # Crossbar
     bL, bR = pad, size - pad
     bT, bB = pad, pad + int(size * 0.17)
-    # Stem — skinnier than before (16% width instead of 28%)
-    sL = int(size * 0.42)
-    sR = int(size * 0.58)
+    # Stem — extra slim (10% width)
+    sL = int(size * 0.45)
+    sR = int(size * 0.55)
     sT, sB = bB, size - pad
 
     # Shark teeth along bottom of crossbar pointing downward
@@ -11439,32 +11439,40 @@ def _build_tradeshark_icon_png(size=180):
         (int(size * 0.50), int(size * 0.42), max(1, int(size * 0.018))),  # where stem meets bar
     ]
 
+    # Green color for shark teeth (TradeShark green)
+    tooth_color = (0x00, 0xdc, 0x5a)
+
     # Render
     for y in range(size):
         for x in range(size):
             cov = _in_T(x, y)
             if cov > 0.001:
-                t = (y - bT) / max(1, sB - bT)
-                gold = _gold_at(t)
+                # Determine if this pixel is a tooth
+                is_tooth = _in_tooth(x, y) > 0.001
 
-                # Diagonal glimmer: brighten pixels near the glimmer line
-                # Project point onto the glimmer axis
-                dx = x - glimmer_cx
-                dy = y - glimmer_cy
-                # Distance along the perpendicular to the glimmer band
-                perp_dist = abs(-sin_a * dx + cos_a * dy)
-                if perp_dist < glimmer_w:
-                    glimmer_strength = (1.0 - perp_dist / glimmer_w) ** 2 * 0.55
-                    gold = tuple(min(255, int(g + (255 - g) * glimmer_strength)) for g in gold)
+                if is_tooth:
+                    # Green teeth — slight gradient darker at tip
+                    tip_frac = (y - bB) / max(1, tooth_h)
+                    color = tuple(int(tooth_color[i] * (1.0 - 0.3 * tip_frac)) for i in range(3))
+                else:
+                    t = (y - bT) / max(1, sB - bT)
+                    color = _gold_at(t)
+
+                    # Diagonal glimmer: brighten pixels near the glimmer line
+                    dx = x - glimmer_cx
+                    dy = y - glimmer_cy
+                    perp_dist = abs(-sin_a * dx + cos_a * dy)
+                    if perp_dist < glimmer_w:
+                        glimmer_strength = (1.0 - perp_dist / glimmer_w) ** 2 * 0.55
+                        color = tuple(min(255, int(g + (255 - g) * glimmer_strength)) for g in color)
 
                 # Composite with anti-aliasing
                 a = int(cov * 255)
                 if a >= 255:
-                    px[y * size + x] = gold + (255,)
+                    px[y * size + x] = color + (255,)
                 else:
-                    # Blend with bg
                     f = a / 255.0
-                    blended = tuple(int(bg[i] * (1 - f) + gold[i] * f) for i in range(3))
+                    blended = tuple(int(bg[i] * (1 - f) + color[i] * f) for i in range(3))
                     px[y * size + x] = blended + (255,)
 
     # Glow: soft outer glow around the T shape (2-pass for softness)
@@ -11817,7 +11825,7 @@ def tradeshark_manifest():
         "background_color": "#0d0d0d",
         "theme_color": "#c9963a",
         "icons": [
-            {"src": "/apple-touch-icon.png?v=3", "sizes": "180x180", "type": "image/png", "purpose": "any"},
+            {"src": "/apple-touch-icon.png?v=4", "sizes": "180x180", "type": "image/png", "purpose": "any"},
             {"src": "/icon-192.png?v=2", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
         ],
     })
@@ -19267,8 +19275,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <title>TradeShark</title>
 <!-- PWA / iOS Add-to-Home-Screen -->
 <link rel="icon" type="image/png" href="/favicon.ico?v=2">
-<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=3">
-<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=3">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=4">
+<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=4">
 <link rel="manifest" href="/manifest.json?v=2">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
