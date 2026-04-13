@@ -11890,11 +11890,12 @@ def settled_positions():
     if not headers:
         return jsonify({"settled": [], "error": "No API key"})
     try:
-        # Get ALL positions (settled + unsettled) with realized P&L
+        # Get ONLY settled positions for accurate win rate
+        # (unsettled positions with partial sells were inflating W/L counts)
         # Handle 429 rate-limits gracefully — return cached data instead of failing
         positions_list = []
         _rate_limited = False
-        for _status in ["settled", "unsettled"]:
+        for _status in ["settled"]:
             cursor = None
             for _ in range(10):
                 params = {"limit": 200, "settlement_status": _status}
