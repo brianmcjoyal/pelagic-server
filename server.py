@@ -24154,9 +24154,11 @@ async function loadBrain(force) {
     var data = await fetch(API + '/analytics/learning').then(function(r){ return r.json(); });
     if (data.error) throw new Error(data.error);
 
-    _setText('brain-version', 'v' + (data.version || 0));
-    _setText('brain-settled', data.settled_count || 0);
     var adaptive = data.adaptive || {};
+    // Use total_tunes as the version — it's cumulative and survives deploys
+    var _cumulativeVersion = adaptive.total_tunes || data.version || 0;
+    _setText('brain-version', 'v' + _cumulativeVersion);
+    _setText('brain-settled', data.settled_count || 0);
     _setText('brain-totaltunes', adaptive.total_tunes || 0);
     _setText('brain-lasttune', adaptive.last_tune ? fmtTime(adaptive.last_tune) : 'never');
     _setText('brain-updated', 'Last run: ' + (data.last_run ? fmtTime(data.last_run) : '--'));
