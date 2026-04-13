@@ -305,6 +305,8 @@ def _save_state():
             # HWM removed — raw Kalshi data is source of truth now
             # Paper trades (persist across restarts, not day-dependent)
             "paper_trades": _paper_for_save,
+            # Persist bot enabled state so kill switch survives deploys
+            "bot_enabled": BOT_CONFIG.get("enabled", True),
             # Timestamp for date-check on load
             "save_date": datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d"),
         }
@@ -450,6 +452,15 @@ def _load_state():
             _PAPER_TRADES.clear()
             _PAPER_TRADES.extend(saved_paper[-_PAPER_TRADES_MAX:])
             print(f"[STATE] Restored {len(_PAPER_TRADES)} paper trades from disk")
+
+        # Restore bot enabled state — kill switch must survive deploys
+        if "bot_enabled" in data:
+            BOT_CONFIG["enabled"] = data["bot_enabled"]
+            if not data["bot_enabled"]:
+                BOT_STATE["auto_trade"] = False
+                print(f"[STATE] ⚠️ Bot is DISABLED (kill switch was active before deploy)")
+            else:
+                print(f"[STATE] Bot enabled state restored: {data['bot_enabled']}")
 
         # HWM no longer restored — we want raw Kalshi numbers, not inflated historical max.
         # The /settled endpoint will recalculate accurate W/L from Kalshi API on each call.
@@ -5441,7 +5452,7 @@ def closegame_snipe():
                 # Allow spread edge to supplement: if moneyline edge is 2% but spread adds 3%, total is enough
                 _combined_edge_cg = max(espn_edge_cg or 0, (espn_edge_cg or 0) + _cg_spread_edge * 0.3)
                 # If no live win prob available, require higher threshold (5% instead of 3%)
-                _cg_edge_threshold = 0.03 if _cg_live_prob is not None else 0.05
+                _cg_edge_threshold = _adaptive_get("min_edge_closegame", 0.03) if _cg_live_prob is not None else 0.05
                 if _combined_edge_cg < _cg_edge_threshold:
                     _log_activity(
                         f"CLOSEGAME SKIP: {title[:35]} — no ESPN edge (need {_cg_edge_threshold:.0%}+, got {espn_edge_cg:.1%} )" if espn_edge_cg else f"CLOSEGAME SKIP: {title[:35]} — no ESPN odds data",
@@ -6186,7 +6197,7 @@ def momentum_swing_snipe():
 
             implied = price / 100.0
             edge = live_prob - implied
-            if edge < SWING_MIN_EDGE:
+            if edge < _adaptive_get("min_edge_swing", 0.06):
                 continue
 
             # Must still have at least 4% of clock left for real recovery
@@ -6527,7 +6538,7 @@ def goalie_pulled_snipe():
             is_home_ticker = home_abbrev in ticker and (away_abbrev not in ticker or ticker.endswith(home_abbrev))
             our_prob = home_live if is_home_ticker else away_live
             edge = our_prob - implied
-            if edge >= GOALIE_MIN_EDGE and (best is None or edge > best["edge"]):
+            if edge >= _adaptive_get("min_edge_goalie", 0.05) and (best is None or edge > best["edge"]):
                 best = {
                     "edge": edge, "price": yes_ask, "implied": implied,
                     "our_prob": our_prob, "ticker": _raw_ticker,
@@ -19003,6 +19014,8 @@ def execute_trade():
     auth_err = _require_auth()
     if auth_err:
         return auth_err
+    if not BOT_CONFIG.get("enabled", False):
+        return jsonify({"error": "Bot is disabled (kill switch active). Re-enable manually."}), 403
     data = request.get_json(force=True)
     ticker = data.get("ticker")
     side = data.get("side")
