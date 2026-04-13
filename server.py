@@ -14039,79 +14039,251 @@ def insights_endpoint():
 _NEWS_FEED_CACHE = {"stories": [], "ts": 0, "date": None}
 _NEWS_FEED_TTL = 86400  # 24 hours — refreshes daily at 6am PT
 
-# News impact analysis — keyword-based economic impact + stock picks
+# ── Multi-factor news impact engine ──────────────────────────────────────────
+# Each rule has: keywords, a multi-sentence macro analysis (1st & 2nd order
+# effects), a directional conviction, cross-asset correlations, specific
+# tickers with thesis, and a confidence-weighted time horizon.
+#
+# Written with the lens of: macro economist + quant PM + geopolitical analyst.
+# The goal is NOT generic commentary — it's *actionable intelligence* that
+# tells you what is moving, why, what moves next, and how to position.
 _NEWS_IMPACT_RULES = [
-    # (keywords_any, impact_text, [(ticker, reason), ...])
-    (["iran", "war", "military", "strike", "bomb", "attack", "conflict", "missile"],
-     "Geopolitical risk spikes oil prices, weighs on equities. Defense spending up, consumer confidence down.",
-     [("LMT", "Lockheed Martin — defense spending surges during conflict"),
-      ("XLE", "Energy Select ETF — oil prices spike on supply disruption")]),
-    (["tariff", "trade war", "import tax", "trade deal", "sanctions"],
-     "Trade barriers raise costs for importers, slow global growth. Domestic producers may benefit short-term.",
-     [("DBA", "Agriculture ETF — tariffs shift commodity flows"),
-      ("WMT", "Walmart — import cost pressure on retail margins")]),
-    (["fed ", "interest rate", "rate cut", "rate hike", "federal reserve", "powell", "monetary policy"],
-     "Rate changes ripple through mortgages, bonds, and growth stocks. Lower rates boost tech, higher rates favor banks.",
-     [("TLT", "20+ Year Treasury ETF — moves inversely to rate expectations"),
-      ("XLF", "Financial Select ETF — banks profit from higher rates")]),
-    (["oil", "crude", "opec", "petroleum", "gas price", "energy price", "wti", "brent"],
-     "Energy price swings affect transportation, manufacturing costs, and consumer spending power.",
-     [("XOM", "ExxonMobil — directly benefits from higher oil prices"),
-      ("DAL", "Delta Air Lines — fuel costs are major expense, lower oil = higher margins")]),
-    (["inflation", "cpi", "consumer price", "cost of living"],
-     "Rising inflation erodes purchasing power, pressures Fed to tighten. Benefits hard assets, hurts growth stocks.",
-     [("TIP", "TIPS ETF — inflation-protected treasuries outperform"),
-      ("COST", "Costco — pricing power and bulk buying hedge inflation")]),
-    (["recession", "gdp", "economic slowdown", "contraction", "unemployment"],
-     "Recession fears drive flight to safety — bonds, gold, utilities. Cyclical sectors underperform.",
-     [("GLD", "Gold ETF — classic safe haven during downturns"),
-      ("XLU", "Utilities ETF — defensive sector with stable dividends")]),
-    (["tech", "ai ", "artificial intelligence", "nvidia", "openai", "google", "apple", "microsoft", "semiconductor", "chip"],
-     "Tech sector moves drive Nasdaq. AI spending boom benefits chipmakers and cloud providers.",
-     [("NVDA", "Nvidia — dominant in AI chip market"),
-      ("MSFT", "Microsoft — Azure + OpenAI partnership drives cloud/AI revenue")]),
-    (["crypto", "bitcoin", "ethereum", "blockchain", "digital currency"],
-     "Crypto moves signal risk appetite. Institutional adoption growing but regulatory uncertainty remains.",
-     [("COIN", "Coinbase — revenue tied to crypto trading volume"),
-      ("MSTR", "MicroStrategy — large Bitcoin holdings amplify BTC moves")]),
-    (["china", "beijing", "chinese economy", "yuan", "ccp"],
-     "China's economy impacts global supply chains, commodities demand, and emerging market sentiment.",
-     [("FXI", "China Large-Cap ETF — direct exposure to Chinese equities"),
-      ("CAT", "Caterpillar — infrastructure demand tied to Chinese growth")]),
-    (["housing", "mortgage", "real estate", "home price", "home sale"],
-     "Housing market affects consumer wealth, bank balance sheets, and construction employment.",
-     [("XHB", "Homebuilders ETF — direct housing market exposure"),
-      ("LEN", "Lennar — top homebuilder benefits from strong demand")]),
-    (["bank", "banking", "credit", "loan", "financial crisis", "bank failure"],
-     "Banking stress tightens lending, slows economic growth. Contagion risk can spread across financial system.",
-     [("KRE", "Regional Bank ETF — most exposed to credit stress"),
-      ("JPM", "JPMorgan — flight to quality benefits largest banks")]),
-    (["fertilizer", "agriculture", "farm", "crop", "food price", "grain"],
-     "Agricultural supply disruptions raise food prices globally, impacting emerging markets most severely.",
-     [("MOS", "Mosaic — major fertilizer producer benefits from shortages"),
-      ("ADM", "Archer-Daniels-Midland — food commodity processing and trading")]),
-    (["japan", "yen", "nikkei", "boj", "bank of japan"],
-     "Japanese monetary policy shifts impact global bond yields and carry trades. Yen strength = risk-off signal.",
-     [("EWJ", "Japan ETF — direct Japanese equity exposure"),
-      ("FXY", "Yen ETF — benefits from yen strengthening")]),
-    (["trump", "white house", "executive order", "president"],
-     "Policy shifts create sector winners and losers. Markets price regulatory and trade uncertainty.",
-     [("SPY", "S&P 500 ETF — broad market exposure to policy shifts"),
-      ("IWM", "Russell 2000 ETF — small caps most sensitive to domestic policy")]),
+    # ── GEOPOLITICS & DEFENSE ──
+    (["iran", "war", "military", "strike", "bomb", "attack", "conflict", "missile", "invasion", "troops", "nato", "ceasefire", "peace deal"],
+     "FIRST ORDER: Defense primes rally, crude spikes on supply-chain threat, VIX jumps 2-5 pts. "
+     "SECOND ORDER: If sustained, higher energy costs compress margins for airlines, trucking, and consumer discretionary. "
+     "Dollar strengthens as global safe-haven bid, pressuring EM currencies and commodity exporters. "
+     "Gold rallies but lag-fades if conflict de-escalates within 72h — that fade is often the better trade.",
+     [("LMT", "Lockheed Martin — order backlog grows with every escalation; 20x fwd P/E still cheap vs peers"),
+      ("XLE", "Energy Select ETF — crude beta play; historically +8-12% in first week of major conflict"),
+      ("GLD", "Gold ETF — safe-haven bid; outperforms cash in sustained geopolitical uncertainty"),
+      ("DAL", "Delta Air Lines — SHORT side; jet fuel is 25% of opex, every $10/bbl move = ~$0.35 EPS impact")]),
+
+    # ── TARIFFS & TRADE POLICY ──
+    (["tariff", "trade war", "import tax", "trade deal", "sanctions", "export ban", "trade restrict", "trade deficit", "customs", "trade agreement", "wto "],
+     "FIRST ORDER: Tariffs are a tax on the importing country's consumers and businesses. Gross margins compress for importers within 1-2 quarters. "
+     "SECOND ORDER: Retaliatory tariffs hit US exporters (agriculture, aerospace, tech). Supply chain restructuring takes 12-18 months — in the interim, costs rise and capex freezes. "
+     "The market almost always overreacts to tariff headlines in the first 48h. The real damage shows up in earnings 2 quarters later. "
+     "Currency markets adjust faster than equities — watch USD/CNY for the true severity signal.",
+     [("WMT", "Walmart — 60%+ of goods imported; margin pressure but pricing power offsets partially"),
+      ("DE", "Deere & Co — agricultural exports hit by retaliatory tariffs; also higher steel input costs"),
+      ("AAPL", "Apple — China supply chain exposure + potential retaliatory consumer boycotts"),
+      ("DBA", "Agriculture ETF — soybean/corn futures shift on trade flow disruption; +/- 15% swings common")]),
+
+    # ── FED / MONETARY POLICY ──
+    (["fed ", "interest rate", "rate cut", "rate hike", "federal reserve", "powell", "monetary policy", "fomc", "basis point", "bps", "quantitative"],
+     "FIRST ORDER: Fed rhetoric moves the 2-year yield within minutes — this is the single most important price in global markets. "
+     "Dovish pivot = growth stocks rally, dollar weakens, EM debt rallies. Hawkish surprise = banks outperform, long-duration assets sell off. "
+     "SECOND ORDER: Rate expectations flow into mortgage rates within 48h, affecting housing affordability and refinancing activity. "
+     "Corporate borrowing costs reprice within a week, impacting leveraged companies (Russell 2000 has 3x the floating-rate debt of S&P 500). "
+     "The Fed Funds futures curve is the smart money consensus — when headlines disagree with futures pricing, bet on the futures.",
+     [("TLT", "20+ Year Treasury ETF — the purest duration bet; +1% on every 25bps of unexpected dovishness"),
+      ("XLF", "Financial Select ETF — NIM expansion from higher rates; banks earn more on deposits they already hold"),
+      ("IWM", "Russell 2000 — small caps have 3x floating-rate debt vs large caps; most rate-sensitive equity index"),
+      ("QQQ", "Nasdaq 100 — long-duration growth stocks; DCF valuations compress/expand 5-8% per 50bps move")]),
+
+    # ── OIL & ENERGY ──
+    (["oil", "crude", "opec", "petroleum", "gas price", "energy price", "wti", "brent", "pipeline", "drilling", "refiner", "natural gas", "lng"],
+     "FIRST ORDER: Crude above $85 = consumer spending drag; below $65 = shale capex cuts within 2 quarters. "
+     "OPEC production decisions move oil 5-10% in a session but often mean-revert within 2 weeks as cheating resumes. "
+     "SECOND ORDER: Sustained high energy prices are inflationary — they raise input costs for 80% of the economy and push CPI higher, which constrains Fed rate cuts. "
+     "Natural gas decouples from oil when weather events hit — LNG export dynamics now link US Henry Hub to European TTF pricing. "
+     "The crack spread (refining margin) is often a better signal than crude price alone for downstream profitability.",
+     [("XOM", "ExxonMobil — integrated major with refining hedges; outperforms pure E&P in volatile oil"),
+      ("OXY", "Occidental — Permian Basin leverage; Buffett's continued buying signals long-term conviction"),
+      ("DAL", "Delta Air Lines — fuel hedging program expired; most exposed major airline to crude spikes"),
+      ("XOP", "Oil & Gas E&P ETF — pure upstream beta; +15-20% on sustained $10/bbl price increase")]),
+
+    # ── INFLATION / CPI ──
+    (["inflation", "cpi", "consumer price", "cost of living", "pce", "core inflation", "deflation", "disinflation"],
+     "FIRST ORDER: CPI prints above consensus = immediate selloff in rate-sensitive assets as Fed cut expectations get repriced. "
+     "Core services inflation (ex-housing) is the metric the Fed actually watches — headline CPI is noise from energy and food. "
+     "SECOND ORDER: Sticky inflation above 3% forces the Fed to keep rates restrictive, which slowly drains liquidity from risk assets over months. "
+     "Inflation benefits companies with pricing power (luxury, monopolies, essentials) and hurts capital-intensive businesses with long project cycles. "
+     "TIPS breakevens are the market's real-time inflation expectation — when they diverge from CPI prints, there's a mean-reversion trade.",
+     [("TIP", "TIPS ETF — direct inflation hedge; outperforms nominal bonds when CPI surprises to the upside"),
+      ("COST", "Costco — membership model + bulk pricing = best-in-class ability to pass costs through"),
+      ("AMT", "American Tower — real assets with inflation-linked lease escalators; 3% annual rent bumps contractual"),
+      ("XLY", "Consumer Discretionary ETF — SHORT side; first sector to compress when real wages fall")]),
+
+    # ── RECESSION / GDP ──
+    (["recession", "gdp", "economic slowdown", "contraction", "depression", "soft landing", "hard landing", "economic growth"],
+     "FIRST ORDER: The word 'recession' in headlines triggers retail panic selling — this is often the worst time to sell. "
+     "By the time recession is consensus, markets have typically already priced in 60-70% of the downside. "
+     "SECOND ORDER: Recessions are when wealth transfers from the impatient to the patient. Credit spreads widen first (watch HYG/LQD ratio), "
+     "then earnings estimates get cut, then layoffs show up in data 3-6 months later. "
+     "The yield curve (10Y-2Y spread) un-inverting after being inverted is the actual recession signal — not the inversion itself. "
+     "Historically, the S&P 500 bottoms 4-6 months before GDP troughs. By the time NBER calls it, stocks are already up 20%+.",
+     [("GLD", "Gold ETF — 15% avg return during recessions; central banks also buying at record pace"),
+      ("XLU", "Utilities ETF — recession-proof cash flows; people pay electric bills before buying iPhones"),
+      ("JNJ", "Johnson & Johnson — healthcare demand is non-cyclical; 62 consecutive years of dividend increases"),
+      ("HYG", "High Yield Bond ETF — SHORT or monitor; credit spreads blow out 200-400bps in recessions, signaling stress early")]),
+
+    # ── TECH / AI ──
+    (["tech", "ai ", "artificial intelligence", "nvidia", "openai", "google", "apple", "microsoft", "semiconductor", "chip", "meta ", "nasdaq", "silicon valley", "cloud computing"],
+     "FIRST ORDER: AI capex is currently running at $150B+/year from hyperscalers alone — this is the largest infrastructure buildout since the internet. "
+     "Semiconductor demand is cyclical but AI inference demand is structural — the market hasn't fully separated these two narratives yet. "
+     "SECOND ORDER: Every $1 of AI chip capex generates $3-5 of downstream software/services revenue over 3 years. "
+     "The winners aren't just chipmakers — it's the companies deploying AI to cut costs (healthcare, legal, financial services). "
+     "Watch the Mag 7 earnings revisions — when they get cut, the entire market P/E compresses because these 7 stocks ARE the market's earnings growth.",
+     [("NVDA", "Nvidia — 80%+ AI training market share; data center revenue doubling YoY; the picks-and-shovels play"),
+      ("MSFT", "Microsoft — Azure AI + Copilot monetization; only company embedding AI across enterprise stack"),
+      ("AVGO", "Broadcom — custom AI chip (ASIC) leader; networking silicon for AI data centers is undersupplied"),
+      ("SMCI", "Super Micro Computer — AI server assembly; 60% revenue growth but watch for margin compression as competition enters")]),
+
+    # ── CRYPTO / DIGITAL ASSETS ──
+    (["crypto", "bitcoin", "ethereum", "blockchain", "digital currency", "btc ", "eth ", "stablecoin", "defi", "binance", "coinbase", "sec crypto"],
+     "FIRST ORDER: Bitcoin above its 200-day MA = risk-on environment; below = institutional selling and leverage unwind. "
+     "Crypto moves 2-3x equity volatility and leads risk sentiment by 12-24 hours — it trades 24/7 while equities sleep. "
+     "SECOND ORDER: Bitcoin ETF flows are now the dominant price driver — watch daily IBIT/FBTC inflow data, not on-chain metrics. "
+     "Regulatory clarity (favorable or hostile) moves the sector 15-25% in a week. SEC enforcement actions create short-term fear but long-term legitimacy. "
+     "Stablecoin market cap growth is the best leading indicator of new money entering crypto — it leads BTC price by 2-4 weeks.",
+     [("COIN", "Coinbase — direct beneficiary of ETF custody fees + retail volume spikes; revenue 80% correlated to BTC price"),
+      ("MSTR", "MicroStrategy — leveraged BTC proxy; 1.5-2x BTC beta due to convertible debt structure"),
+      ("IBIT", "iShares Bitcoin ETF — purest institutional BTC exposure; tracking $40B+ AUM"),
+      ("SQ", "Block Inc — Cash App Bitcoin revenue + merchant payment network; diversified crypto exposure")]),
+
+    # ── CHINA / ASIA ──
+    (["china", "beijing", "chinese economy", "yuan", "ccp", "taiwan", "xi jinping", "renminbi", "shanghai"],
+     "FIRST ORDER: Chinese stimulus announcements move copper, iron ore, and Australian dollar within hours — these are the true China proxies, not Chinese stocks. "
+     "Property sector stress in China = deflationary impulse globally; China exported deflation in 2023-24 and may continue. "
+     "SECOND ORDER: Taiwan tension is the #1 tail risk for global markets — TSMC produces 90% of advanced chips. "
+     "Any military escalation in the Taiwan Strait would crash semiconductors 30-40% overnight and disrupt every tech supply chain on earth. "
+     "Yuan devaluation = competitive pressure on all Asian exporters; watch USD/CNY 7.35 level as the PBOC's line in the sand.",
+     [("FXI", "China Large-Cap ETF — direct but risky; government intervention makes fundamentals unreliable"),
+      ("KWEB", "China Internet ETF — tech recovery play but regulatory overhang persists"),
+      ("FCX", "Freeport-McMoRan — copper is the China stimulus barometer; +20% in past stimulus cycles"),
+      ("TSM", "TSMC — best semiconductor company on earth; trades at geopolitical discount due to Taiwan risk")]),
+
+    # ── HOUSING / REAL ESTATE ──
+    (["housing", "mortgage", "real estate", "home price", "home sale", "rent ", "rental", "foreclosure", "housing start"],
+     "FIRST ORDER: Mortgage rates drive housing affordability more than home prices. Every 1% rate increase removes ~10% of qualified buyers from the market. "
+     "Existing home sales have a 'lock-in effect' — homeowners with 3% mortgages won't sell into 7% rates, creating artificial supply scarcity. "
+     "SECOND ORDER: Housing wealth effect drives 5-7 cents of consumer spending per dollar of home equity gain/loss. "
+     "Weakening housing is the earliest signal of consumer stress — it shows up in Home Depot/Lowe's earnings before GDP revisions. "
+     "Regional bank exposure to CRE (commercial real estate) is the systemic risk — 70% of CRE loans sit on regional bank balance sheets.",
+     [("XHB", "Homebuilders ETF — builders benefit from low existing inventory; new builds gain market share"),
+      ("LEN", "Lennar — largest homebuilder; margin expansion when lumber/labor costs decline"),
+      ("O", "Realty Income — monthly dividend REIT; commercial real estate bellwether with investment-grade tenants"),
+      ("KRE", "Regional Bank ETF — CRE exposure risk; watch for write-downs if commercial vacancy rates rise")]),
+
+    # ── BANKING / FINANCIAL SYSTEM ──
+    (["bank", "banking", "credit", "loan", "financial crisis", "bank failure", "credit crunch", "credit spread", "default"],
+     "FIRST ORDER: Bank stress tightens lending standards within weeks — this is a self-reinforcing cycle that can tip a slowing economy into recession. "
+     "Deposit flight from small banks to large banks and money market funds is the modern bank run — watch Fed H.8 data weekly. "
+     "SECOND ORDER: Credit spreads (OAS on investment-grade and high-yield bonds) are the market's real-time assessment of systemic risk. "
+     "When IG spreads blow past 150bps or HY past 500bps, the Fed will intervene — they always do. That intervention is typically bullish for risk assets within 3 months. "
+     "The interbank lending market (SOFR-Fed Funds spread) signals stress before it shows up in equity prices.",
+     [("JPM", "JPMorgan — too-big-to-fail benefit; deposits flow TO JPM during banking stress"),
+      ("KRE", "Regional Bank ETF — most exposed to CRE and rate risk; SHORT candidate during banking stress"),
+      ("HYG", "High Yield Bond ETF — credit spread proxy; first to signal systemic risk widening"),
+      ("GS", "Goldman Sachs — trading revenue spikes during volatility; advisory fees recover post-crisis")]),
+
+    # ── AGRICULTURE / FOOD ──
+    (["fertilizer", "agriculture", "farm", "crop", "food price", "grain", "wheat", "corn", "soybean", "livestock", "famine", "food crisis"],
+     "FIRST ORDER: Global food prices are driven by weather (30%), energy costs (25%), and trade policy (20%). "
+     "Fertilizer costs set the floor for grain prices 6 months forward — when potash/urea spikes, corn and wheat follow. "
+     "SECOND ORDER: Food inflation is the most politically destabilizing force in emerging markets — it toppled governments in Sri Lanka, Egypt, and Tunisia. "
+     "EM social unrest from food inflation drives capital flight to USD, creating a doom loop: strong dollar = more expensive imports = more inflation. "
+     "US agriculture is a strategic asset in this environment — farmland REITs and ag-tech are secular winners.",
+     [("MOS", "Mosaic — potash/phosphate fertilizer leader; revenue doubles when food crisis headlines emerge"),
+      ("ADM", "Archer-Daniels-Midland — commodity processing and global grain trading; infrastructure monopoly"),
+      ("WEAT", "Wheat ETF — direct grain price exposure; spikes 20-40% on supply shock headlines"),
+      ("DE", "Deere & Co — precision agriculture technology leader; benefits from farm capex cycle")]),
+
+    # ── JAPAN / BOJ ──
+    (["japan", "yen", "nikkei", "boj", "bank of japan", "japanese"],
+     "FIRST ORDER: BOJ is the last major central bank at zero rates — any policy normalization sends shockwaves through global carry trades. "
+     "The yen carry trade ($20T+ estimated) unwinds violently when BOJ tightens — this crashed global markets in Aug 2024 and will happen again. "
+     "SECOND ORDER: Stronger yen = Japanese investors repatriate foreign bond holdings, pushing US Treasury yields higher even if the Fed is cutting. "
+     "Japan's Government Pension Investment Fund (GPIF) is the world's largest pension fund — their asset allocation shifts move global markets. "
+     "Watch USD/JPY 140 as the pain threshold — below that, carry trade unwind accelerates non-linearly.",
+     [("EWJ", "Japan ETF — benefits from weak yen (export earnings); suffers when yen strengthens"),
+      ("FXY", "Yen ETF — LONG if you believe BOJ will normalize; profits from carry trade unwind"),
+      ("TLT", "20+ Year Treasury ETF — SHORT side if Japanese repatriation pushes yields higher"),
+      ("YCS", "ProShares UltraShort Yen — leveraged bet on continued yen weakness; high risk/reward")]),
+
+    # ── POLITICS / ELECTIONS ──
+    (["trump", "white house", "executive order", "president", "election", "poll ", "ballot", "vote ", "campaign", "congress", "senate", "democrat", "republican", "governor", "legislation", "bill pass"],
+     "FIRST ORDER: Markets hate uncertainty more than bad policy. Election years historically see 15-20% higher volatility in the 60 days before the vote. "
+     "Policy proposals are not policy — markets overreact to campaign rhetoric. Only ~20% of campaign promises become legislation. "
+     "SECOND ORDER: The party in power matters less than the composition of Congress. Divided government = gridlock = fewer policy surprises = lower volatility = stocks go up. "
+     "Sector rotation around elections is real: defense, infrastructure, and healthcare swing 10-15% based on expected regulatory changes. "
+     "Prediction markets (Kalshi, Polymarket) now price elections more accurately than polls — when prediction markets diverge from poll aggregates, bet on the prediction market.",
+     [("SPY", "S&P 500 ETF — election uncertainty creates vol; historically rallies 10%+ in 6mo after election regardless of winner"),
+      ("IWM", "Russell 2000 — small caps are most sensitive to domestic policy; +18% avg in 12mo post-election"),
+      ("XLV", "Healthcare ETF — most policy-sensitive sector; drug pricing legislation = 10-15% swing risk"),
+      ("IGV", "Software ETF — regulation-light regardless of party; secular growth through policy cycles")]),
+
+    # ── JOBS / LABOR MARKET ──
+    (["jobs ", "unemployment", "labor", "nonfarm", "payroll", "hiring", "workforce", "wage", "employment", "jobless", "layoff", "strike", "union"],
+     "FIRST ORDER: Non-farm payrolls move markets more than any other single data point. Beats by >50K = hawkish repricing; misses by >50K = dovish pivot expectations. "
+     "Wage growth is the Fed's real fear — services inflation is labor-cost-driven, and wages are sticky downward. "
+     "SECOND ORDER: Rising unemployment is a lagging indicator — by the time it hits 4.5%+, the recession is already 3-6 months old. "
+     "The Sahm Rule (0.5% rise in 3-month avg unemployment rate from 12-month low) has predicted every recession since 1970 with zero false positives. "
+     "Initial jobless claims (weekly) are the best real-time signal — a sustained move above 250K signals labor market turning.",
+     [("XLF", "Financial Select ETF — strong jobs = higher-for-longer rates = NIM expansion for banks"),
+      ("QQQ", "Nasdaq 100 — weak jobs = rate cut hopes = growth stock rally; the counterintuitive bad-news-is-good trade"),
+      ("XLI", "Industrials ETF — most employment-sensitive sector; leading indicator of capex cycle"),
+      ("SPLV", "Low Volatility ETF — rotation target when labor market deteriorates; defensive positioning")]),
+
+    # ── HEALTHCARE / FDA ──
+    (["pharma", "fda ", "drug approv", "biotech", "vaccine", "clinical trial", "health care", "healthcare", "hospital", "medical", "therapeut", "obesity drug", "glp-1", "ozempic", "wegovy"],
+     "FIRST ORDER: FDA approval decisions are the highest-conviction binary events in markets — stock moves of 30-80% in a single session are normal. "
+     "The GLP-1/obesity drug revolution is a $100B+ market that is reshaping healthcare, food, and fitness industries simultaneously. "
+     "SECOND ORDER: Successful obesity drugs reduce long-term costs for diabetes, heart disease, and joint replacement — this reprices the entire healthcare value chain. "
+     "Medical device companies and bariatric surgery centers are negatively impacted by GLP-1 adoption. Processed food companies face demand destruction. "
+     "Drug pricing legislation is a perennial election-year threat but rarely passes in meaningful form — buy the fear.",
+     [("LLY", "Eli Lilly — Mounjaro/Zepbound leader; $80B+ peak revenue potential from obesity franchise"),
+      ("NVO", "Novo Nordisk — Ozempic/Wegovy first-mover; European pharma with 45% obesity drug market share"),
+      ("ISRG", "Intuitive Surgical — robotic surgery leader; procedure volumes grow regardless of drug trends"),
+      ("XBI", "Biotech ETF — high-beta FDA decision exposure; mean-reverts from fear selloffs within 3-6 months")]),
+
+    # ── CLIMATE / NATURAL DISASTER ──
+    (["climate", "hurricane", "flood", "wildfire", "drought", "earthquake", "storm", "tornado", "natural disaster", "extreme weather", "emissions", "carbon"],
+     "FIRST ORDER: Catastrophic weather events cause $50-200B in insured losses annually — this is accelerating and repricing the entire insurance sector. "
+     "Insurance stocks drop on headline disaster news but rally within 6 months as premiums are repriced higher — disaster is bullish for insurers long-term. "
+     "SECOND ORDER: Climate damage concentrates in real estate, agriculture, and infrastructure — coastal property values in FL/TX are beginning to structurally decline. "
+     "Clean energy capex is now $1.7T/year globally and growing 15% annually regardless of political rhetoric. "
+     "Natural gas is the bridge fuel for the next 20 years — every credible net-zero pathway requires more gas, not less, in the medium term.",
+     [("ENPH", "Enphase Energy — solar microinverter leader; residential solar adoption accelerates post-disaster"),
+      ("LNG", "Cheniere Energy — LNG export capacity monopoly; bridge fuel thesis + European energy security premium"),
+      ("ALL", "Allstate — insurance premiums reprice higher after disasters; counter-intuitive long-term winner"),
+      ("FSLR", "First Solar — only US-manufactured solar panels; IRA subsidies + China tariff protection")]),
 ]
 
 
 def _analyze_news_impact(title, summary=""):
-    """Analyze a news headline for economic impact and suggest stock picks."""
+    """Multi-factor news impact analysis with cross-asset intelligence."""
     text = (title + " " + summary).lower()
+    matched = []
     for keywords, impact, stocks in _NEWS_IMPACT_RULES:
-        if any(kw in text for kw in keywords):
-            return impact, stocks
-    # Default fallback
-    return "Market impact uncertain — monitor for follow-up developments.", [
-        ("SPY", "S&P 500 ETF — broad market barometer"),
-        ("QQQ", "Nasdaq 100 ETF — tech-heavy growth exposure"),
-    ]
+        score = sum(1 for kw in keywords if kw in text)
+        if score > 0:
+            matched.append((score, impact, stocks))
+    if not matched:
+        return ("No direct market catalyst identified — but absence of news is itself a signal. "
+                "Low-volatility environments favor carry trades and premium-selling strategies. "
+                "Watch for the next scheduled macro release (CPI, NFP, FOMC) for directional catalysts."), [
+            ("SPY", "S&P 500 ETF — broad market barometer; default position in low-conviction environments"),
+            ("QQQ", "Nasdaq 100 ETF — tech-heavy growth exposure; outperforms in low-vol regimes"),
+        ]
+    # Return the best-matching rule (highest keyword score)
+    matched.sort(key=lambda x: x[0], reverse=True)
+    best = matched[0]
+    # If multiple categories matched, note the cross-asset implications
+    if len(matched) > 1:
+        impact_text = best[1] + " CROSS-ASSET: This story touches multiple sectors — watch for correlation spikes and contagion risk."
+        # Combine stock picks from top 2 matches, deduped
+        all_stocks = list(best[2])
+        seen = {s[0] for s in all_stocks}
+        for _, _, stocks2 in matched[1:2]:
+            for s in stocks2:
+                if s[0] not in seen:
+                    all_stocks.append(s)
+                    seen.add(s[0])
+        return impact_text, all_stocks[:5]
+    return best[1], best[2]
 
 def _fetch_news_feed():
     """Fetch top financial news from RSS feeds. Returns list of story dicts."""
@@ -14251,89 +14423,89 @@ _NEWS_IDEAS_TTL = 86400  # 24 hours — refreshes daily at 6am PT
 _NEWS_KEYWORD_RULES = [
     {
         "category": "interest-rates",
-        "keywords": ["interest rate", "fed ", "federal reserve", "central bank", "rate hike", "rate cut", "monetary policy", "fomc", "powell", "basis point", "bps"],
-        "market_take": "Rate changes directly impact bond prices, bank stocks, and borrowing costs across the economy. Central bank signals move markets before any official decision is made.",
-        "profit_angle": "Look for prediction markets on Fed rate decisions and bet on the direction implied by today's rhetoric.",
+        "keywords": ["interest rate", "fed ", "federal reserve", "central bank", "rate hike", "rate cut", "monetary policy", "fomc", "powell", "basis point", "bps", "quantitative"],
+        "market_take": "The 2-year Treasury yield reprices within minutes of Fed rhetoric — this is the single most important signal in global markets. Dovish shifts compress the dollar and boost rate-sensitive assets (tech, REITs, small caps). Hawkish surprises benefit banks through NIM expansion. Fed Funds futures are smarter than headlines — when the two disagree, bet on futures.",
+        "profit_angle": "Rate decision prediction markets are the highest-edge opportunity here. CME FedWatch tool shows implied probabilities — when Kalshi odds diverge from CME pricing by >5%, that gap closes within 48h. Also watch: TLT (duration bet), IWM (most rate-sensitive equity index), XLF (bank NIM play).",
         "sentiment": "neutral",
         "color": "#5b8def",
     },
     {
         "category": "geopolitics",
-        "keywords": ["war ", "conflict", "military", "troops", "invasion", "missile", "nato", "geopolit", "tensions", "sanction", "nuclear", "attack", "ceasefire", "peace deal"],
-        "market_take": "Geopolitical instability typically drives oil and gold prices up while equities sell off. Defense sector stocks and safe-haven assets tend to outperform during escalation.",
-        "profit_angle": "Look for defense sector and commodity prediction markets that haven't priced in escalation yet.",
+        "keywords": ["war ", "conflict", "military", "troops", "invasion", "missile", "nato", "geopolit", "tensions", "sanction", "nuclear", "attack", "ceasefire", "peace deal", "iran", "russia", "ukraine"],
+        "market_take": "Geopolitical escalation follows a predictable asset sequence: oil spikes first (+5-10% in 48h), then gold rallies as safe-haven bid, then VIX spikes as equity hedging begins. Defense stocks (LMT, RTX, NOC) rally immediately but mean-revert if conflict de-escalates within 72h. The fade after de-escalation headlines is often the better trade. Dollar strengthens on flight-to-safety, which hammers EM currencies and commodity exporters.",
+        "profit_angle": "Defense and oil prediction markets reprice slowest. Look for Kalshi markets on oil price thresholds — crude tends to overshoot by 10-15% on conflict headlines then mean-revert. If the conflict is sustained (>2 weeks), airlines and consumer discretionary become SHORT candidates as fuel costs compress margins.",
         "sentiment": "bearish",
         "color": "#ff5000",
     },
     {
         "category": "tech",
-        "keywords": ["tech earn", "layoff", "artificial intelligence", " ai ", "openai", "google", "apple", "microsoft", "meta ", "nvidia", "chip", "semiconductor", "nasdaq", "silicon valley"],
-        "market_take": "Tech sector movements create volatility in NASDAQ and ripple through growth stocks. Earnings beats or misses can shift sentiment across the entire sector.",
-        "profit_angle": "Watch for prediction markets on tech company earnings and stock price targets that lag behind breaking news.",
+        "keywords": ["tech earn", "artificial intelligence", " ai ", "openai", "google", "apple", "microsoft", "meta ", "nvidia", "chip", "semiconductor", "nasdaq", "silicon valley", "cloud computing", "data center"],
+        "market_take": "AI capex is running $150B+/year from hyperscalers — the largest infrastructure buildout since the internet. But the market hasn't separated structural AI demand from cyclical chip demand. Every $1 of AI chip spending generates $3-5 in downstream software revenue over 3 years. The real winners aren't just chipmakers — it's companies deploying AI to cut costs (healthcare, legal, fintech). Watch Mag 7 earnings revisions: when they get cut, the entire market P/E compresses because these 7 stocks ARE the market's growth.",
+        "profit_angle": "Tech earnings prediction markets lag breaking news by 2-6 hours — that's the edge window. When NVDA reports, it moves the entire semiconductor chain. Broadcom (custom AI chips) and AMD (AI inference) are second-derivative plays. For Kalshi: look for Nasdaq-level prediction markets after major tech earnings — the index tends to overreact then revert within 3 sessions.",
         "sentiment": "neutral",
         "color": "#7b2ff7",
     },
     {
         "category": "trade-policy",
         "keywords": ["tariff", "trade war", "trade deal", "import duty", "export ban", "trade restrict", "wto ", "trade deficit", "customs", "trade agreement"],
-        "market_take": "Trade restrictions impact import-dependent companies and currencies. Tariff announcements create immediate repricing in affected sectors and trading partners' markets.",
-        "profit_angle": "Look for prediction markets on trade policy outcomes — they often misprice speed of implementation.",
+        "market_take": "Tariffs are a tax on the importing country's consumers — gross margins compress for importers within 1-2 quarters. But the market overreacts to headlines in the first 48h; the real damage shows up in earnings 2 quarters later. Watch USD/CNY for the true severity signal — currency markets price trade war damage faster than equities. Retaliatory tariffs hit US agriculture and aerospace hardest. Supply chain restructuring takes 12-18 months — in the interim, costs rise and capex freezes.",
+        "profit_angle": "Trade policy prediction markets misprice speed of implementation — tariff threats take 60-90 days to become actual policy, but markets price them immediately. Fade the initial panic on broad indices (SPY), but position for sustained pain in the most exposed sectors: retail importers (WMT margin compression), agriculture exporters (DE, ADM), and China-dependent tech (AAPL).",
         "sentiment": "bearish",
         "color": "#ff8c00",
     },
     {
         "category": "energy",
-        "keywords": ["oil ", "crude", "opec", "energy", "natural gas", "petroleum", "fuel", "gasoline", "pipeline", "drilling", "refiner"],
-        "market_take": "Energy price shifts ripple through transportation, manufacturing, and consumer spending. OPEC decisions can move oil 5-10% in a single session.",
-        "profit_angle": "Watch commodity prediction markets for oil price targets — they lag behind supply-side news.",
+        "keywords": ["oil ", "crude", "opec", "energy", "natural gas", "petroleum", "fuel", "gasoline", "pipeline", "drilling", "refiner", "lng"],
+        "market_take": "Crude above $85/bbl = consumer spending drag that shows up in retail earnings 1 quarter later. Below $65 = shale capex cuts within 2 quarters, reducing supply and eventually pushing prices back up. OPEC production decisions move oil 5-10% in a session but cheating resumes within weeks — mean-reversion is high-probability. The crack spread (refining margin) is a better profitability signal than crude price alone. Sustained high energy prices are inflationary, which constrains Fed rate cuts.",
+        "profit_angle": "Oil price prediction markets on Kalshi are often mispriced after OPEC headlines — the initial move overshoots by 10-15% then reverts within 2 weeks. Airlines (DAL, UAL) are the best second-derivative trade: fuel is 25% of opex, and every $10/bbl move = $0.30-0.40 EPS impact. Natural gas decouples from oil during weather events — LNG export dynamics now link US prices to European markets.",
         "sentiment": "neutral",
         "color": "#e6a800",
     },
     {
         "category": "housing",
         "keywords": ["housing", "real estate", "mortgage", "home sale", "home price", "rent ", "rental", "property", "foreclosure", "housing start"],
-        "market_take": "Housing data signals consumer confidence and bank exposure to mortgage risk. Weakening housing often precedes broader economic slowdowns.",
-        "profit_angle": "Watch for markets on economic indicators — housing weakness often leads Fed to cut rates.",
+        "market_take": "Mortgage rates drive affordability more than home prices — every 1% rate increase removes ~10% of qualified buyers. The 'lock-in effect' (homeowners with 3% mortgages refusing to sell into 7% rates) creates artificial supply scarcity that keeps prices elevated despite weak demand. Housing wealth effect drives 5-7 cents of consumer spending per dollar of home equity change. Regional bank CRE exposure is the systemic risk — 70% of commercial real estate loans sit on regional bank balance sheets.",
+        "profit_angle": "Housing weakness is the earliest consumer stress signal — it appears in Home Depot/Lowe's earnings before GDP revisions. Prediction markets on economic indicators should be watched here: housing weakness leads the Fed to cut rates with a 6-9 month lag. Homebuilder stocks (XHB) actually benefit from weak existing sales because new construction gains market share when resale inventory is frozen.",
         "sentiment": "neutral",
         "color": "#20b2aa",
     },
     {
         "category": "jobs",
-        "keywords": ["jobs ", "unemployment", "labor", "nonfarm", "payroll", "hiring", "workforce", "wage", "employment", "jobless", "layoff"],
-        "market_take": "Employment data is a key Fed input. Strong jobs support rate holds, while weak jobs push toward rate cuts — both moves create tradable opportunities.",
-        "profit_angle": "Watch Fed decision markets — jobs data shifts rate-cut probabilities within minutes.",
+        "keywords": ["jobs ", "unemployment", "labor", "nonfarm", "payroll", "hiring", "workforce", "wage", "employment", "jobless", "strike", "union"],
+        "market_take": "Non-farm payrolls move markets more than any other single data release. Beats >50K above consensus = hawkish repricing (bad for growth stocks, good for banks). Misses >50K = dovish pivot expectations (bad-news-is-good-news for QQQ). Wage growth is the Fed's real fear — services inflation is labor-cost-driven and wages are sticky. The Sahm Rule (0.5% rise in 3-month avg unemployment from 12-month low) has predicted every recession since 1970 with zero false positives. Initial claims above 250K sustained = labor market turning.",
+        "profit_angle": "Jobs data shifts Fed rate-cut probabilities within minutes — prediction markets on rate decisions are the direct play. The counterintuitive trade: weak jobs data = rate cut expectations = growth stock rally. Watch Kalshi for unemployment rate prediction markets after NFP releases — the crowd anchors to the prior month's number and adjusts too slowly to trend changes.",
         "sentiment": "neutral",
         "color": "#4682b4",
     },
     {
         "category": "crypto",
         "keywords": ["crypto", "bitcoin", "btc ", "ethereum", "eth ", "blockchain", "stablecoin", "defi", "token", "binance", "coinbase", "sec crypto"],
-        "market_take": "Crypto volatility creates prediction market opportunities across price targets, regulatory outcomes, and adoption milestones.",
-        "profit_angle": "Look for token price and regulatory outcome markets on Kalshi and Polymarket — crypto news moves fast.",
+        "market_take": "Bitcoin above its 200-day MA = risk-on environment globally; below = institutional selling and leverage unwind. Crypto trades 24/7 and leads equity risk sentiment by 12-24 hours — Sunday night BTC moves predict Monday equity opens. Bitcoin ETF flows (IBIT, FBTC) are now the dominant price driver — daily inflow data matters more than on-chain metrics. Stablecoin market cap growth is the best leading indicator: new stablecoin minting leads BTC price by 2-4 weeks.",
+        "profit_angle": "Crypto prediction markets on Kalshi react 2-4 hours behind the spot market on regulatory news — that lag is pure edge. SEC enforcement creates short-term fear but long-term legitimacy (bullish for COIN). Bitcoin price threshold markets tend to be mispriced during weekend volatility because most traders aren't watching. Regulatory clarity outcomes are the highest-conviction crypto bets.",
         "sentiment": "neutral",
         "color": "#f7931a",
     },
     {
         "category": "politics",
-        "keywords": ["election", "poll ", "ballot", "vote ", "campaign", "congress", "senate", "democrat", "republican", "president", "governor", "political", "legislation", "bill pass"],
-        "market_take": "Political shifts impact regulation, taxes, and trade policy. Markets price in policy changes before they happen, creating edge for fast movers.",
-        "profit_angle": "Prediction markets on election outcomes can be highly profitable — political news creates mispricing windows.",
+        "keywords": ["election", "poll ", "ballot", "vote ", "campaign", "congress", "senate", "democrat", "republican", "president", "governor", "political", "legislation", "bill pass", "executive order", "white house"],
+        "market_take": "Markets hate uncertainty more than bad policy. Election years see 15-20% higher VIX in the 60 days before the vote, then VIX collapses regardless of outcome. Only ~20% of campaign promises become law — the market overreacts to rhetoric. Divided government = gridlock = fewer policy surprises = low vol = stocks go up. Sector rotation is real: healthcare, defense, and energy swing 10-15% based on expected regulatory changes. Prediction markets now price elections more accurately than polls.",
+        "profit_angle": "Political prediction markets on Kalshi are among the most liquid and highest-edge opportunities. When prediction market odds diverge from poll aggregates, the prediction markets are right ~75% of the time. Congressional control markets are undertraded — they determine what policy actually passes. State-level election markets tend to be most mispriced because fewer sophisticated traders participate.",
         "sentiment": "neutral",
         "color": "#dc143c",
     },
     {
         "category": "healthcare",
-        "keywords": ["pharma", "fda ", "drug approv", "biotech", "vaccine", "clinical trial", "health care", "healthcare", "hospital", "medical", "therapeut"],
-        "market_take": "Drug approvals and health policy changes move biotech stocks sharply. FDA decisions are binary events with outsized impact.",
-        "profit_angle": "Watch FDA decision prediction markets — approval/rejection outcomes create massive volatility.",
+        "keywords": ["pharma", "fda ", "drug approv", "biotech", "vaccine", "clinical trial", "health care", "healthcare", "hospital", "medical", "therapeut", "obesity", "glp-1", "ozempic", "wegovy"],
+        "market_take": "FDA approval decisions are the highest-conviction binary events in markets — stock moves of 30-80% in a single session are common. The GLP-1 obesity drug revolution is a $100B+ market reshaping healthcare, food, and fitness simultaneously. Successful weight-loss drugs reduce downstream costs for diabetes, heart disease, and joint replacement — repricing the entire healthcare value chain. Medical device companies and bariatric surgery centers are negatively impacted. Drug pricing legislation is a perennial election-year threat but rarely passes in meaningful form.",
+        "profit_angle": "FDA decision dates are known in advance — prediction markets on approval outcomes are the purest binary bets available. GLP-1 adoption rate markets are consistently underpriced because the demand curve is steeper than consensus expects. Biotech ETF (XBI) fear selloffs mean-revert within 3-6 months — buying after 15%+ drawdowns has been a winning strategy historically.",
         "sentiment": "neutral",
         "color": "#00c9a7",
     },
     {
         "category": "climate",
-        "keywords": ["climate", "hurricane", "flood", "wildfire", "drought", "earthquake", "storm", "tornado", "natural disaster", "extreme weather", "emissions"],
-        "market_take": "Extreme weather impacts agriculture, insurance, and energy sectors. Natural disasters can disrupt supply chains and spike commodity prices.",
-        "profit_angle": "Look for weather prediction markets on Kalshi — disaster impacts are often underpriced early.",
+        "keywords": ["climate", "hurricane", "flood", "wildfire", "drought", "earthquake", "storm", "tornado", "natural disaster", "extreme weather", "emissions", "carbon"],
+        "market_take": "Catastrophic weather causes $50-200B in insured losses annually and accelerating — this is structurally repricing the insurance sector. Counter-intuitively, insurance stocks (ALL, PGR) drop on disaster headlines but rally within 6 months as premiums are repriced higher. Climate damage concentrates in real estate, agriculture, and infrastructure. Clean energy capex is $1.7T/year globally and growing 15% annually regardless of political rhetoric. Natural gas is the bridge fuel for the next 20 years — every credible net-zero model requires more gas in the medium term.",
+        "profit_angle": "Weather prediction markets on Kalshi are among the most underpriced because retail traders don't follow meteorological data. Hurricane season markets in particular offer edge if you track NOAA forecasts. Insurance company earnings prediction markets 1-2 quarters after major disasters tend to be bearish-biased — but premium increases more than offset losses, creating contrarian long opportunities.",
         "sentiment": "bearish",
         "color": "#2e8b57",
     },
@@ -14341,17 +14513,22 @@ _NEWS_KEYWORD_RULES = [
 
 
 def _classify_headline(title):
-    """Match a headline to a category and return market analysis."""
+    """Match a headline to a category with multi-keyword scoring."""
     title_lower = title.lower()
+    best_rule = None
+    best_score = 0
     for rule in _NEWS_KEYWORD_RULES:
-        for kw in rule["keywords"]:
-            if kw in title_lower:
-                return rule
-    # Default/general
+        score = sum(1 for kw in rule["keywords"] if kw in title_lower)
+        if score > best_score:
+            best_score = score
+            best_rule = rule
+    if best_rule:
+        return best_rule
+    # Default/general — still useful analysis
     return {
         "category": "general",
-        "market_take": "Major news events create market volatility and shift trader sentiment. Watch for related prediction markets that may be mispriced as the crowd reacts.",
-        "profit_angle": "Monitor prediction markets in related sectors — breaking news creates brief mispricing windows before odds adjust.",
+        "market_take": "Major headlines without an obvious sector catalyst still matter — they shape investor sentiment and risk appetite. Low-news environments favor momentum strategies and premium selling. The absence of negative catalysts is itself bullish; the S&P 500 grinds higher during 'boring' tape. Watch for the next scheduled macro release (CPI, NFP, FOMC) for directional triggers.",
+        "profit_angle": "When no clear sector catalyst exists, look for prediction markets on broad economic indicators — GDP growth, unemployment rate, inflation targets. These markets are less crowded during quiet news cycles, which means wider spreads and more edge for patient traders. Volatility prediction markets are also underpriced during calm periods.",
         "sentiment": "neutral",
         "color": "#888",
     }
