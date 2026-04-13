@@ -11322,17 +11322,28 @@ def _build_tradeshark_icon_png(size=180):
     # Build RGBA pixel buffer
     px = [bg + (255,)] * (size * size)
 
-    # T dimensions — bold, slightly condensed, with rounded corners
+    # T dimensions — slim, sleek, with rounded corners + shark teeth
     pad = int(size * 0.14)
     cr = max(3, int(size * 0.04))  # corner radius
 
     # Crossbar
     bL, bR = pad, size - pad
     bT, bB = pad, pad + int(size * 0.17)
-    # Stem
-    sL = int(size * 0.36)
-    sR = int(size * 0.64)
+    # Stem — skinnier than before (16% width instead of 28%)
+    sL = int(size * 0.42)
+    sR = int(size * 0.58)
     sT, sB = bB, size - pad
+
+    # Shark teeth along bottom of crossbar pointing downward
+    tooth_h = int(size * 0.06)       # how far teeth extend below crossbar
+    tooth_w = int(size * 0.045)      # width of each tooth at the base
+    tooth_gap = max(1, int(size * 0.01))  # gap between teeth
+    # Build list of tooth center-x positions across the crossbar
+    _teeth = []
+    _tx = bL + tooth_w // 2 + 2
+    while _tx + tooth_w // 2 < bR - 2:
+        _teeth.append(_tx)
+        _tx += tooth_w + tooth_gap
 
     def _in_rounded_rect(x, y, L, T, R, B, cr):
         """Test if (x,y) is inside a rounded rect, returns 0.0-1.0 for AA."""
@@ -11364,11 +11375,36 @@ def _build_tradeshark_icon_png(size=180):
                 return cr + 0.5 - dist
         return 1.0
 
+    def _in_tooth(x, y):
+        """Check if (x,y) is inside any shark tooth (triangles hanging from crossbar bottom)."""
+        if y < bB or y >= bB + tooth_h:
+            return 0.0
+        # Skip the area where the stem connects (teeth would be hidden behind stem)
+        if sL <= x < sR:
+            return 0.0
+        half_w = tooth_w / 2.0
+        for tcx in _teeth:
+            # Skip teeth that overlap the stem
+            if sL - 2 <= tcx <= sR + 2:
+                continue
+            # Triangle: base at y=bB from (tcx - half_w) to (tcx + half_w),
+            #           tip at y=bB + tooth_h at x=tcx
+            dy_frac = (y - bB) / tooth_h  # 0 at base, 1 at tip
+            # Width narrows linearly from full at base to 0 at tip
+            allowed_half = half_w * (1.0 - dy_frac)
+            dx = abs(x - tcx)
+            if dx <= allowed_half + 0.5:
+                if dx <= allowed_half - 0.5:
+                    return 1.0
+                return allowed_half + 0.5 - dx  # AA edge
+        return 0.0
+
     def _in_T(x, y):
         """Coverage of (x,y) inside the T shape (0.0-1.0)."""
         a1 = _in_rounded_rect(x, y, bL, bT, bR, bB, cr)
         a2 = _in_rounded_rect(x, y, sL, sT, sR, sB, cr)
-        return min(1.0, a1 + a2)
+        a3 = _in_tooth(x, y)
+        return min(1.0, a1 + a2 + a3)
 
     # Gold gradient (top-to-bottom, 5 stops for richness)
     _gold_stops = [
@@ -11781,7 +11817,7 @@ def tradeshark_manifest():
         "background_color": "#0d0d0d",
         "theme_color": "#c9963a",
         "icons": [
-            {"src": "/apple-touch-icon.png?v=2", "sizes": "180x180", "type": "image/png", "purpose": "any"},
+            {"src": "/apple-touch-icon.png?v=3", "sizes": "180x180", "type": "image/png", "purpose": "any"},
             {"src": "/icon-192.png?v=2", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
         ],
     })
@@ -19231,8 +19267,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <title>TradeShark</title>
 <!-- PWA / iOS Add-to-Home-Screen -->
 <link rel="icon" type="image/png" href="/favicon.ico?v=2">
-<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=2">
-<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=2">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=3">
+<link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon-precomposed.png?v=3">
 <link rel="manifest" href="/manifest.json?v=2">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
