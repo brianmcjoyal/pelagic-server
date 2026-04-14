@@ -185,7 +185,11 @@ _GAME_EXPOSURE = {}   # {game_event_key: total_usd_wagered} — per-game exposur
 _GAME_EXPOSURE_MAX = 25.0  # max $25 per game across all strategies (raised from $10 to let Kelly-sized winning trades through)
 _PERF_HISTORY = []  # [{ts: ISO string, value: portfolio_value_usd, cash: balance_usd}]
 _PERF_HISTORY_MAX = 5000  # keep ~5000 points (~20 hours at 15s intervals, or many days of hourly)
-_SETTLED_HWM = {"wins": 0, "losses": 0, "total_pnl": 0.0}  # High-water mark for W/L counts
+# High-water mark for W/L counts — HARD-CODED FLOOR from verified data (2026-04-14).
+# Kalshi prunes old settled positions and Railway wipes state on deploy, so
+# without a hard floor the counts drop.  These values can only go UP, never down.
+_SETTLED_HWM_FLOOR = {"wins": 242, "losses": 170, "total_pnl": 173.57}
+_SETTLED_HWM = dict(_SETTLED_HWM_FLOOR)
 _LEARNING_STATE = {
     "last_run": None,
     "version": 0,
@@ -465,14 +469,15 @@ def _load_state():
                 print(f"[STATE] Bot enabled state restored: {data['bot_enabled']}")
 
         # Restore HWM — protects against Kalshi pruning old settled data
+        # Take the MAX of saved state vs hard-coded floor (floor survives deploy wipes)
         saved_hwm = data.get("settled_hwm", {})
         if saved_hwm and saved_hwm.get("wins", 0) > 0:
-            _SETTLED_HWM["wins"] = saved_hwm.get("wins", 0)
-            _SETTLED_HWM["losses"] = saved_hwm.get("losses", 0)
-            _SETTLED_HWM["total_pnl"] = saved_hwm.get("total_pnl", 0.0)
+            _SETTLED_HWM["wins"] = max(saved_hwm.get("wins", 0), _SETTLED_HWM_FLOOR["wins"])
+            _SETTLED_HWM["losses"] = max(saved_hwm.get("losses", 0), _SETTLED_HWM_FLOOR["losses"])
+            _SETTLED_HWM["total_pnl"] = max(saved_hwm.get("total_pnl", 0.0), _SETTLED_HWM_FLOOR["total_pnl"])
             print(f"[STATE] Restored HWM: {_SETTLED_HWM['wins']}W/{_SETTLED_HWM['losses']}L (${_SETTLED_HWM['total_pnl']:.2f})")
         else:
-            print(f"[STATE] No saved HWM — will build from first /settled call")
+            print(f"[STATE] Using hard-coded HWM floor: {_SETTLED_HWM_FLOOR['wins']}W/{_SETTLED_HWM_FLOOR['losses']}L")
 
         print(f"[STATE] Restored {len(BOT_STATE['all_trades'])} trades from disk, "
               f"daily_spent reset to $0 for new session, same_day={is_same_day}")
