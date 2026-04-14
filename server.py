@@ -20374,8 +20374,8 @@ a:hover { color: #7da5f5; }
 
 <!-- Tabs -->
 <div class="tabs">
-  <button class="tab active" onclick="switchTab('positions')">Dashboard</button>
-  <button class="tab" onclick="switchTab('performance')">Performance</button>
+  <button class="tab active" onclick="switchTab('performance')">Performance</button>
+  <button class="tab" onclick="switchTab('positions')">Dashboard</button>
   <button class="tab" onclick="switchTab('brain')" style="color:#00d4ff">&#129504; Brain</button>
   <button class="tab" onclick="switchTab('trends')" style="color:#e040fb">Trends</button>
   <button class="tab" onclick="switchTab('paper')" style="color:#00dc5a">&#128196; Paper</button>
@@ -20383,7 +20383,7 @@ a:hover { color: #7da5f5; }
 </div>
 
 <!-- Positions Tab -->
-<div class="tab-content active" id="tab-positions">
+<div class="tab-content" id="tab-positions">
   <!-- Live Feed + Bets Placed Today + Closing Soon -->
   <div id="dash-live-grid" style="display:grid;grid-template-columns:1fr 1.2fr 1fr;gap:12px;margin-bottom:16px;min-width:0">
     <div class="section" style="min-width:0;overflow:hidden">
@@ -20505,7 +20505,7 @@ a:hover { color: #7da5f5; }
 </div>
 
 <!-- History Tab -->
-<div class="tab-content" id="tab-performance">
+<div class="tab-content active" id="tab-performance">
   <!-- Performance Line Chart -->
   <div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:14px;margin-bottom:12px;position:relative">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
@@ -25590,12 +25590,11 @@ async function _loadAnalytics_DEAD() {
 Promise.all([
   loadStatus(), loadActivity(), loadPortfolio(), loadPositions(),
   loadBetsFeed(), loadTopPicks(), loadTodayPicks(), loadClosingSoon(),
-  loadDailyHighlights()
+  loadDailyHighlights(), loadSettled(), loadPerfHistory(), loadPerformance()
 ]).catch(function(e){ console.warn('Init phase 1 partial fail:', e); });
 // Phase 2: slower/expensive endpoints (staggered to avoid 429s)
 setTimeout(function() {
   Promise.all([
-    loadSettled(), loadPerfHistory(), loadPerformance(),
     loadTicker(), loadSeventyFivers(), loadQuantPicks(),
     loadAllBets(), loadMispriced(), loadTrades(), loadMoonshark()
   ]).catch(function(e){ console.warn('Init phase 2 partial fail:', e); });
