@@ -184,6 +184,46 @@ _TRADE_JOURNAL = []  # List of enriched trade records with full metadata
 _CATEGORY_STATS = {}  # {cat: {"wins": 0, "losses": 0, "pnl": 0.0}}
 _GAME_EXPOSURE = {}   # {game_event_key: total_usd_wagered} — per-game exposure cap
 _GAME_EXPOSURE_MAX = 25.0  # max $25 per game across all strategies (raised from $10 to let Kelly-sized winning trades through)
+
+# ---------------------------------------------------------------------------
+# PRICE VELOCITY TRACKER — detect chasing steam (price moved too fast)
+# ---------------------------------------------------------------------------
+_PRICE_SNAPSHOTS = {}  # ticker -> [{"ts": float, "price": int}, ...]
+_PRICE_SNAPSHOTS_LOCK = _threading.Lock()
+
+def _record_price(ticker, price_cents):
+    """Record a price snapshot for velocity calculation."""
+    import time as _t
+    now = _t.time()
+    with _PRICE_SNAPSHOTS_LOCK:
+        if ticker not in _PRICE_SNAPSHOTS:
+            _PRICE_SNAPSHOTS[ticker] = []
+        _PRICE_SNAPSHOTS[ticker].append({"ts": now, "price": price_cents})
+        # Keep last 10 minutes of snapshots
+        _PRICE_SNAPSHOTS[ticker] = [s for s in _PRICE_SNAPSHOTS[ticker] if now - s["ts"] < 600]
+        # Cap memory
+        if len(_PRICE_SNAPSHOTS) > 2000:
+            oldest = sorted(_PRICE_SNAPSHOTS.keys(), key=lambda k: _PRICE_SNAPSHOTS[k][-1]["ts"])[:500]
+            for k in oldest:
+                _PRICE_SNAPSHOTS.pop(k, None)
+
+def _price_velocity(ticker, window_sec=180):
+    """Return price change in cents over the last `window_sec` seconds.
+    Positive = price rose (buying pressure), negative = price fell.
+    Returns None if not enough data."""
+    import time as _t
+    now = _t.time()
+    with _PRICE_SNAPSHOTS_LOCK:
+        snaps = _PRICE_SNAPSHOTS.get(ticker, [])
+        if len(snaps) < 2:
+            return None
+        # Find earliest snapshot within the window
+        in_window = [s for s in snaps if now - s["ts"] <= window_sec]
+        if len(in_window) < 2:
+            return None
+        oldest = in_window[0]["price"]
+        newest = in_window[-1]["price"]
+        return newest - oldest
 _PERF_HISTORY = []  # [{ts: ISO string, value: portfolio_value_usd, cash: balance_usd}]
 _PERF_HISTORY_MAX = 5000  # keep ~5000 points (~20 hours at 15s intervals, or many days of hourly)
 # High-water mark for W/L counts — HARD-CODED FLOOR from verified data (2026-04-14).
@@ -2807,7 +2847,6 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
         _PRETRADE_STATS["reasons"]["balance_error"] = _PRETRADE_STATS["reasons"].get("balance_error", 0) + 1
         return False, f"Balance check failed: {str(_be)[:50]}"
 
-    # 8. LEARNING MULTIPLIER: if the learning engine says skip (0.0), skip
     # 8. LEARNING MULTIPLIER — skip for arb/hedge (guaranteed profit, time doesn't matter)
     if strategy not in ("arb", "hedge"):
         try:
@@ -2817,10 +2856,43 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
                 _PRETRADE_STATS["reasons"]["learning_blocked"] = _PRETRADE_STATS["reasons"].get("learning_blocked", 0) + 1
                 return False, f"Learning engine blocked (multiplier={mult:.2f})"
         except Exception as _le:
-            # FAIL CLOSED — if learning engine crashes, block the trade (don't let bad bets through)
             _PRETRADE_STATS["blocked"] += 1
             _PRETRADE_STATS["reasons"]["learning_error"] = _PRETRADE_STATS["reasons"].get("learning_error", 0) + 1
             return False, f"Learning engine error: {str(_le)[:50]}"
+
+    # 9. CLV HARD GATE — if a strategy has proven negative CLV over 15+ trades,
+    # the market consistently moves against us after entry = no real edge.
+    # This is stronger than the learning engine sizing penalty — it's a full block.
+    if strategy and strategy not in ("arb", "hedge", "floor"):
+        try:
+            _clv_data = _LEARNING_STATE.get("clv_by_strategy", {}).get(strategy, {})
+            if _clv_data.get("sample_size", 0) >= 15:
+                _avg_clv = _clv_data.get("avg_cents", 0)
+                if _avg_clv <= -3.0:
+                    _PRETRADE_STATS["blocked"] += 1
+                    _PRETRADE_STATS["reasons"]["clv_negative"] = _PRETRADE_STATS["reasons"].get("clv_negative", 0) + 1
+                    return False, f"Strategy '{strategy}' has negative CLV ({_avg_clv:.1f}c avg over {_clv_data['sample_size']} trades) — paused until CLV improves"
+        except Exception:
+            pass
+
+    # 10. PRICE VELOCITY GATE — skip if price moved >5c in our direction in last
+    # 3 minutes. We'd be chasing steam — the edge is already priced in.
+    try:
+        _vel = _price_velocity(ticker, window_sec=180)
+        if _vel is not None:
+            # If buying YES and price rose >5c, we're chasing
+            # If buying NO and price fell >5c, we're chasing
+            _chasing = False
+            if side == "yes" and _vel >= 5:
+                _chasing = True
+            elif side == "no" and _vel <= -5:
+                _chasing = True
+            if _chasing:
+                _PRETRADE_STATS["blocked"] += 1
+                _PRETRADE_STATS["reasons"]["price_velocity"] = _PRETRADE_STATS["reasons"].get("price_velocity", 0) + 1
+                return False, f"Price velocity too high: {_vel:+d}c in 3min — chasing steam"
+    except Exception:
+        pass
 
     # ALL CHECKS PASSED
     _PRETRADE_STATS["passed"] += 1
@@ -3023,11 +3095,13 @@ def sell_kalshi_position(ticker, side, price_cents, count=1, resting=False):
         return {"error": str(e)}
 
 
-def _place_take_profit(ticker, side, entry_price, count, strategy=""):
+def _place_take_profit(ticker, side, entry_price, count, strategy="", game_info=None):
     """Place a resting GTC limit sell as a free take-profit after any game bet fills.
 
-    For longshots (entry < 45c): sell at entry + 20c (lock in 20c+ profit if price spikes)
-    For favorites (entry >= 45c): sell at entry + 12c (tighter since upside is capped)
+    DYNAMIC take-profit based on game state (#13):
+    - Late tight game → smaller TP (+12c, take quick profit)
+    - Early game → wider TP (+25c, let it develop)
+    - Default: longshots +20c, favorites +12c
     For high-price (entry >= 80c): no take-profit (too close to settlement, let it ride)
     """
     if entry_price >= 80:
@@ -3035,10 +3109,22 @@ def _place_take_profit(ticker, side, entry_price, count, strategy=""):
     if ticker in _resting_sells:
         return  # already have a resting sell
 
-    if entry_price < 45:
-        take_profit_price = min(92, entry_price + 20)
-    else:
-        take_profit_price = min(95, entry_price + 12)
+    # Dynamic TP based on game stage
+    _tp_offset = 20  # default for longshots
+    if entry_price >= 45:
+        _tp_offset = 12  # favorites: tighter
+    # Override with game-aware TP if we have game info
+    if game_info and isinstance(game_info, dict):
+        _period = str(game_info.get("clock", "") or game_info.get("period", "")).upper()
+        _state = game_info.get("state", "")
+        if _state == "in":
+            # Late game + tight = take smaller quick profit
+            if any(x in _period for x in ("Q4", "OT", "P3", "2H", "9TH", "FINAL")):
+                _tp_offset = min(_tp_offset, 12)  # late game: quick exit
+            elif any(x in _period for x in ("Q1", "P1", "1H", "1ST")):
+                _tp_offset = max(_tp_offset, 25)  # early game: let it develop
+
+    take_profit_price = min(95, entry_price + _tp_offset)
 
     try:
         result = sell_kalshi_position(ticker, side, take_profit_price, count, resting=True)
@@ -4237,6 +4323,7 @@ def live_game_snipe():
                 _snipe_espn_prob = None
                 _snipe_our_prob = None  # will be set if ESPN data available
                 implied_prob_snipe = price / 100.0
+                _record_price(ticker, price)  # feed velocity tracker
                 if _snipe_game and _snipe_game.get("event_id"):
                     _snipe_league = _snipe_game.get("league", "").lower()
                     _snipe_event_id = _snipe_game["event_id"]
@@ -4275,28 +4362,55 @@ def live_game_snipe():
                         "info"
                     )
 
-                # The Odds API consensus validation for Sniper
+                # SPORTSBOOK CONSENSUS — PRIMARY EDGE VALIDATION
+                # Sportsbook odds are set by pros and sharpened by real money.
+                # If 3+ sportsbooks disagree with us by >5%, we SKIP — they know more.
+                # If sportsbooks agree, conviction gets a big boost.
                 _snipe_consensus = None
                 if _snipe_team and _snipe_game:
                     _snipe_league_oa = (_snipe_game.get("league") or "").lower()
                     if _snipe_league_oa:
                         _snipe_consensus = _get_consensus_odds(_snipe_team, _snipe_league_oa)
                 if _snipe_consensus is not None:
-                    # For NO bets, consensus is team win prob; we need 1-consensus vs our price
                     _snipe_cons_prob = (1 - _snipe_consensus) if side == "no" else _snipe_consensus
                     _snipe_cons_edge = _snipe_cons_prob - implied_prob_snipe
                     _log_activity(
-                        f"SNIPE ODDS API: {ticker} — consensus={_snipe_consensus:.1%} vs Kalshi={implied_prob_snipe:.0%} edge={_snipe_cons_edge:+.1%}",
+                        f"SNIPE SPORTSBOOK: {ticker} — consensus={_snipe_cons_prob:.1%} vs Kalshi={implied_prob_snipe:.0%} edge={_snipe_cons_edge:+.1%}",
                         "info"
                     )
-                    if _snipe_cons_edge >= 0.03 and _snipe_our_prob and (_snipe_our_prob - implied_prob_snipe) > 0.02:
-                        conviction += 1  # both sources agree
-                    elif _snipe_cons_edge < -0.03 and _snipe_our_prob and (_snipe_our_prob - implied_prob_snipe) > 0.03:
-                        conviction -= 2  # sportsbook consensus disagrees with ESPN
+                    # HARD GATE: if sportsbooks say we're >5% overpriced, SKIP
+                    if _snipe_cons_edge < -0.05:
                         _log_activity(
-                            f"SNIPE: Sportsbook consensus disagrees with ESPN — consensus={_snipe_consensus:.1%} vs ESPN={_snipe_our_prob:.1%}",
+                            f"SNIPE SKIP: {ticker} — sportsbook consensus ({_snipe_cons_prob:.1%}) disagrees by {abs(_snipe_cons_edge):.1%}",
                             "warn"
                         )
+                        _ms_reasons["sportsbook_disagrees"] = _ms_reasons.get("sportsbook_disagrees", 0) + 1
+                        continue
+                    # Sportsbook confirms edge: big conviction boost
+                    if _snipe_cons_edge >= 0.05:
+                        conviction += 2  # strong sportsbook agreement
+                    elif _snipe_cons_edge >= 0.02:
+                        conviction += 1  # moderate agreement
+                    elif _snipe_cons_edge < -0.02:
+                        conviction -= 1  # mild disagreement
+
+                # ESPN CONFIDENCE WEIGHTING — weight edge by game stage.
+                # Q1/P1/early game = ESPN model has wide error bars → discount edge.
+                # Q4/P3/late game = ESPN model is accurate → full edge weight.
+                _espn_conf = 1.0  # default: full confidence
+                if _snipe_game and _snipe_game.get("state") == "in":
+                    _game_clock = (_snipe_game.get("clock") or "").upper()
+                    _game_period = (_snipe_game.get("period") or "").upper()
+                    _combined = f"{_game_period} {_game_clock}"
+                    if any(x in _combined for x in ("1ST", "Q1", "P1", "1H", "TOP 1", "BOT 1", "TOP 2", "BOT 2")):
+                        _espn_conf = 0.6  # early game: 60% confidence in ESPN
+                    elif any(x in _combined for x in ("2ND", "Q2", "P2", "TOP 3", "BOT 3", "TOP 4", "BOT 4")):
+                        _espn_conf = 0.8  # mid game: 80% confidence
+                    # Q3/P3/late = 1.0 (full confidence, default)
+                if _snipe_our_prob is not None and _espn_conf < 1.0:
+                    # Blend ESPN edge toward zero based on confidence
+                    _espn_edge = _espn_edge * _espn_conf
+                    _log_activity(f"SNIPE ESPN CONF: {ticker} — game stage discount {_espn_conf:.0%}, adjusted edge={_espn_edge:+.1%}", "info")
 
                 # Re-check conviction after ESPN adjustment (adaptive threshold)
                 if conviction < _min_conv_snipe:
@@ -4391,21 +4505,38 @@ def live_game_snipe():
                 elif _snipe_flow.get("steam_sell") and side == "no":
                     conviction += 2  # sharp money selling YES, confirms our NO
 
-                # Orderbook imbalance confirmation — does order flow agree with our side?
+                # ORDER BOOK DEPTH ASYMMETRY — standalone signal (#10)
+                # If bid depth is 3x+ ask depth, market is about to move up.
+                # This is real money signaling direction — use as both conviction
+                # AND edge boost for bet sizing.
                 if _snipe_ob_pre and _snipe_ob_pre.get("imbalance") is not None:
                     _snipe_ob_imb = _snipe_ob_pre["imbalance"]
                     _snipe_buying_yes = (side == "yes")
                     _snipe_espn_edge_val = (_snipe_our_prob - implied_prob_snipe) if _snipe_espn_prob is not None else None
-                    if _snipe_buying_yes and _snipe_ob_imb < -0.3:
+                    _bid_d = _snipe_ob_pre.get("bid_depth", 0)
+                    _ask_d = _snipe_ob_pre.get("ask_depth", 1)
+                    _depth_ratio = _bid_d / max(1, _ask_d)
+                    # Strong depth asymmetry: bid/ask ratio 3:1+ = market expects price to rise
+                    if _snipe_buying_yes and _depth_ratio >= 3.0:
+                        conviction += 2
+                        # Edge boost: depth confirms direction, scale up bet
+                        _snipe_edge_for_sizing = max(_snipe_edge_for_sizing, _snipe_edge_for_sizing * 1.3)
+                        _log_activity(f"SNIPE OB DEPTH: {ticker} — bid/ask ratio {_depth_ratio:.1f}:1 confirms YES (edge boosted)", "info")
+                    elif not _snipe_buying_yes and (1 / max(0.01, _depth_ratio)) >= 3.0:
+                        conviction += 2
+                        _snipe_edge_for_sizing = max(_snipe_edge_for_sizing, _snipe_edge_for_sizing * 1.3)
+                        _log_activity(f"SNIPE OB DEPTH: {ticker} — ask/bid ratio {1/_depth_ratio:.1f}:1 confirms NO (edge boosted)", "info")
+                    # Opposing depth
+                    elif _snipe_buying_yes and _snipe_ob_imb < -0.3:
                         conviction -= 2
                         if _snipe_ob_imb < -0.5 and (_snipe_espn_edge_val is None or _snipe_espn_edge_val < 0.05):
-                            _log_activity(f"SNIPE SKIP: {ticker} — Orderbook opposes trade — likely stale odds (imb={_snipe_ob_imb:+.2f})", "info")
+                            _log_activity(f"SNIPE SKIP: {ticker} — Orderbook opposes trade (imb={_snipe_ob_imb:+.2f})", "info")
                             _ms_reasons["ob_opposes"] = _ms_reasons.get("ob_opposes", 0) + 1
                             continue
                     elif not _snipe_buying_yes and _snipe_ob_imb > 0.3:
                         conviction -= 2
                         if _snipe_ob_imb > 0.5 and (_snipe_espn_edge_val is None or _snipe_espn_edge_val < 0.05):
-                            _log_activity(f"SNIPE SKIP: {ticker} — Orderbook opposes trade — likely stale odds (imb={_snipe_ob_imb:+.2f})", "info")
+                            _log_activity(f"SNIPE SKIP: {ticker} — Orderbook opposes trade (imb={_snipe_ob_imb:+.2f})", "info")
                             _ms_reasons["ob_opposes"] = _ms_reasons.get("ob_opposes", 0) + 1
                             continue
                     elif _snipe_buying_yes and _snipe_ob_imb > 0.3:
@@ -4503,7 +4634,7 @@ def live_game_snipe():
                             f"= ${actual_cost:.2f} (potential +${potential:.2f}) | {title[:40]}",
                             "success"
                         )
-                        _place_take_profit(ticker, side, price, filled, "sniper")
+                        _place_take_profit(ticker, side, price, filled, "sniper", game_info=_snipe_game)
                         snipes.append({"ticker": ticker, "filled": filled, "cost": actual_cost, "potential": potential})
                         existing_tickers.add(ticker)
                         existing_events.add(event_key)
@@ -4812,6 +4943,7 @@ def moonshark_snipe():
 
                 # Calculate quantity using Kelly Criterion
                 implied_prob = price / 100.0
+                _record_price(ticker, price)  # feed velocity tracker
 
                 # TRY REAL SPORTSBOOK ODDS FIRST (ESPN moneylines)
                 espn_edge = None
@@ -5029,25 +5161,26 @@ def moonshark_snipe():
                     if _ms_team_abbrev:
                         _consensus_prob = _get_consensus_odds(_ms_team_abbrev, _league)
                 if _consensus_prob is not None:
-                    # For NO bets, consensus is team win prob; we need 1-consensus vs our price
                     _cons_adj = (1 - _consensus_prob) if side == "no" else _consensus_prob
                     _consensus_edge = _cons_adj - implied_prob
                     _log_activity(
-                        f"ODDS API CHECK: {ticker} — consensus={_consensus_prob:.1%} vs Kalshi={implied_prob:.0%} edge={_consensus_edge:+.1%} (ESPN={espn_implied:.1%})",
+                        f"MOONSHARK SPORTSBOOK: {ticker} — consensus={_cons_adj:.1%} vs Kalshi={implied_prob:.0%} edge={_consensus_edge:+.1%}",
                         "info"
                     )
-                    # If consensus AND ESPN both show edge > 3%, boost conviction
-                    if _consensus_edge > 0.03 and espn_edge and espn_edge > 0.03:
+                    # HARD GATE: sportsbooks disagree by >5% → SKIP
+                    if _consensus_edge < -0.05:
+                        _log_activity(f"MOONSHARK SKIP: {ticker} — sportsbook disagrees by {abs(_consensus_edge):.1%}", "warn")
+                        _ms_reasons["sportsbook_disagrees"] = _ms_reasons.get("sportsbook_disagrees", 0) + 1
+                        continue
+                    if _consensus_edge >= 0.05:
+                        ms_conviction += 2
+                        _conv_reasons.append(f"sportsbook_strong+{_consensus_edge:.0%}")
+                    elif _consensus_edge >= 0.02:
                         ms_conviction += 1
-                        _conv_reasons.append(f"consensus+{_consensus_edge:.0%}")
-                    # If consensus DISAGREES with ESPN (consensus says no edge, ESPN says edge)
-                    elif _consensus_edge < 0 and espn_edge and espn_edge > 0.03:
-                        ms_conviction -= 2
-                        _conv_reasons.append(f"consensus_disagree({_consensus_edge:+.0%})")
-                        _log_activity(
-                            f"MOONSHARK: Sportsbook consensus disagrees with ESPN — consensus={_consensus_prob:.1%} vs ESPN={espn_implied:.1%}",
-                            "warn"
-                        )
+                        _conv_reasons.append(f"sportsbook+{_consensus_edge:.0%}")
+                    elif _consensus_edge < -0.02:
+                        ms_conviction -= 1
+                        _conv_reasons.append(f"sportsbook_mild_disagree")
 
                 # Signal 9: Kalshi price momentum — does market price movement confirm or oppose our bet?
                 try:
@@ -5066,6 +5199,14 @@ def moonshark_snipe():
                             _conv_reasons.append(f"momentum_opposes({_ms_mom['direction']} v={_ms_mom.get('velocity', 0):.1f})")
                 except Exception:
                     pass
+
+                # ESPN CONFIDENCE WEIGHTING (#14) — discount edge in early game
+                if _game_info and _game_info.get("state") == "in" and espn_edge:
+                    _ms_period = str(_game_info.get("clock", "") or _game_info.get("period", "")).upper()
+                    if any(x in _ms_period for x in ("1ST", "Q1", "P1", "1H", "TOP 1", "BOT 1", "TOP 2", "BOT 2")):
+                        espn_edge = espn_edge * 0.6  # early game: 60% confidence
+                    elif any(x in _ms_period for x in ("2ND", "Q2", "P2", "TOP 3", "BOT 3", "TOP 4", "BOT 4")):
+                        espn_edge = espn_edge * 0.8  # mid game: 80% confidence
 
                 # Require minimum conviction — adaptive + floor relaxation
                 # Floor mode can relax by 1, but NEVER below 3 — conviction 2
@@ -5737,25 +5878,30 @@ def closegame_snipe():
                                 "info"
                             )
 
-                # The Odds API consensus validation for CloseGame
+                # SPORTSBOOK CONSENSUS — PRIMARY VALIDATION for CloseGame
                 _cg_consensus = _get_consensus_odds(underdog, cg["sport"]) if underdog else None
                 if _cg_consensus is not None:
-                    # For NO bets, consensus is team win prob; we need 1-consensus vs our price
                     _cg_cons_adj = (1 - _cg_consensus) if side == "no" else _cg_consensus
                     _cg_cons_edge = _cg_cons_adj - kalshi_implied
                     _log_activity(
-                        f"CLOSEGAME ODDS API: {ticker} — consensus={_cg_consensus:.1%} vs Kalshi={kalshi_implied:.0%} edge={_cg_cons_edge:+.1%}",
+                        f"CLOSEGAME SPORTSBOOK: {ticker} — consensus={_cg_cons_adj:.1%} vs Kalshi={kalshi_implied:.0%} edge={_cg_cons_edge:+.1%}",
                         "info"
                     )
-                    # Consensus agrees with ESPN edge — boost the edge estimate
-                    if _cg_cons_edge > 0.03 and espn_edge_cg and espn_edge_cg > 0.03:
-                        espn_edge_cg = espn_edge_cg + 0.01  # small boost for double-confirmation
-                        _log_activity(f"CLOSEGAME: Odds API confirms ESPN edge, boosted to {espn_edge_cg:.1%}", "info")
-                    # Consensus disagrees — discount the edge
-                    elif _cg_cons_edge < 0 and espn_edge_cg and espn_edge_cg > 0.03:
+                    # HARD GATE: sportsbooks disagree by >5% → SKIP
+                    if _cg_cons_edge < -0.05:
+                        _log_activity(f"CLOSEGAME SKIP: {ticker} — sportsbook disagrees by {abs(_cg_cons_edge):.1%}", "warn")
+                        continue
+                    # Strong agreement → boost edge
+                    if _cg_cons_edge > 0.05 and espn_edge_cg and espn_edge_cg > 0.03:
+                        espn_edge_cg = espn_edge_cg + 0.02
+                        _log_activity(f"CLOSEGAME: Sportsbook strongly confirms, boosted to {espn_edge_cg:.1%}", "info")
+                    elif _cg_cons_edge > 0.03 and espn_edge_cg and espn_edge_cg > 0.03:
+                        espn_edge_cg = espn_edge_cg + 0.01
+                    # Mild disagreement → discount
+                    elif _cg_cons_edge < -0.02 and espn_edge_cg and espn_edge_cg > 0.03:
                         espn_edge_cg = espn_edge_cg * 0.5
                         _log_activity(
-                            f"CLOSEGAME: Sportsbook consensus disagrees — consensus={_cg_consensus:.1%}, discounting edge to {espn_edge_cg:.1%}",
+                            f"CLOSEGAME: Sportsbook mildly disagrees — discounting edge to {espn_edge_cg:.1%}",
                             "warn"
                         )
 
@@ -7560,8 +7706,7 @@ def enhanced_auto_exit():
             except Exception:
                 pass
 
-        # Game bets: only exit if trading >= 93c (near-certain win, lock in profit
-        # rather than risk a late collapse). Otherwise let them settle at $0 or $1.
+        # GAME BET EXIT SYSTEM — multi-tier: blowout cut, smart profit lock, partial exit
         _tk = ticker.upper()
         _game_prefixes = ("KXKBL", "KXATP", "KXWTA", "KXNCAA", "KXNBA", "KXNHL",
                           "KXMLB", "KXUFC", "KXMMA", "KXEPL", "KXNFL", "KXMLS",
@@ -7569,36 +7714,109 @@ def enhanced_auto_exit():
         _is_game = any(_tk.startswith(p) for p in _game_prefixes)
         if _is_game:
             _cur_price = pos.get("current_price") or 0
-            # DYNAMIC exit threshold based on daily P&L:
-            # If we're up on the day, we can afford to let winners ride (95c).
-            # If we're down, lock in profit earlier (90c) to recover.
+            _entry_price_exit = pos.get("entry_price") or _cur_price
+            _exit_count = pos.get("count", 0)
+            _exit_side = pos.get("side", "yes")
+
+            # --- BLOWOUT DETECTOR (#1) ---
+            # If price dropped to ≤8c, the game is effectively over.
+            # Sell now to recover 8c instead of riding to 0c.
+            if _cur_price <= 8 and _cur_price >= 2 and _entry_price_exit > 15:
+                _blowout_sell_price = max(1, _cur_price - 1)
+                try:
+                    _br = sell_kalshi_position(ticker, _exit_side, _blowout_sell_price, _exit_count)
+                    _bf = 0
+                    try:
+                        _bf = int(float(str(_br.get("order", {}).get("filled_count_fp") or 0)))
+                    except Exception:
+                        pass
+                    if _bf > 0:
+                        _bpnl = (_blowout_sell_price - _entry_price_exit) * _bf / 100
+                        _log_activity(
+                            f"💀 BLOWOUT EXIT: {ticker} SOLD {_bf}x @ {_blowout_sell_price}c (entry {_entry_price_exit}c) P&L=${_bpnl:.2f} — game over, salvaging capital",
+                            "error"
+                        )
+                        exits.append({"ticker": ticker, "action": "blowout_exit", "filled": _bf, "pnl_usd": _bpnl})
+                        _update_drawdown(_bpnl)
+                except Exception:
+                    pass
+                continue
+
+            # --- STOP-LOSS (#5 asymmetric) ---
+            # If price dropped to entry - 15c, cut the loss. Don't ride to zero.
+            # This is the asymmetric part: tight stop (-15c) vs wide TP (+20-30c).
+            if _cur_price <= _entry_price_exit - 15 and _cur_price >= 3:
+                _sl_sell_price = max(1, _cur_price - 1)
+                try:
+                    _slr = sell_kalshi_position(ticker, _exit_side, _sl_sell_price, _exit_count)
+                    _slf = 0
+                    try:
+                        _slf = int(float(str(_slr.get("order", {}).get("filled_count_fp") or 0)))
+                    except Exception:
+                        pass
+                    if _slf > 0:
+                        _slpnl = (_sl_sell_price - _entry_price_exit) * _slf / 100
+                        _log_activity(
+                            f"🛑 STOP-LOSS: {ticker} SOLD {_slf}x @ {_sl_sell_price}c (entry {_entry_price_exit}c) P&L=${_slpnl:.2f} — cutting loss at -15c",
+                            "error"
+                        )
+                        exits.append({"ticker": ticker, "action": "stop_loss_game", "filled": _slf, "pnl_usd": _slpnl})
+                        _update_drawdown(_slpnl)
+                except Exception:
+                    pass
+                continue
+
+            # --- PARTIAL EXIT (#9) ---
+            # If we're up +12c and hold 3+ contracts, sell half to lock in profit.
+            # Let the other half ride to settlement for max upside.
+            if _cur_price >= _entry_price_exit + 12 and _exit_count >= 3 and _cur_price < 90:
+                _half_key = f"partial_{ticker}"
+                if _half_key not in _resting_sells:
+                    _partial_count = max(1, _exit_count // 2)
+                    _partial_price = max(1, _cur_price - 1)
+                    try:
+                        _pr = sell_kalshi_position(ticker, _exit_side, _partial_price, _partial_count)
+                        _pf = 0
+                        try:
+                            _pf = int(float(str(_pr.get("order", {}).get("filled_count_fp") or 0)))
+                        except Exception:
+                            pass
+                        if _pf > 0:
+                            _ppnl = (_partial_price - _entry_price_exit) * _pf / 100
+                            _log_activity(
+                                f"✂️ PARTIAL EXIT: {ticker} SOLD {_pf}/{_exit_count}x @ {_partial_price}c (entry {_entry_price_exit}c) P&L=${_ppnl:.2f} — locked in half, letting rest ride",
+                                "success"
+                            )
+                            exits.append({"ticker": ticker, "action": "partial_exit", "filled": _pf, "pnl_usd": _ppnl})
+                            _resting_sells.add(_half_key)
+                    except Exception:
+                        pass
+                # Don't continue — still check profit lock below
+
+            # --- DYNAMIC PROFIT LOCK (#13 + original smart exit) ---
+            # Exit threshold varies by daily P&L state
             _dd_pnl = _DRAWDOWN_TODAY.get("realized_pnl", 0) if _DRAWDOWN_TODAY.get("date") == datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d") else 0
             _exit_threshold = 93  # default
             if _dd_pnl <= -30:
-                _exit_threshold = 88  # down big — lock in profits aggressively
+                _exit_threshold = 88
             elif _dd_pnl <= -15:
-                _exit_threshold = 90  # down moderately — take earlier profits
+                _exit_threshold = 90
             elif _dd_pnl >= 20:
-                _exit_threshold = 95  # up on the day — let winners ride
+                _exit_threshold = 95
             if _cur_price < _exit_threshold:
                 continue
-            # This is a near-lock — sell at market to lock in ~93c+ profit
-            action = "smart_exit"
-            reason = f"Game bet at {_cur_price}c — locking in profit (>93c threshold)"
-            sell_count = pos.get("count", 0)
-            sell_price = max(1, _cur_price - 1)  # 1c below market for fast fill
-            side_exit = pos.get("side", "yes")
+            # Near-lock — sell to lock in profit
+            sell_price = max(1, _cur_price - 1)
             try:
-                _exit_result = sell_kalshi_position(ticker, side_exit, sell_price, sell_count)
+                _exit_result = sell_kalshi_position(ticker, _exit_side, sell_price, _exit_count)
                 _exit_filled = 0
                 try:
                     _exit_filled = int(float(str(_exit_result.get("order", {}).get("filled_count_fp") or _exit_result.get("order", {}).get("filled_count") or 0)))
                 except Exception:
                     pass
                 if _exit_filled > 0:
-                    _entry_p = pos.get("entry_price") or _cur_price
-                    _exit_pnl = (sell_price - _entry_p) * _exit_filled / 100
-                    _log_activity(f"🔒 SMART EXIT: {ticker} SOLD {_exit_filled}x @ {sell_price}c (entry {_entry_p}c) P&L=${_exit_pnl:.2f} — locked in near-settlement profit", "success")
+                    _exit_pnl = (sell_price - _entry_price_exit) * _exit_filled / 100
+                    _log_activity(f"🔒 SMART EXIT: {ticker} SOLD {_exit_filled}x @ {sell_price}c (entry {_entry_price_exit}c) P&L=${_exit_pnl:.2f} — locked in near-settlement profit", "success")
                     exits.append({"ticker": ticker, "action": "smart_exit", "filled": _exit_filled, "price": sell_price})
             except Exception as _exit_err:
                 _log_activity(f"Smart exit error {ticker}: {str(_exit_err)[:60]}", "error")
@@ -7699,6 +7917,121 @@ def enhanced_auto_exit():
                         _log_activity(f"🔄 {action}: {ticker} — resting sell at {sell_price}c", "info")
 
     return exits
+
+
+# ---------------------------------------------------------------------------
+# 6B. SCORE-AWARE RE-ENTRY (#6) — add to winning positions if edge grew
+# ---------------------------------------------------------------------------
+_REENTRY_COOLDOWN = {}  # ticker -> timestamp of last re-entry attempt
+
+def score_aware_reentry():
+    """Scan held positions and add contracts if edge has significantly grown.
+
+    If we entered at 5% edge and now have 12%+ edge (price dropped while
+    ESPN prob held steady), add another unit. Max 1 re-entry per position
+    per 30 minutes.
+    """
+    if not BOT_CONFIG.get("enabled"):
+        return []
+
+    import time as _t
+    now = _t.time()
+    reentries = []
+    positions = check_position_prices()
+
+    for pos in positions:
+        ticker = pos.get("ticker", "")
+        side = pos.get("side", "yes")
+        current_price = pos.get("current_price") or 0
+        entry_price = pos.get("entry_price") or current_price
+        _count = pos.get("count", 0)
+
+        # Only game bets
+        _tk = ticker.upper()
+        _game_prefixes = ("KXNBA", "KXNHL", "KXMLB", "KXNCAA", "KXSOCCER")
+        if not any(_tk.startswith(p) for p in _game_prefixes):
+            continue
+
+        # Cooldown: 30 min per ticker
+        if ticker in _REENTRY_COOLDOWN and now - _REENTRY_COOLDOWN[ticker] < 1800:
+            continue
+
+        # Only re-enter if price dropped (making our edge bigger)
+        if current_price >= entry_price - 3:
+            continue  # price hasn't moved enough
+
+        # Check ESPN prob is still favorable
+        # Find the game info for this ticker
+        _game = None
+        try:
+            scores = _get_espn_scores()
+            for _sc in scores:
+                _sc_ticker_parts = ticker.upper().split("-")
+                if len(_sc_ticker_parts) >= 2:
+                    _team_check = _sc_ticker_parts[-1].upper()
+                    if (_sc.get("home_abbrev", "").upper() == _team_check or
+                            _sc.get("away_abbrev", "").upper() == _team_check):
+                        _game = _sc
+                        break
+        except Exception:
+            continue
+
+        if not _game or _game.get("state") != "in":
+            continue
+
+        # Get current ESPN edge
+        try:
+            _event_id = _game.get("event_id")
+            _league = (_game.get("league") or "").lower()
+            _is_home = _game.get("home_abbrev", "").upper() == ticker.upper().split("-")[-1].upper()
+            _espn_prob = _get_espn_win_prob(_event_id, _league, home_team=_is_home)
+            if _espn_prob is None:
+                continue
+            _our_prob = (1 - _espn_prob) if side == "no" else _espn_prob
+            _implied = current_price / 100.0
+            _current_edge = _our_prob - _implied
+        except Exception:
+            continue
+
+        # Only re-enter if edge is now 12%+ (substantial improvement)
+        if _current_edge < 0.12:
+            continue
+
+        # Size: small add (base $5, edge-scaled)
+        _add_usd = edge_scaled_bet(5.0, _current_edge, max_bet=15.0)
+        _add_count = max(1, min(20, int(_add_usd * 100 / current_price)))
+        _add_cost = (current_price * _add_count) / 100.0
+
+        # Validate through pretrade gateway
+        _ok, _reason = _pretrade_validate(
+            ticker, side, current_price, _add_count, _add_cost,
+            strategy="reentry", win_prob=_our_prob, edge=_current_edge, conviction=5
+        )
+        if not _ok:
+            continue
+
+        try:
+            _ob = analyze_orderbook(ticker)
+            result = place_kalshi_order(ticker, side, current_price, count=_add_count,
+                                       orderbook_hint=_ob, win_prob=_our_prob,
+                                       edge=_current_edge, strategy="reentry")
+            _filled = 0
+            try:
+                _filled = int(float(str(result.get("order", {}).get("filled_count_fp") or 0)))
+            except Exception:
+                pass
+            if _filled > 0:
+                _actual = (current_price * _filled) / 100.0
+                _log_activity(
+                    f"📈 RE-ENTRY: {ticker} ADD {_filled}x @ {current_price}c (${_actual:.2f}) — edge grew to {_current_edge:.0%} (was ~{(entry_price/100):.0%} implied at entry)",
+                    "success"
+                )
+                reentries.append({"ticker": ticker, "filled": _filled, "cost": _actual, "edge": _current_edge})
+                _REENTRY_COOLDOWN[ticker] = now
+        except Exception:
+            pass
+
+    return reentries
 
 
 # ---------------------------------------------------------------------------
@@ -9797,18 +10130,24 @@ def _learning_multiplier(ticker, title, price_cents=None, game_info=None, espn_e
             if _sp_key in _sp_penalties:
                 multipliers.append(_sp_penalties[_sp_key])
 
-    # Evening penalty — settled data shows 7.1% WR from 6pm-midnight Pacific
-    # which is 1am-7am UTC. Apply a sizing penalty during these hours so the bot
-    # bets smaller when our historical edge is weakest.
-    _utc_hour = datetime.datetime.utcnow().hour
+    # Evening penalty — graduated conviction instead of hard block.
+    # Markets can be LESS efficient at night (fewer participants), so we
+    # use time-decayed sizing instead of a blanket ban.
     _pacific_hour = datetime.datetime.now(tz=_PACIFIC).hour
-    if 18 <= _pacific_hour <= 23:  # 6pm-midnight Pacific
-        return 0.0  # HARD BLOCK: 97% of losses happen 6pm-midnight, zero tolerance
+    if 22 <= _pacific_hour <= 23:  # 10pm-midnight = very weak
+        multipliers.append(0.15)  # near-block: only monster edges get through
+    elif 20 <= _pacific_hour <= 21:  # 8-10pm = weak
+        multipliers.append(0.3)  # heavy penalty
+    elif 18 <= _pacific_hour <= 19:  # 6-8pm = slightly weak
+        multipliers.append(0.6)  # moderate penalty
 
-    # High-price penalty — settled data shows 0% WR above 60c. Require much stronger
-    # signals to bet on favorites (the market is more efficient on favorites).
-    if price_cents and price_cents > 60:
-        multipliers.append(0.5)  # 50% size reduction for favorites
+    # High-price bonus — settled data shows 61-80c has 73.2% WR (best range).
+    # REMOVE the old penalty that contradicted this. Instead, penalize the LOW
+    # end (longshots) where MoonShark/Floor operate at ~45-50% WR.
+    if price_cents and price_cents < 30:
+        multipliers.append(0.7)  # 30% penalty for deep longshots
+    elif price_cents and price_cents > 80:
+        multipliers.append(0.5)  # still penalize above 80c (thin payoff)
 
     # CLV-weighted sizing — strategies with proven closing line value get a boost
     if strategy:
@@ -11381,6 +11720,11 @@ def _background_loop():
             # Does NOT use trailing stops or stop-losses on game bets
             try:
                 exits = enhanced_auto_exit()
+                # Score-aware re-entry: add to winners if edge grew
+                try:
+                    _reentries = score_aware_reentry()
+                except Exception as _re_e:
+                    print(f"[BG] Re-entry error: {_re_e}")
             except Exception as _exit_e:
                 print(f"[BG] Smart exit error: {_exit_e}")
         except Exception as e:
