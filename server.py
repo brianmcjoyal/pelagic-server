@@ -2451,12 +2451,13 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
         _PRETRADE_STATS["reasons"]["below_price_floor"] = _PRETRADE_STATS["reasons"].get("below_price_floor", 0) + 1
         return False, f"Price {price_cents}c below 15c minimum floor"
 
-    # GLOBAL MAXIMUM PRICE CEILING — heavy favorites (>65c) have 0% settled win rate
+    # GLOBAL MAXIMUM PRICE CEILING — data shows 61-80c is the most profitable range
+    # (73.2% WR, +$139 across 224 bets). Cap at 80c; above that payoff is too thin.
     # Exception: arb and hedge strategies buy opposite sides to lock in guaranteed profit
-    if price_cents > 65 and strategy not in ("arb", "hedge"):
+    if price_cents > 80 and strategy not in ("arb", "hedge"):
         _PRETRADE_STATS["blocked"] += 1
         _PRETRADE_STATS["reasons"]["above_price_ceiling"] = _PRETRADE_STATS["reasons"].get("above_price_ceiling", 0) + 1
-        return False, f"Price {price_cents}c above 65c ceiling — heavy favorites lose money"
+        return False, f"Price {price_cents}c above 80c ceiling — payoff too thin"
 
     if count < 1:
         _PRETRADE_STATS["blocked"] += 1
@@ -3338,8 +3339,8 @@ LIVE_GAME_SERIES = [
 ]
 
 # Sniper settings
-SNIPE_MIN_PRICE = 25   # cents — value range: 25-65c (balanced risk/reward)
-SNIPE_MAX_PRICE = 65   # cents — hard cap at 65c (0% settled win rate above this)
+SNIPE_MIN_PRICE = 25   # cents — value range: 25-75c (data: 61-80c has 73% WR)
+SNIPE_MAX_PRICE = 75   # cents — raised from 65c; 61-80c is the most profitable range
 SNIPE_BET_USD = 15.0   # fallback — now uses _smart_bet_size() for bankroll scaling
 SNIPE_MAX_DAILY = 50.0   # daily safety cap — reduced to 25% of bankroll total across strategies
 SNIPE_MAX_TRADES = 20    # more room — this is our best strategy
@@ -9968,8 +9969,30 @@ def check_settlements_and_reinvest():
             # Track category performance
             title = pos.get("market_title", "") or pos.get("title", "") or ticker
             _update_category_stats(ticker, title, won, pnl_usd)
+            # Derive closing price from market result for CLV tracking.
+            # Settled positions tell us the result — map to closing YES price.
+            _settle_result = pos.get("result", "")
+            _closing_price = None
+            if _settle_result == "yes":
+                _closing_price = 97  # YES settled → YES price ≈97c at close
+            elif _settle_result == "no":
+                _closing_price = 3   # NO settled → YES price ≈3c at close
+            else:
+                # Try to infer from realized P&L direction + side
+                _pos_side = ""
+                _avg_yes = float(str(pos.get("average_yes_price_dollars") or pos.get("average_yes_price") or 0))
+                _avg_no = float(str(pos.get("average_no_price_dollars") or pos.get("average_no_price") or 0))
+                if _avg_yes > 0 and (_avg_no == 0 or _avg_yes < _avg_no):
+                    _pos_side = "yes"
+                elif _avg_no > 0:
+                    _pos_side = "no"
+                if _pos_side:
+                    # If YES side won → result was YES (97c), lost → NO (3c)
+                    _closing_price = 97 if won else 3
+                    if _pos_side == "no":
+                        _closing_price = 100 - _closing_price  # flip for NO side
             # Track in trade journal for pattern analysis
-            _journal_settle(ticker, won, pnl_usd)
+            _journal_settle(ticker, won, pnl_usd, closing_price_cents=_closing_price)
             new_settlements.append({
                 "ticker": ticker,
                 "pnl_usd": round(pnl_usd, 2),
