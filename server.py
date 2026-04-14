@@ -1200,6 +1200,117 @@ def _extract_hour_from_timestamp(ts_str):
         return 12
 
 
+def _rebuild_strategy_stats_from_journal():
+    """Rebuild per-strategy stats (snipe, moonshot, quant, SF) from _TRADE_JOURNAL.
+
+    These BOT_STATE counters reset to 0 on deploy since they aren't persisted.
+    This function recomputes them from the trade journal which IS rebuilt from
+    the Kalshi API. Called once on startup after journal rebuild.
+    """
+    with _TRADE_JOURNAL_LOCK:
+        journal = list(_TRADE_JOURNAL)
+
+    if not journal:
+        print("[STATS-REBUILD] No trade journal entries — skipping")
+        return
+
+    # Per-strategy accumulators
+    _strat_wins = {}
+    _strat_losses = {}
+    _strat_profit = {}
+    _strat_bets = {}
+    _strat_biggest_win = {}
+
+    for entry in journal:
+        strat = (entry.get("strategy") or "").lower().replace("live_", "")
+        result = entry.get("result")
+        pnl = float(entry.get("pnl_usd") or entry.get("pnl") or 0)
+
+        if not strat:
+            continue
+
+        _strat_bets[strat] = _strat_bets.get(strat, 0) + 1
+        _strat_profit[strat] = _strat_profit.get(strat, 0) + pnl
+
+        if result == "win":
+            _strat_wins[strat] = _strat_wins.get(strat, 0) + 1
+            if pnl > _strat_biggest_win.get(strat, 0):
+                _strat_biggest_win[strat] = pnl
+        elif result == "loss":
+            _strat_losses[strat] = _strat_losses.get(strat, 0) + 1
+
+    # Rebuild Sniper stats
+    _sn_w = _strat_wins.get("sniper", 0) + _strat_wins.get("snipe", 0)
+    _sn_l = _strat_losses.get("sniper", 0) + _strat_losses.get("snipe", 0)
+    _sn_p = _strat_profit.get("sniper", 0) + _strat_profit.get("snipe", 0)
+    if _sn_w + _sn_l > BOT_STATE.get("snipe_wins", 0) + BOT_STATE.get("snipe_losses", 0):
+        BOT_STATE["snipe_wins"] = _sn_w
+        BOT_STATE["snipe_losses"] = _sn_l
+        BOT_STATE["snipe_profit_usd"] = round(_sn_p, 2)
+        print(f"[STATS-REBUILD] Sniper: {_sn_w}W/{_sn_l}L ${_sn_p:.2f}")
+
+    # Rebuild Moonshot stats
+    _ms_w = _strat_wins.get("moonshark", 0)
+    _ms_l = _strat_losses.get("moonshark", 0)
+    _ms_p = _strat_profit.get("moonshark", 0)
+    _ms_b = _strat_bets.get("moonshark", 0)
+    _ms_bw = _strat_biggest_win.get("moonshark", 0)
+    if _ms_w + _ms_l > BOT_STATE.get("moonshot_wins", 0) + BOT_STATE.get("moonshot_losses", 0):
+        BOT_STATE["moonshot_wins"] = _ms_w
+        BOT_STATE["moonshot_losses"] = _ms_l
+        BOT_STATE["moonshot_profit"] = round(_ms_p, 2)
+        BOT_STATE["moonshot_bets"] = _ms_b
+        BOT_STATE["moonshot_biggest_win"] = round(_ms_bw, 2)
+        print(f"[STATS-REBUILD] Moonshot: {_ms_w}W/{_ms_l}L ${_ms_p:.2f} (biggest=${_ms_bw:.2f})")
+
+    # Rebuild Quant stats
+    _q_w = _strat_wins.get("quant", 0)
+    _q_l = _strat_losses.get("quant", 0)
+    _q_p = _strat_profit.get("quant", 0)
+    _q_b = _strat_bets.get("quant", 0)
+    if _q_w + _q_l > BOT_STATE.get("quant_wins", 0) + BOT_STATE.get("quant_losses", 0):
+        BOT_STATE["quant_wins"] = _q_w
+        BOT_STATE["quant_losses"] = _q_l
+        BOT_STATE["quant_profit"] = round(_q_p, 2)
+        BOT_STATE["quant_bets"] = _q_b
+        print(f"[STATS-REBUILD] Quant: {_q_w}W/{_q_l}L ${_q_p:.2f}")
+
+    # Rebuild SF (Seventy-Fivers) stats
+    _sf_w = _strat_wins.get("sf", 0) + _strat_wins.get("seventy_fiver", 0)
+    _sf_l = _strat_losses.get("sf", 0) + _strat_losses.get("seventy_fiver", 0)
+    _sf_p = _strat_profit.get("sf", 0) + _strat_profit.get("seventy_fiver", 0)
+    _sf_b = _strat_bets.get("sf", 0) + _strat_bets.get("seventy_fiver", 0)
+    if _sf_w + _sf_l > BOT_STATE.get("sf_wins", 0) + BOT_STATE.get("sf_losses", 0):
+        BOT_STATE["sf_wins"] = _sf_w
+        BOT_STATE["sf_losses"] = _sf_l
+        BOT_STATE["sf_profit"] = round(_sf_p, 2)
+        BOT_STATE["sf_bets"] = _sf_b
+        # Compute streak from recent results
+        _sf_streak = 0
+        _sf_trades = [e for e in journal if (e.get("strategy") or "").lower() in ("sf", "seventy_fiver") and e.get("result")]
+        for _sft in reversed(_sf_trades):
+            if _sft["result"] == "win":
+                _sf_streak += 1
+            else:
+                break
+        BOT_STATE["sf_streak"] = _sf_streak
+        BOT_STATE["sf_best_streak"] = max(_sf_streak, BOT_STATE.get("sf_best_streak", 0))
+        print(f"[STATS-REBUILD] SF: {_sf_w}W/{_sf_l}L ${_sf_p:.2f} streak={_sf_streak}")
+
+    # Rebuild CloseGame, Swing, Goalie, Floor stats (for completeness)
+    for _rebuild_strat, _rebuild_key in [("closegame", "closegame"), ("swing", "momentum_swing"),
+                                          ("goalie", "goalie_pulled"), ("floor", "floor")]:
+        _rw = _strat_wins.get(_rebuild_strat, 0) + _strat_wins.get(_rebuild_key, 0)
+        _rl = _strat_losses.get(_rebuild_strat, 0) + _strat_losses.get(_rebuild_key, 0)
+        _rp = _strat_profit.get(_rebuild_strat, 0) + _strat_profit.get(_rebuild_key, 0)
+        if _rw + _rl > 0:
+            print(f"[STATS-REBUILD] {_rebuild_strat}: {_rw}W/{_rl}L ${_rp:.2f}")
+
+    # Total settled for Brain tab (so it doesn't show 0)
+    _total_settled = sum(1 for e in journal if e.get("result"))
+    print(f"[STATS-REBUILD] Total settled from journal: {_total_settled}")
+
+
 def _rebuild_journal_from_kalshi():
     """Rebuild _TRADE_JOURNAL and _CATEGORY_STATS from Kalshi settled positions.
 
@@ -11392,6 +11503,35 @@ def _background_loop():
         _rebuild_journal_from_kalshi()
     except Exception as e:
         print(f"[BG] Journal rebuild error (non-fatal): {e}")
+
+    # Rebuild per-strategy stats from trade journal so dashboard shows
+    # correct numbers even after a deploy wipes the state file.
+    try:
+        _rebuild_strategy_stats_from_journal()
+    except Exception as e:
+        print(f"[BG] Strategy stats rebuild error (non-fatal): {e}")
+
+    # Rebuild _resting_sells from Kalshi open orders so we don't place
+    # duplicate take-profit sells after a deploy.
+    try:
+        _resting_h = signed_headers("GET", "/portfolio/orders")
+        if _resting_h:
+            _resting_r = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/orders",
+                headers=_resting_h, params={"status": "resting", "limit": 200},
+                timeout=10,
+            )
+            if _resting_r.ok:
+                _resting_orders = _resting_r.json().get("orders", [])
+                for _ro in _resting_orders:
+                    _ro_ticker = _ro.get("ticker", "")
+                    _ro_action = _ro.get("action", "")
+                    if _ro_ticker and _ro_action == "sell":
+                        _resting_sells.add(_ro_ticker)
+                if _resting_sells:
+                    print(f"[STARTUP] Rebuilt {len(_resting_sells)} resting sell orders from Kalshi")
+    except Exception as e:
+        print(f"[BG] Resting sells rebuild error (non-fatal): {e}")
 
     # Run learning engine on startup to compute initial parameters
     try:
