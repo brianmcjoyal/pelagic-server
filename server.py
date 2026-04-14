@@ -11395,8 +11395,8 @@ def _build_tradeshark_icon_png(size=180):
     """Render a gold 'T' with gradient + glimmer sparkle for mobile home screen."""
     import struct, zlib, math
 
-    # TradeShark gold palette (matches header gradient)
-    bg = (0x0d, 0x0d, 0x0d)
+    # Pure black background — clean on home screen
+    bg = (0x00, 0x00, 0x00)
 
     # Build RGBA pixel buffer
     px = [bg + (255,)] * (size * size)
@@ -11506,15 +11506,15 @@ def _build_tradeshark_icon_png(size=180):
         _teeth.append(_tx)
         _tx += tooth_w + tooth_gap_px
 
-    # Candle — green trading candle below the jaw
-    candle_top = int(lower_dip_y + jaw_thick * 0.5)
-    candle_bot = size - int(pad * 0.4)
+    # Candle — green trading candle below the jaw (longer stem for "T" shape)
+    candle_top = int(upper_peak_y + jaw_thick + tooth_h * 0.3)
+    candle_bot = size - int(pad * 0.15)
     candle_h = candle_bot - candle_top
     wick_hw = max(1, int(size * 0.01))
     wick_cx = size // 2
     wick_top = candle_top
     wick_bot = candle_bot
-    body_hw = int(size * 0.035)
+    body_hw = int(size * 0.045)
     body_top = candle_top + int(candle_h * 0.10)
     body_bot = candle_bot - int(candle_h * 0.08)
     sL = wick_cx - body_hw
@@ -11600,22 +11600,20 @@ def _build_tradeshark_icon_png(size=180):
 
     def _in_T(x, y):
         a_uj = _in_upper_jaw(x, y)
-        a_lj = _in_lower_jaw(x, y)
-        a_hinge = _in_jaw_hinge(x, y)
+        # Lower jaw, hinges, and upward teeth removed — cleaner "T" shape
         a_wick = _in_candle_wick(x, y)
         a_body = _in_candle_body(x, y)
         a_td = _in_teeth_down(x, y)
-        a_tu = _in_teeth_up(x, y)
-        return min(1.0, a_uj + a_lj + a_hinge + a_wick + a_body + a_td + a_tu)
+        return min(1.0, a_uj + a_wick + a_body + a_td)
 
     def _is_candle_pixel(x, y):
         return _in_candle_body(x, y) > 0.001 or _in_candle_wick(x, y) > 0.001
 
     def _is_tooth_pixel(x, y):
-        return _in_teeth_down(x, y) > 0.001 or _in_teeth_up(x, y) > 0.001
+        return _in_teeth_down(x, y) > 0.001
 
     def _is_lip_pixel(x, y):
-        return _in_upper_jaw(x, y) > 0.001 or _in_lower_jaw(x, y) > 0.001 or _in_jaw_hinge(x, y) > 0.001
+        return _in_upper_jaw(x, y) > 0.001
 
     # Gold gradient (top-to-bottom, 5 stops for richness)
     _gold_stops = [
@@ -11701,53 +11699,7 @@ def _build_tradeshark_icon_png(size=180):
                     blended = tuple(int(bg[i] * (1 - f) + color[i] * f) for i in range(3))
                     px[y * size + x] = blended + (255,)
 
-    # Glow: soft outer glow around the T shape (2-pass for softness)
-    glow_r = max(3, size // 25)
-    glow_col = (0xda, 0xb0, 0x60)
-    # Build distance field (simplified: check if near T edge)
-    for _pass in range(2):
-        for y in range(glow_r, size - glow_r):
-            for x in range(glow_r, size - glow_r):
-                if px[y * size + x][:3] != bg:
-                    continue
-                # Check distance to nearest T pixel
-                min_d2 = glow_r * glow_r + 1
-                for dy in range(-glow_r, glow_r + 1, max(1, glow_r // 2)):
-                    for dx in range(-glow_r, glow_r + 1, max(1, glow_r // 2)):
-                        ny, nx = y + dy, x + dx
-                        if 0 <= ny < size and 0 <= nx < size and px[ny * size + nx][:3] != bg:
-                            d2 = dx * dx + dy * dy
-                            if d2 < min_d2:
-                                min_d2 = d2
-                if min_d2 <= glow_r * glow_r:
-                    dist = math.sqrt(min_d2)
-                    strength = (1.0 - dist / glow_r) ** 2 * 0.25
-                    blended = tuple(int(bg[i] + (glow_col[i] - bg[i]) * strength) for i in range(3))
-                    px[y * size + x] = blended + (255,)
-
-    # Draw sparkle stars (4-pointed)
-    for sx, sy, sr in sparkles:
-        for dy in range(-sr * 3, sr * 3 + 1):
-            for dx in range(-sr * 3, sr * 3 + 1):
-                ny, nx = sy + dy, sx + dx
-                if not (0 <= ny < size and 0 <= nx < size):
-                    continue
-                ax, ay = abs(dx), abs(dy)
-                # Star shape: 4-pointed — bright along axes, fading diagonally
-                on_h = (ay <= max(1, sr // 3)) and ax <= sr * 2.5
-                on_v = (ax <= max(1, sr // 3)) and ay <= sr * 2.5
-                on_core = (ax + ay) <= sr
-                if on_h or on_v or on_core:
-                    if on_core:
-                        dist = (ax + ay) / max(1, sr)
-                    elif on_h:
-                        dist = ax / (sr * 2.5)
-                    else:
-                        dist = ay / (sr * 2.5)
-                    bright = max(0.0, (1.0 - dist) ** 1.5)
-                    old = px[ny * size + nx]
-                    sparked = tuple(min(255, int(old[i] + (255 - old[i]) * bright * 0.9)) for i in range(3))
-                    px[ny * size + nx] = sparked + (255,)
+    # No glow or sparkle effects — clean black background
 
     # Encode to PNG
     raw = bytearray()
