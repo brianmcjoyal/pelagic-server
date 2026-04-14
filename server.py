@@ -5054,12 +5054,6 @@ def moonshark_snipe():
 
                 remaining_budget = MOONSHARK_MAX_DAILY - BOT_STATE["moonshark_daily_spent"]
                 trades_left = MOONSHARK_MAX_TRADES - len(BOT_STATE.get("moonshark_trades_today", []))
-                # Kelly sizes against REAL bankroll (actual cash), not daily budget
-                kelly_bankroll = bal
-                profit_if_win = (100 - price) / 100.0
-                odds_decimal = profit_if_win / (price / 100.0)
-                kelly_usd = kelly_bet_size(kelly_bankroll, win_prob, odds_decimal)
-                # No artificial floor — if Kelly says $0, don't bet
                 max_per_trade = remaining_budget / max(trades_left, 1)
                 # Learning multiplier — bet bigger on proven patterns, skip losers
                 cat_mult = _learning_multiplier(ticker, title, price)
@@ -5084,16 +5078,15 @@ def moonshark_snipe():
                 # Conviction scaling: 4=0.5x (exploratory), 5=1x, 6=1.5x, 7+=2x
                 _conv_mult = 0.5 + max(0, ms_conviction - 4) * 0.5
                 _conv_mult = min(_conv_mult, 2.0)
-                # Apply multipliers BEFORE capping — so Kelly cap is never exceeded
-                adjusted_kelly = kelly_usd * cat_mult * live_boost * _conv_mult
-                # MLB: quarter-Kelly (extra /2) — baseball variance is brutal
+                # Edge-scaled sizing: $5 base for MoonShark (longshot strategy)
+                _ms_base_bet = edge_scaled_bet(5.0, edge_estimate) * cat_mult * live_boost * _conv_mult
+                # MLB: extra conservative (halve) — baseball variance is brutal
                 if _league == "mlb":
-                    adjusted_kelly /= 2.0
-                # No artificial $3 floor — trust Kelly. If edge is small, bet small.
-                if adjusted_kelly < 1.0:
-                    _ms_reasons["kelly_too_small"] = _ms_reasons.get("kelly_too_small", 0) + 1
-                    continue  # Kelly says edge isn't worth it
-                bet_usd = min(adjusted_kelly, max_per_trade, remaining_budget, BOT_CONFIG["max_bet_usd"])
+                    _ms_base_bet /= 2.0
+                if _ms_base_bet < 1.0:
+                    _ms_reasons["bet_too_small"] = _ms_reasons.get("bet_too_small", 0) + 1
+                    continue
+                bet_usd = min(_ms_base_bet, max_per_trade, remaining_budget, BOT_CONFIG["max_bet_usd"])
                 count = max(1, int(bet_usd * 100 / price))
                 cost_usd = (price * count) / 100.0
 
@@ -5119,7 +5112,7 @@ def moonshark_snipe():
                 reasons.append(f"cat={mcat}")
                 reasons.append(f"vol={_ask_size:.0f}")
                 reasons.append(f"payout={profit_per}c/contract")
-                reasons.append(f"kelly=${kelly_usd:.2f}")
+                reasons.append(f"bet=${bet_usd:.2f}")
                 reasons.append(f"edge={edge_estimate:.1%}")
                 reasons.append(f"winP={win_prob:.1%}")
                 if cat_mult != 1.0:
@@ -5740,10 +5733,9 @@ def closegame_snipe():
 
                 # Size the bet
                 remaining = CLOSEGAME_MAX_DAILY - BOT_STATE.get("closegame_daily_spent", 0)
-                profit_if_win = (100 - price) / 100.0
-                odds_decimal = profit_if_win / (price / 100.0)
-                kelly_usd = kelly_bet_size(bal, estimated_win_prob, odds_decimal)
-                bet_usd = min(kelly_usd, remaining / max(1, CLOSEGAME_MAX_TRADES - len(BOT_STATE.get("closegame_trades_today", []))), remaining)
+                # Edge-scaled sizing: $7 base for CloseGame (late-game high-conviction)
+                _cg_bet = edge_scaled_bet(7.0, edge)
+                bet_usd = min(_cg_bet, remaining / max(1, CLOSEGAME_MAX_TRADES - len(BOT_STATE.get("closegame_trades_today", []))), remaining)
                 bet_usd = min(bet_usd, BOT_CONFIG["max_bet_usd"], remaining)
                 count = max(1, int(bet_usd * 100 / price))
                 cost_usd = (price * count) / 100.0
@@ -6169,17 +6161,9 @@ def floor_quota_snipe():
         if not _correlation_check_ok(ticker, 3):
             continue
 
-        # Quarter-Kelly sizing — bigger edge = bigger bet, but capped at $5 (floor is learning, not earning)
+        # Edge-scaled sizing: $3 base for Floor (learning strategy), capped at $5
         _fl_remaining = FLOOR_MAX_DAILY_USD - BOT_STATE.get("floor_daily_spent", 0)
-        _fl_bal = _get_cached_balance()
-        if _fl_bal > 0 and edge > 0.015:
-            _fl_odds = (100 - price) / max(1, price)
-            _fl_kelly_frac = (_fl_odds * cand["our_prob"] - (1 - cand["our_prob"])) / max(0.01, _fl_odds)
-            _fl_kelly_frac = max(0, _fl_kelly_frac) / 4.0  # quarter-Kelly for floor
-            _fl_kelly_frac = min(_fl_kelly_frac, 0.03)     # cap at 3% of bankroll
-            bet_usd = min(_fl_bal * _fl_kelly_frac, _fl_remaining, 5.0)  # hard cap $5 per floor trade
-        else:
-            bet_usd = min(FLOOR_BET_USD, _fl_remaining)
+        bet_usd = min(edge_scaled_bet(3.0, edge, max_bet=5.0), _fl_remaining)
         if bet_usd < 1.0:
             break
         count = max(1, int(bet_usd * 100 / price))
@@ -6505,7 +6489,7 @@ def momentum_swing_snipe():
                 # Blend: 60% ESPN (model-driven) + 40% historical (data-driven)
                 _blended_prob = 0.60 * live_prob + 0.40 * _cb_rate
                 edge = _blended_prob - implied
-                live_prob = _blended_prob  # use blended for Kelly sizing too
+                live_prob = _blended_prob  # use blended for edge sizing too
 
             if edge < _adaptive_get("min_edge_swing", 0.06):
                 continue
@@ -6538,12 +6522,11 @@ def momentum_swing_snipe():
             except Exception:
                 pass
 
-            # Size — Kelly against our edge, capped by strategy budget
+            # Size — edge-scaled, capped by strategy budget
             remaining_daily = SWING_MAX_DAILY_USD - BOT_STATE.get("swing_daily_spent", 0)
-            profit_if_win = (100 - price) / 100.0
-            odds_decimal = profit_if_win / implied
-            kelly_usd = kelly_bet_size(bal, live_prob, odds_decimal)
-            bet_usd = min(kelly_usd, remaining_daily, BOT_CONFIG["max_bet_usd"])
+            # Edge-scaled sizing: $6 base for Momentum Swing
+            _sw_bet = edge_scaled_bet(6.0, edge)
+            bet_usd = min(_sw_bet, remaining_daily, BOT_CONFIG["max_bet_usd"])
             if bet_usd < 1.0:
                 continue
             count = max(1, int(bet_usd * 100 / price))
@@ -6886,9 +6869,9 @@ def goalie_pulled_snipe():
 
         remaining = GOALIE_MAX_DAILY_USD - BOT_STATE.get("goalie_daily_spent", 0)
         profit_if_win = (100 - price) / 100.0
-        odds_decimal = profit_if_win / best["implied"]
-        kelly_usd = kelly_bet_size(bal, best["our_prob"], odds_decimal)
-        bet_usd = min(kelly_usd, remaining, BOT_CONFIG["max_bet_usd"])
+        # Edge-scaled sizing: $6 base for Goalie Pulled (NHL specialty)
+        _gl_bet = edge_scaled_bet(6.0, edge)
+        bet_usd = min(_gl_bet, remaining, BOT_CONFIG["max_bet_usd"])
         if bet_usd < 1.0:
             continue
         count = max(1, int(bet_usd * 100 / price))
@@ -7021,88 +7004,101 @@ def _warm_picks_cache():
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# 1. KELLY CRITERION — Optimal bet sizing based on bankroll + edge
+# 1. EDGE-SCALED BET SIZING — bigger edge = bigger bet, simple and transparent
 # ---------------------------------------------------------------------------
-# f* = (bp - q) / b  where b=odds, p=win_prob, q=1-p
-# We use half-Kelly for safety (less volatile)
+# No Kelly formula.  Just: base bet × edge multiplier × streak adjustment.
+# Edge tiers:
+#   5-8%   → 1.0x base   (minimum viable edge, small bet)
+#   8-12%  → 1.5x base   (solid edge, medium bet)
+#   12-20% → 2.0x base   (strong edge, full bet)
+#   20%+   → 2.5x base   (monster edge, max bet)
+# Streak adjustment: cold streak (< 25% WR last 20) → 0.5x, hot (> 55%) → 1.3x
 
-def _adaptive_kelly_divisor():
-    """Adaptive Kelly: more conservative on losing streaks, slightly aggressive on wins."""
+_EDGE_TIERS = [
+    (0.20, 2.5),   # 20%+ edge → 2.5x
+    (0.12, 2.0),   # 12-20% edge → 2.0x
+    (0.08, 1.5),   # 8-12% edge → 1.5x
+    (0.05, 1.0),   # 5-8% edge → 1.0x
+    (0.00, 0.5),   # <5% edge → 0.5x (only if strategy allows sub-5%)
+]
+
+def _edge_multiplier(edge):
+    """Return bet multiplier based on edge magnitude."""
+    for threshold, mult in _EDGE_TIERS:
+        if edge >= threshold:
+            return mult
+    return 0.5
+
+def _streak_multiplier():
+    """Adjust sizing based on recent win rate. Cold streak → smaller, hot → bigger."""
     with _TRADE_JOURNAL_LOCK:
         _recent_20 = _TRADE_JOURNAL[-20:]
     _recent_results = [t.get("result") for t in _recent_20 if t.get("result") in ("win", "loss")]
-    _recent_wins = sum(1 for r in _recent_results if r == "win")
     _recent_total = len(_recent_results)
     if _recent_total >= 5:
-        _recent_wr = _recent_wins / _recent_total
-        if _recent_wr < 0.20:
-            return 4  # quarter-Kelly on cold streaks
+        _recent_wr = sum(1 for r in _recent_results if r == "win") / _recent_total
+        if _recent_wr < 0.25:
+            return 0.5   # cold streak — cut size in half
         elif _recent_wr < 0.35:
-            return 3  # third-Kelly
-        elif _recent_wr > 0.60:
-            return 1.5  # two-thirds Kelly on hot streaks
-        else:
-            return 2  # standard half-Kelly
-    return 2  # not enough data, use half-Kelly
+            return 0.75  # cool streak
+        elif _recent_wr > 0.55:
+            return 1.3   # hot streak — size up modestly
+    return 1.0  # normal
 
-
-def kelly_bet_size(bankroll, win_prob, odds_decimal):
-    """Calculate optimal Kelly Criterion bet size.
+def edge_scaled_bet(base_usd, edge, max_bet=None):
+    """Simple edge-proportional bet sizing.
 
     Args:
-        bankroll: total available cash in dollars
-        win_prob: estimated probability of winning (0-1)
-        odds_decimal: decimal odds (e.g., buy at 60c = payout 100c, odds = 100/60 - 1 = 0.667)
+        base_usd: strategy's base bet size (e.g. $8 for sniper, $5 for moonshark)
+        edge: estimated edge as decimal (e.g. 0.10 for 10%)
+        max_bet: maximum allowed bet (default: BOT_CONFIG max_bet_usd)
 
     Returns:
-        Optimal bet in dollars (adaptive Kelly for safety)
+        Bet size in dollars. Bigger edge = bigger bet.
+    """
+    if edge <= 0:
+        return 0
+    if max_bet is None:
+        max_bet = BOT_CONFIG.get("max_bet_usd", 25.0)
+    bet = base_usd * _edge_multiplier(edge) * _streak_multiplier()
+    bet = max(1.0, min(bet, max_bet))
+    return round(bet, 2)
+
+# Backward-compatible wrapper — old code calls kelly_bet_size, this redirects
+# to edge-scaled sizing.  win_prob and odds_decimal are used to derive edge.
+def kelly_bet_size(bankroll, win_prob, odds_decimal):
+    """DEPRECATED Kelly wrapper — now uses edge-scaled sizing internally.
+    Kept for backward compatibility with callers that pass (bankroll, win_prob, odds).
     """
     if win_prob <= 0 or win_prob >= 1 or odds_decimal <= 0:
         return 0
-    q = 1 - win_prob
-    b = odds_decimal
-    kelly_fraction = (b * win_prob - q) / b
-    if kelly_fraction <= 0:
-        return 0  # negative edge — don't bet
-    # Adaptive Kelly — adjusts based on recent win/loss streak
-    kelly_divisor = _adaptive_kelly_divisor()
-    adjusted_kelly = kelly_fraction / kelly_divisor
-    # Cap at 5% of bankroll per trade (risk management)
-    capped = min(adjusted_kelly, 0.05)
-    bet = bankroll * capped
-    # No artificial floor — trust Kelly. Ceiling from config.
-    if bet < 1.0:
-        return 0  # Kelly says edge isn't worth it
-    return min(bet, BOT_CONFIG["max_bet_usd"])
+    implied = 1.0 / (1.0 + odds_decimal)  # convert decimal odds to implied prob
+    edge = win_prob - implied
+    if edge <= 0:
+        return 0
+    # Use $8 as base (median strategy base), scale by edge
+    return edge_scaled_bet(8.0, edge)
 
 
 def kelly_count(bankroll, price_cents, consensus_price, min_edge=0.02):
-    """Calculate contract count using Kelly Criterion.
+    """Calculate contract count using edge-scaled sizing.
 
     Args:
-        bankroll: cash in dollars
+        bankroll: cash in dollars (not used — sizing is edge-based now)
         price_cents: what we'd pay per contract
         consensus_price: what we think true probability is (0-1)
         min_edge: minimum edge required to place any bet (default 2%).
-                  Below this we return 0 instead of forcing a 1-contract bet.
     """
     if price_cents <= 0 or price_cents >= 100:
         return 0
-    our_cost = price_cents / 100.0  # what we pay
-    win_prob = consensus_price       # estimated true probability
-    # Enforce minimum edge — protects against overconfident consensus inputs
-    # and stops us from burning slippage on razor-thin trades.
-    edge = win_prob - our_cost
+    our_cost = price_cents / 100.0
+    edge = consensus_price - our_cost
     if edge < min_edge:
         return 0
-    # If buying YES at 60c, payout is 100c, so profit = 40c, odds = 40/60
-    profit_if_win = (100 - price_cents) / 100.0
-    odds = profit_if_win / our_cost
-    bet_usd = kelly_bet_size(bankroll, win_prob, odds)
+    bet_usd = edge_scaled_bet(8.0, edge)
     if bet_usd <= 0:
         return 0
     count = max(1, int(bet_usd * 100 / price_cents))
-    # Cap at 50 contracts for any single trade
     return min(count, 50)
 
 
@@ -18005,37 +18001,14 @@ def _get_line_movement(ticker, price_cents):
 
 
 def _smart_bet_size(price_cents, bankroll=None, edge=0.05):
-    """Edge-driven bet sizing using half-Kelly criterion.
+    """Edge-scaled bet sizing for Live Sniper.
 
-    Only bets when edge > 1.5%. Sizes proportional to edge, not price.
-    Bigger edge = bigger bet. Trust Kelly to size appropriately.
+    Bigger edge = bigger bet. No Kelly — just edge tiers.
+    Base bet: $8 for sniper (mid-range strategy).
     """
-    if bankroll is None:
-        try:
-            bankroll = (_PORTFOLIO_CACHE.get("data") or {}).get("balance_usd", 0)
-        except Exception:
-            bankroll = 0
-    if bankroll <= 0:
-        # Cannot size bets without knowing real bankroll — use minimum bet
-        return 1.0  # $1 minimum, don't assume phantom bankroll
-
     if edge < 0.015:
         return 0  # No edge, no bet
-
-    # Half-Kelly: bet size proportional to edge magnitude
-    # Higher edge = bigger bet, but always conservative
-    odds = (100 - price_cents) / max(1, price_cents)
-    win_prob = min(price_cents / 100.0 + edge, 0.95)
-    kelly_frac = (odds * win_prob - (1 - win_prob)) / max(0.01, odds)
-    kelly_frac = max(0, kelly_frac) / _adaptive_kelly_divisor()  # adaptive Kelly for safety
-    # Cap at 5% of bankroll per trade (risk management)
-    kelly_frac = min(kelly_frac, 0.05)
-
-    bet = bankroll * kelly_frac
-    if bet < 1.0:
-        return 0  # Kelly says not worth it
-    bet = min(bet, BOT_CONFIG.get("max_bet_usd", 25.0))
-    return round(bet, 2)
+    return edge_scaled_bet(8.0, edge)
 
 
 def _generate_seventy_fivers():
