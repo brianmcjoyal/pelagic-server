@@ -672,6 +672,12 @@ def _load_state():
 
     print(f"[STATE] HWM: {_SETTLED_HWM['wins']}W/{_SETTLED_HWM['losses']}L")
 
+    # FINAL FORCE ENABLE — no matter what happened above, bot starts enabled.
+    # Drawdown circuit breaker provides all needed risk protection.
+    BOT_CONFIG["enabled"] = True
+    BOT_STATE["auto_trade"] = True
+    print(f"[STATE] ✅ FINAL: bot_enabled={BOT_CONFIG['enabled']}")
+
 def _hydrate_from_kalshi():
     """Pull actual trade fills from Kalshi API to rebuild state after deploy."""
     import requests as _req
