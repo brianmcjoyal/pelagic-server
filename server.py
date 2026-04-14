@@ -902,6 +902,51 @@ def _hydrate_from_kalshi():
                 parts = tk.split("-")
                 if len(parts) >= 2:
                     _EVENTS_BET_TODAY.add("-".join(parts[:2]))
+        # Rebuild paper trades from today's Kalshi fills so the Paper tab
+        # has data even after a Railway deploy (state file wipe).
+        # Only backfill if _PAPER_TRADES is empty (don't duplicate if state survived).
+        if not _PAPER_TRADES and today_trades:
+            _paper_rebuilt = 0
+            for _ht in today_trades:
+                _ht_ticker = _ht.get("ticker", "")
+                _ht_side = _ht.get("side", "yes")
+                _ht_price = _ht.get("price_cents", 0)
+                _ht_strat = _ht.get("strategy", "unknown")
+                _ht_title = _ht.get("question", _ht_ticker)
+                _ht_ts_str = _ht.get("timestamp", "")
+                _ht_implied = round(_ht_price / 100.0, 3) if _ht_price else 0
+                try:
+                    _ht_dt = datetime.datetime.fromisoformat(_ht_ts_str.replace("Z", "+00:00")).astimezone(_PACIFIC)
+                    _ht_entry_time = _ht_dt.isoformat()
+                    _ht_entry_ts = _ht_dt.timestamp()
+                except Exception:
+                    _ht_entry_time = _ht_ts_str
+                    _ht_entry_ts = _time.time()
+                _paper_rec = {
+                    "ticker": _ht_ticker,
+                    "title": (_ht_title or "")[:60],
+                    "side": _ht_side,
+                    "sport": "",
+                    "strategy": _ht_strat.replace("live_", ""),  # live_sniper → sniper
+                    "entry_price": _ht_price,
+                    "espn_prob": 0,
+                    "kalshi_implied": _ht_implied,
+                    "edge": 0,
+                    "ev_cents": 0,
+                    "game_state": "",
+                    "entry_time": _ht_entry_time,
+                    "entry_ts": _ht_entry_ts,
+                    "price_5min": None, "price_15min": None, "price_30min": None,
+                    "clv_5min": None, "clv_15min": None, "clv_30min": None,
+                    "closing_price": None, "clv_final": None,
+                    "result": None, "pnl_cents": None,
+                    "source": "hydrated",  # mark as rebuilt from Kalshi
+                }
+                with _PAPER_TRADES_LOCK:
+                    _PAPER_TRADES.append(_paper_rec)
+                _paper_rebuilt += 1
+            print(f"[HYDRATE] Rebuilt {_paper_rebuilt} paper trades from today's Kalshi fills")
+
         _save_state()
         print(f"[HYDRATE] Rebuilt {len(all_trades_rebuilt)} trades from Kalshi ({new_count} new), today: {today_count} trades (MS:{len(_ms_today)} SN:{len(_snipe_today)} CG:{len(_cg_today)}), ${today_spent:.2f} spent, titles: {len(title_map)}")
     except Exception as e:
