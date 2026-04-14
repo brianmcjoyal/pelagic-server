@@ -11539,6 +11539,80 @@ def _background_loop():
     except Exception as e:
         print(f"[BG] Learning engine startup error (non-fatal): {e}")
 
+    # =========================================================================
+    # STARTUP SELF-TEST — catch any broken/zero state before dashboard shows it
+    # =========================================================================
+    # This is the safety net: if we ever add a new counter or display value
+    # and forget to rebuild it, this test will flag it in the logs.
+    _selftest_warnings = []
+    try:
+        # 1. W/L must be at or above HWM floor
+        _st_wins = _SETTLED_HWM.get("wins", 0)
+        _st_losses = _SETTLED_HWM.get("losses", 0)
+        if _st_wins < _SETTLED_HWM_FLOOR["wins"]:
+            _selftest_warnings.append(f"HWM wins {_st_wins} < floor {_SETTLED_HWM_FLOOR['wins']}")
+            _SETTLED_HWM["wins"] = _SETTLED_HWM_FLOOR["wins"]
+        if _st_losses < _SETTLED_HWM_FLOOR["losses"]:
+            _selftest_warnings.append(f"HWM losses {_st_losses} < floor {_SETTLED_HWM_FLOOR['losses']}")
+            _SETTLED_HWM["losses"] = _SETTLED_HWM_FLOOR["losses"]
+
+        # 2. Learning version must be at floor
+        _st_ver = _LEARNING_STATE.get("version", 0)
+        if _st_ver < _LEARNING_VERSION_FLOOR:
+            _selftest_warnings.append(f"Learning version {_st_ver} < floor {_LEARNING_VERSION_FLOOR}")
+            _LEARNING_STATE["version"] = _LEARNING_VERSION_FLOOR
+
+        # 3. Trade journal should have entries (rebuilt from Kalshi)
+        with _TRADE_JOURNAL_LOCK:
+            _st_journal_len = len(_TRADE_JOURNAL)
+        if _st_journal_len == 0:
+            _selftest_warnings.append("Trade journal is EMPTY after rebuild — Kalshi API may be down")
+
+        # 4. Portfolio cache should be populated
+        if not _PORTFOLIO_CACHE.get("data") or _PORTFOLIO_CACHE["data"].get("portfolio_value_usd", 0) < 1:
+            _selftest_warnings.append("Portfolio cache empty or $0 — API may be down")
+
+        # 5. Perf history should have points for chart
+        if len(_PERF_HISTORY) < 2:
+            _selftest_warnings.append(f"Perf history only has {len(_PERF_HISTORY)} points — chart will be sparse")
+
+        # 6. Bot must be enabled
+        if not BOT_CONFIG.get("enabled") or not BOT_STATE.get("auto_trade"):
+            _selftest_warnings.append("Bot is DISABLED after startup — forcing enable")
+            BOT_CONFIG["enabled"] = True
+            BOT_STATE["auto_trade"] = True
+
+        # 7. Settled cache should be warm
+        if not _SETTLED_CACHE.get("data"):
+            _selftest_warnings.append("Settled cache empty — Performance tab may show stale data")
+
+        # 8. All strategy adaptive thresholds should exist
+        _expected_adaptive = ["min_conviction_sniper", "min_conviction_moonshark",
+                              "min_edge_sniper", "min_edge_moonshark", "min_edge_closegame"]
+        _adaptive = _LEARNING_STATE.get("adaptive", {})
+        for _ea in _expected_adaptive:
+            if _ea not in _adaptive:
+                _selftest_warnings.append(f"Missing adaptive threshold: {_ea}")
+
+        # 9. Check displayed values won't show 0 incorrectly
+        if _PORTFOLIO_CACHE.get("data"):
+            _pf = _PORTFOLIO_CACHE["data"]
+            if _pf.get("wins", 0) == 0 and _st_wins > 10:
+                _selftest_warnings.append(f"Portfolio cache wins=0 but HWM={_st_wins} — syncing")
+                _pf["wins"] = _st_wins
+                _pf["losses"] = _st_losses
+
+        # Report results
+        if _selftest_warnings:
+            print(f"[SELF-TEST] ⚠️ {len(_selftest_warnings)} warnings:")
+            for _stw in _selftest_warnings:
+                print(f"  ⚠️ {_stw}")
+            _log_activity(f"Startup self-test: {len(_selftest_warnings)} warnings — check logs", "warn")
+        else:
+            print("[SELF-TEST] ✅ All checks passed — dashboard state looks healthy")
+    except Exception as _ste:
+        print(f"[SELF-TEST] Error during self-test (non-fatal): {_ste}")
+
     cycle = 0
     # Portfolio cache warms naturally on first background cycle — no startup delay
     while True:
@@ -12830,11 +12904,39 @@ def debug_scheduler():
 @app.route("/health")
 def health():
     _bg_alive = _bg_thread is not None and _bg_thread.is_alive()
+    # State integrity checks — flag anything that looks wrong
+    _integrity = []
+    _hwm_w = _SETTLED_HWM.get("wins", 0)
+    _hwm_l = _SETTLED_HWM.get("losses", 0)
+    if _hwm_w < _SETTLED_HWM_FLOOR["wins"]:
+        _integrity.append(f"HWM wins {_hwm_w} < floor {_SETTLED_HWM_FLOOR['wins']}")
+    if _LEARNING_STATE.get("version", 0) < _LEARNING_VERSION_FLOOR:
+        _integrity.append(f"Learning version below floor")
+    with _TRADE_JOURNAL_LOCK:
+        _jlen = len(_TRADE_JOURNAL)
+    if _jlen == 0:
+        _integrity.append("Trade journal empty")
+    if not BOT_CONFIG.get("enabled"):
+        _integrity.append("Bot DISABLED")
+    _storage = "persistent" if _DATA_DIR == "/data" else "ephemeral"
+
+    _status = "ok"
+    if not _bg_alive:
+        _status = "degraded"
+    elif _integrity:
+        _status = "warning"
+
     return jsonify({
-        "status": "ok" if _bg_alive else "degraded",
+        "status": _status,
         "trading_thread": "alive" if _bg_alive else "dead",
         "auto_trade": BOT_CONFIG.get("enabled", False),
         "uptime_cycles": BOT_STATE.get("cycle", 0),
+        "storage": _storage,
+        "state_file": _STATE_FILE,
+        "journal_size": _jlen,
+        "hwm": {"wins": _hwm_w, "losses": _hwm_l},
+        "learning_version": _LEARNING_STATE.get("version", 0),
+        "integrity_warnings": _integrity,
         "watchdog_alerts": _WATCHDOG_ALERTS,
         "pretrade_gateway": {
             "checked": _PRETRADE_STATS["checked"],
