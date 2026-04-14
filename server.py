@@ -13240,15 +13240,15 @@ def settled_positions():
             _SETTLED_HWM["wins"] = _final_wins
         if _final_losses > _SETTLED_HWM["losses"]:
             _SETTLED_HWM["losses"] = _final_losses
-        if _final_pnl < _SETTLED_HWM.get("total_pnl", 0.0) and _final_total < (_SETTLED_HWM["wins"] + _SETTLED_HWM["losses"]):
+        if _final_pnl > _SETTLED_HWM.get("total_pnl", 0.0):
+            _SETTLED_HWM["total_pnl"] = _final_pnl
+        if _final_total < (_SETTLED_HWM["wins"] + _SETTLED_HWM["losses"]):
             # Fewer trades than HWM = Kalshi pruned data; use HWM
             _final_wins = _SETTLED_HWM["wins"]
             _final_losses = _SETTLED_HWM["losses"]
+            _final_pnl = _SETTLED_HWM["total_pnl"]
             _final_total = _final_wins + _final_losses
-            print(f"[SETTLED] HWM triggered: using {_final_wins}W/{_final_losses}L (Kalshi returned fewer trades)")
-        else:
-            # Normal — update HWM
-            _SETTLED_HWM["total_pnl"] = _final_pnl
+            print(f"[SETTLED] HWM triggered: using {_final_wins}W/{_final_losses}L (${_final_pnl:.2f}) (Kalshi returned fewer trades)")
 
         print(f"[SETTLED] Final W/L from settled array: {_final_wins}W/{_final_losses}L (${_final_pnl:.2f}) from {len(settled)} settled trades")
 
