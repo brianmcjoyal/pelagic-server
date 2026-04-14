@@ -302,7 +302,8 @@ def _save_state():
             "game_exposure": _GAME_EXPOSURE,
             # Performance history for line chart (keep last _PERF_HISTORY_MAX)
             "perf_history": _perf_for_save,
-            # HWM removed — raw Kalshi data is source of truth now
+            # High-water mark for W/L counts — persists across restarts
+            "settled_hwm": dict(_SETTLED_HWM),
             # Paper trades (persist across restarts, not day-dependent)
             "paper_trades": _paper_for_save,
             # Persist bot enabled state so kill switch survives deploys
@@ -410,6 +411,7 @@ def _load_state():
             BOT_STATE["goalie_daily_spent"] = 0.0
             BOT_STATE["goalie_trades_today"] = []
             BOT_STATE["goalie_date"] = today_str
+            BOT_STATE["misc_daily_spent"] = 0.0
             BOT_STATE["manual_trades_today"] = []
 
         # --- Cumulative data: always restore regardless of day ---
@@ -462,9 +464,15 @@ def _load_state():
             else:
                 print(f"[STATE] Bot enabled state restored: {data['bot_enabled']}")
 
-        # HWM no longer restored — we want raw Kalshi numbers, not inflated historical max.
-        # The /settled endpoint will recalculate accurate W/L from Kalshi API on each call.
-        print(f"[STATE] HWM reset to 0/0 — using raw Kalshi settled data")
+        # Restore HWM — protects against Kalshi pruning old settled data
+        saved_hwm = data.get("settled_hwm", {})
+        if saved_hwm and saved_hwm.get("wins", 0) > 0:
+            _SETTLED_HWM["wins"] = saved_hwm.get("wins", 0)
+            _SETTLED_HWM["losses"] = saved_hwm.get("losses", 0)
+            _SETTLED_HWM["total_pnl"] = saved_hwm.get("total_pnl", 0.0)
+            print(f"[STATE] Restored HWM: {_SETTLED_HWM['wins']}W/{_SETTLED_HWM['losses']}L (${_SETTLED_HWM['total_pnl']:.2f})")
+        else:
+            print(f"[STATE] No saved HWM — will build from first /settled call")
 
         print(f"[STATE] Restored {len(BOT_STATE['all_trades'])} trades from disk, "
               f"daily_spent reset to $0 for new session, same_day={is_same_day}")
@@ -473,8 +481,6 @@ def _load_state():
     except Exception as e:
         print(f"[STATE] Load error: {e}")
 
-    # HWM seed removed — was inflating win rate with fake 120W/85L minimum.
-    # Now shows raw settled numbers from Kalshi API as source of truth.
     print(f"[STATE] HWM: {_SETTLED_HWM['wins']}W/{_SETTLED_HWM['losses']}L")
 
 def _hydrate_from_kalshi():
@@ -649,7 +655,7 @@ def _hydrate_from_kalshi():
         _new_ms = [t for t in _ms_today if (t.get("order_id") or t.get("ticker", "") + str(t.get("timestamp", ""))) not in _existing_ms_ids]
         if _new_ms:
             BOT_STATE.setdefault("moonshark_trades_today", []).extend(_new_ms)
-        BOT_STATE["moonshark_daily_spent"] = round(sum(t.get("cost_usd", 0) for t in BOT_STATE.get("moonshark_trades_today", [])), 2)
+        BOT_STATE["moonshark_daily_spent"] = round(sum(t.get("cost_usd", 0) or t.get("cost", 0) for t in BOT_STATE.get("moonshark_trades_today", [])), 2)
         BOT_STATE["moonshark_date"] = today_str
 
         _snipe_today = [t for t in today_trades if t.get("strategy") in ("snipe", "live_sniper")]
@@ -657,7 +663,7 @@ def _hydrate_from_kalshi():
         _new_sn = [t for t in _snipe_today if (t.get("order_id") or t.get("ticker", "") + str(t.get("timestamp", ""))) not in _existing_sn_ids]
         if _new_sn:
             BOT_STATE.setdefault("snipe_trades_today", []).extend(_new_sn)
-        BOT_STATE["snipe_daily_spent"] = round(sum(t.get("cost_usd", 0) for t in BOT_STATE.get("snipe_trades_today", [])), 2)
+        BOT_STATE["snipe_daily_spent"] = round(sum(t.get("cost_usd", 0) or t.get("cost", 0) for t in BOT_STATE.get("snipe_trades_today", [])), 2)
         BOT_STATE["snipe_date"] = today_str
 
         _cg_today = [t for t in today_trades if t.get("strategy") == "closegame"]
@@ -665,7 +671,8 @@ def _hydrate_from_kalshi():
         _new_cg = [t for t in _cg_today if (t.get("order_id") or t.get("ticker", "") + str(t.get("timestamp", ""))) not in _existing_cg_ids]
         if _new_cg:
             BOT_STATE.setdefault("closegame_trades_today", []).extend(_new_cg)
-        BOT_STATE["closegame_daily_spent"] = round(sum(t.get("cost_usd", 0) for t in BOT_STATE.get("closegame_trades_today", [])), 2)
+        BOT_STATE["closegame_daily_spent"] = round(sum(t.get("cost_usd", 0) or t.get("cost", 0) for t in BOT_STATE.get("closegame_trades_today", [])), 2)
+        BOT_STATE["closegame_date"] = today_str
 
         # Hydrate floor/swing/goalie daily counters (same pattern)
         _fl_today = [t for t in today_trades if t.get("strategy") == "floor"]
@@ -673,7 +680,7 @@ def _hydrate_from_kalshi():
         _new_fl = [t for t in _fl_today if (t.get("order_id") or t.get("ticker", "") + str(t.get("timestamp", ""))) not in _existing_fl_ids]
         if _new_fl:
             BOT_STATE.setdefault("floor_trades_today", []).extend(_new_fl)
-        BOT_STATE["floor_daily_spent"] = round(sum(t.get("cost_usd", 0) for t in BOT_STATE.get("floor_trades_today", [])), 2)
+        BOT_STATE["floor_daily_spent"] = round(sum(t.get("cost_usd", 0) or t.get("cost", 0) for t in BOT_STATE.get("floor_trades_today", [])), 2)
         BOT_STATE["floor_date"] = today_str
 
         _sw_today = [t for t in today_trades if t.get("strategy") == "swing"]
@@ -681,7 +688,7 @@ def _hydrate_from_kalshi():
         _new_sw = [t for t in _sw_today if (t.get("order_id") or t.get("ticker", "") + str(t.get("timestamp", ""))) not in _existing_sw_ids]
         if _new_sw:
             BOT_STATE.setdefault("swing_trades_today", []).extend(_new_sw)
-        BOT_STATE["swing_daily_spent"] = round(sum(t.get("cost_usd", 0) for t in BOT_STATE.get("swing_trades_today", [])), 2)
+        BOT_STATE["swing_daily_spent"] = round(sum(t.get("cost_usd", 0) or t.get("cost", 0) for t in BOT_STATE.get("swing_trades_today", [])), 2)
         BOT_STATE["swing_date"] = today_str
 
         _gl_today = [t for t in today_trades if t.get("strategy") in ("goalie", "goalie_pulled")]
@@ -689,7 +696,7 @@ def _hydrate_from_kalshi():
         _new_gl = [t for t in _gl_today if (t.get("order_id") or t.get("ticker", "") + str(t.get("timestamp", ""))) not in _existing_gl_ids]
         if _new_gl:
             BOT_STATE.setdefault("goalie_trades_today", []).extend(_new_gl)
-        BOT_STATE["goalie_daily_spent"] = round(sum(t.get("cost_usd", 0) for t in BOT_STATE.get("goalie_trades_today", [])), 2)
+        BOT_STATE["goalie_daily_spent"] = round(sum(t.get("cost_usd", 0) or t.get("cost", 0) for t in BOT_STATE.get("goalie_trades_today", [])), 2)
         BOT_STATE["goalie_date"] = today_str
 
         BOT_STATE["daily_spent_usd"] = round(today_spent, 2)
@@ -3793,14 +3800,21 @@ def live_game_snipe():
                 if event_key in _EVENTS_BET_TODAY:
                     continue
 
-                # STRICT FILTERING — only bet on what we understand
-                # Block banned categories
-                blocked = BOT_CONFIG.get("blocked_categories", [])
+                # ── HARD SPORTS-ONLY GATE ──
+                # Non-sports bets have 5% WR and lose money. Block everything
+                # that isn't a recognized live sports game.
                 mcat = classify_market_category(title, ticker)
+                _SPORTS_ONLY = {"nba", "nfl", "nhl", "mlb", "soccer", "tennis",
+                                "mma", "ncaa", "kbo", "afl"}
+                if mcat not in _SPORTS_ONLY:
+                    continue
+
+                # Block banned categories (user-configurable)
+                blocked = BOT_CONFIG.get("blocked_categories", [])
                 if mcat in blocked:
                     continue
 
-                # Block known junk keywords — stuff the old bot wasted money on
+                # Block known junk keywords — belt-and-suspenders
                 title_lower = title.lower()
                 _SNIPE_BLOCKED_KEYWORDS = [
                     "netflix", "spotify", "billboard", "top song", "top artist",
@@ -3812,12 +3826,14 @@ def live_game_snipe():
                     "tornado", "fahrenheit", "celsius", "highest temp", "lowest temp",
                     "gas price", "oil price", "wti", "brent",
                     "truth social", "tweets", "followers",
+                    "s&p 500", "nasdaq", "dow jones", "stock", "index",
+                    "elon musk", "mars", "token", "crypto", "bitcoin",
                 ]
                 if any(kw in title_lower for kw in _SNIPE_BLOCKED_KEYWORDS):
                     continue
 
                 # Only allow vetted categories for auto-trading
-                _ALLOWED_CATEGORIES = ["tennis", "nba", "nfl", "nhl", "mlb", "soccer", "mma"]
+                _ALLOWED_CATEGORIES = ["tennis", "nba", "nfl", "nhl", "mlb", "soccer", "mma", "ncaa", "kbo", "afl"]
 
                 # WHITELIST: Only bet on major league ticker prefixes we understand
                 _ALLOWED_TICKER_PREFIXES = [
@@ -4385,14 +4401,23 @@ def moonshark_snipe():
                     _ms_reasons["event_held"] = _ms_reasons.get("event_held", 0) + 1
                     continue
 
-                # Block banned categories
-                blocked = BOT_CONFIG.get("blocked_categories", [])
+                # ── HARD SPORTS-ONLY GATE ──
+                # Data proves non-sports bets lose money: 39 bets, 5% WR, -$66.
+                # Block everything that isn't a live sports game.
                 mcat = classify_market_category(title, ticker)
+                _SPORTS_ONLY = {"nba", "nfl", "nhl", "mlb", "soccer", "tennis",
+                                "mma", "ncaa", "kbo", "afl"}
+                if mcat not in _SPORTS_ONLY:
+                    _ms_reasons["not_sports"] = _ms_reasons.get("not_sports", 0) + 1
+                    continue
+
+                # Block banned categories (user-configurable kill list)
+                blocked = BOT_CONFIG.get("blocked_categories", [])
                 if mcat in blocked:
                     _ms_reasons["blocked_cat"] = _ms_reasons.get("blocked_cat", 0) + 1
                     continue
 
-                # Block known junk keywords
+                # Block known junk keywords (belt-and-suspenders)
                 title_lower = title.lower()
                 _MOONSHARK_BLOCKED_KEYWORDS = [
                     "netflix", "spotify", "billboard", "top song", "top artist",
@@ -4405,13 +4430,18 @@ def moonshark_snipe():
                     "gas price", "oil price", "wti", "brent",
                     "truth social", "tweets", "followers",
                     "prime minister", "next president", "ipo first",
+                    "s&p 500", "nasdaq", "dow jones", "stock", "index",
+                    "elon musk", "mars", "token", "crypto", "bitcoin",
+                    "billionaire", "groomsman", "wedding", "leave office",
+                    "taylor swift", "streamed",
                 ]
                 if any(kw in title_lower for kw in _MOONSHARK_BLOCKED_KEYWORDS):
                     _ms_reasons["blocked_kw"] = _ms_reasons.get("blocked_kw", 0) + 1
                     continue
 
-                # Only allow vetted categories
-                _ALLOWED_CATEGORIES = ["tennis", "nba", "nfl", "nhl", "mlb", "soccer", "mma", "ncaab", "ncaawb"]
+                # Only allow vetted categories (redundant with SPORTS_ONLY gate above,
+                # kept for backward compat with blocked_categories config)
+                _ALLOWED_CATEGORIES = ["tennis", "nba", "nfl", "nhl", "mlb", "soccer", "mma", "ncaa", "kbo", "afl"]
 
                 # WHITELIST: Only bet on major league ticker prefixes
                 _ALLOWED_TICKER_PREFIXES = [
@@ -5282,9 +5312,13 @@ def closegame_snipe():
                 if underdog not in ticker.upper():
                     continue
 
-                # Block banned categories (same as MoonShark/Sniper)
-                blocked = BOT_CONFIG.get("blocked_categories", [])
+                # ── HARD SPORTS-ONLY GATE ──
                 mcat = classify_market_category(title, ticker)
+                _SPORTS_ONLY = {"nba", "nfl", "nhl", "mlb", "soccer", "tennis",
+                                "mma", "ncaa", "kbo", "afl"}
+                if mcat not in _SPORTS_ONLY:
+                    continue
+                blocked = BOT_CONFIG.get("blocked_categories", [])
                 if mcat in blocked:
                     continue
 
@@ -5761,9 +5795,13 @@ def floor_quota_snipe():
             if event_key in existing_events or event_key in _EVENTS_BET_TODAY:
                 continue
 
-            # Category / keyword filters (same junk blocker as real strategies)
-            blocked = BOT_CONFIG.get("blocked_categories", [])
+            # ── HARD SPORTS-ONLY GATE ──
             mcat = classify_market_category(title, ticker)
+            _SPORTS_ONLY = {"nba", "nfl", "nhl", "mlb", "soccer", "tennis",
+                            "mma", "ncaa", "kbo", "afl"}
+            if mcat not in _SPORTS_ONLY:
+                continue
+            blocked = BOT_CONFIG.get("blocked_categories", [])
             if mcat in blocked:
                 continue
             t_lower = title.lower()
@@ -6075,7 +6113,12 @@ def momentum_swing_snipe():
     existing_tickers = set()
     existing_events = set()
     try:
-        for p in check_position_prices():
+        _swing_positions = check_position_prices()
+        # Enforce global position cap
+        if len(_swing_positions) >= BOT_CONFIG.get("max_open_positions", 40):
+            _log_activity(f"🔄 Swing SKIP: {len(_swing_positions)} open positions >= cap", "warn")
+            return []
+        for p in _swing_positions:
             existing_tickers.add(p.get("ticker", ""))
             _parts = p.get("ticker", "").split("-")
             if len(_parts) >= 2:
@@ -6432,7 +6475,12 @@ def goalie_pulled_snipe():
     existing_tickers = set()
     existing_events = set()
     try:
-        for p in check_position_prices():
+        _goalie_positions = check_position_prices()
+        # Enforce global position cap
+        if len(_goalie_positions) >= BOT_CONFIG.get("max_open_positions", 40):
+            _log_activity(f"🏒 Goalie SKIP: {len(_goalie_positions)} open positions >= cap", "warn")
+            return []
+        for p in _goalie_positions:
             existing_tickers.add(p.get("ticker", ""))
             _parts = p.get("ticker", "").split("-")
             if len(_parts) >= 2:
@@ -10601,8 +10649,16 @@ def _background_loop():
 
             # === FAST TRADING LOOP (every cycle) ===
             # These are the money-makers — run them FIRST and FAST
-            _snipe_results = live_game_snipe()
-            _ms_results = moonshark_snipe()
+            try:
+                _snipe_results = live_game_snipe()
+            except Exception as _lge:
+                _snipe_results = []
+                print(f"[SNIPER] Error: {_lge}")
+            try:
+                _ms_results = moonshark_snipe()
+            except Exception as _mse:
+                _ms_results = []
+                print(f"[MOONSHARK] Error: {_mse}")
 
             # === PAPER TRADING — prove edge before risking money ===
             try:
@@ -12292,7 +12348,7 @@ def settled_positions():
             print(f"  GAME: {_gp.get('ticker', '')[:40]} rpnl={_rpnl} count={_gp.get('market_position', {}).get('position', 0) if isinstance(_gp.get('market_position'), dict) else ''}")
 
         # Only keep positions with non-zero realized P&L (completed trades)
-        _day1_cutoff = TRADE_JOURNAL_START  # "2026-03-16"
+        _day1_cutoff = TRADE_JOURNAL_START  # "2026-03-31"
         wins = 0
         losses = 0
         breakeven = 0
@@ -13132,6 +13188,43 @@ def settled_positions():
         # Note: settle_time uses market close_time which can be far-future (2099 etc), so not reliable for sort
         settled.sort(key=lambda s: (s.get("trade_date") or "0000-00-00"), reverse=True)
 
+        # ── Recompute wins/losses/breakeven/streak from final merged array ──
+        # Stages 1-3 each maintain their own partial counters, which can drift.
+        # Recompute everything from the single sorted settled[] array so all
+        # values are consistent.
+        wins = 0
+        losses = 0
+        breakeven = 0
+        streak = 0
+        current_streak_type = ""
+        biggest_win = 0
+        biggest_loss = 0
+        total_pnl = 0
+        total_wagered = 0
+        # Iterate oldest-first so streak reflects most-recent run
+        for _s in reversed(settled):
+            _s_pnl = _s.get("pnl_usd", 0)
+            total_pnl += _s_pnl
+            total_wagered += _s.get("total_traded", 0)
+            if _s.get("won") is True:
+                wins += 1
+                biggest_win = max(biggest_win, _s_pnl)
+                if current_streak_type == "win":
+                    streak += 1
+                else:
+                    streak = 1
+                    current_streak_type = "win"
+            elif _s.get("won") is False:
+                losses += 1
+                biggest_loss = min(biggest_loss, _s_pnl)
+                if current_streak_type == "loss":
+                    streak += 1
+                else:
+                    streak = 1
+                    current_streak_type = "loss"
+            else:
+                breakeven += 1
+
         total_bets = wins + losses + breakeven
         roi = round(total_pnl / max(0.01, total_wagered) * 100, 1) if total_wagered > 0 else 0
 
@@ -13665,6 +13758,145 @@ def analytics_endpoint():
                 "best_sport": best_sport,
                 "best_price_range": best_price,
             },
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+@app.route("/daily-highlights")
+def daily_highlights_endpoint():
+    """Daily summary of all bot activity — bets placed, settled results, strategy breakdown."""
+    try:
+        today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+
+        # --- Bets placed today by strategy ---
+        strategy_names = {
+            "snipe_trades_today": "Live Sniper",
+            "moonshark_trades_today": "MoonShark",
+            "closegame_trades_today": "CloseGame",
+            "floor_trades_today": "Floor Quota",
+            "swing_trades_today": "Momentum Swing",
+            "goalie_trades_today": "Goalie Pulled",
+            "manual_trades_today": "Manual",
+        }
+        strategy_keys = {
+            "snipe_trades_today": "live_sniper",
+            "moonshark_trades_today": "moonshark",
+            "closegame_trades_today": "closegame",
+            "floor_trades_today": "floor",
+            "swing_trades_today": "momentum_swing",
+            "goalie_trades_today": "goalie_pulled",
+            "manual_trades_today": "manual",
+        }
+        bets_by_strategy = {}
+        all_bets_today = []
+        for key, label in strategy_names.items():
+            trades = BOT_STATE.get(key, [])
+            strat_key = strategy_keys[key]
+            total_cost = 0
+            for t in trades:
+                cost = t.get("cost", 0) or t.get("cost_usd", 0) or 0
+                total_cost += cost
+                all_bets_today.append({
+                    "ticker": t.get("ticker", ""),
+                    "title": t.get("title", t.get("question", t.get("ticker", ""))),
+                    "side": t.get("side", ""),
+                    "price_cents": t.get("price", 0) or t.get("price_cents", 0) or 0,
+                    "count": t.get("count", 0),
+                    "cost_usd": round(cost, 2),
+                    "time": t.get("time", "") or t.get("timestamp", "") or "",
+                    "strategy": strat_key,
+                    "strategy_label": label,
+                })
+            if trades:
+                bets_by_strategy[strat_key] = {
+                    "label": label,
+                    "count": len(trades),
+                    "total_spent": round(total_cost, 2),
+                }
+        # Sort bets by time descending
+        all_bets_today.sort(key=lambda x: x.get("time", ""), reverse=True)
+
+        # --- Settled results today ---
+        # Check settled cache or fetch fresh
+        settled_today_wins = 0
+        settled_today_losses = 0
+        settled_today_pnl = 0
+        settled_today_list = []
+        try:
+            if _SETTLED_CACHE.get("data") and _SETTLED_CACHE["data"].get("settled"):
+                for s in _SETTLED_CACHE["data"]["settled"]:
+                    # Check if this trade was placed today
+                    td = s.get("trade_date", "")
+                    if td == today_str:
+                        settled_today_list.append(s)
+                        if s.get("won") is True:
+                            settled_today_wins += 1
+                            settled_today_pnl += s.get("pnl_usd", 0)
+                        elif s.get("won") is False:
+                            settled_today_losses += 1
+                            settled_today_pnl += s.get("pnl_usd", 0)
+        except Exception:
+            pass
+
+        # --- Daily spending ---
+        daily_spent = _total_daily_spent()
+        daily_budget = BOT_CONFIG.get("max_daily_usd", 125)
+        total_bets = _total_bets_today()
+
+        # --- Best and worst trade today ---
+        best_trade = None
+        worst_trade = None
+        for s in settled_today_list:
+            pnl = s.get("pnl_usd", 0)
+            if best_trade is None or pnl > best_trade.get("pnl_usd", 0):
+                best_trade = s
+            if worst_trade is None or pnl < worst_trade.get("pnl_usd", 0):
+                worst_trade = s
+
+        # --- Bot status ---
+        bot_enabled = BOT_CONFIG.get("enabled", False)
+
+        # --- Strategy spending ---
+        strategy_spending = {}
+        for key, label in [("snipe_daily_spent", "Live Sniper"), ("moonshark_daily_spent", "MoonShark"),
+                           ("closegame_daily_spent", "CloseGame"), ("floor_daily_spent", "Floor Quota"),
+                           ("swing_daily_spent", "Momentum Swing"), ("goalie_daily_spent", "Goalie Pulled")]:
+            spent = BOT_STATE.get(key, 0)
+            if spent > 0:
+                strategy_spending[key.replace("_daily_spent", "")] = {
+                    "label": label,
+                    "spent": round(spent, 2),
+                }
+
+        return jsonify({
+            "date": today_str,
+            "bot_enabled": bot_enabled,
+            "total_bets_placed": total_bets,
+            "daily_spent": round(daily_spent, 2),
+            "daily_budget": daily_budget,
+            "budget_pct": round(daily_spent / max(1, daily_budget) * 100, 1),
+            "bets_by_strategy": bets_by_strategy,
+            "strategy_spending": strategy_spending,
+            "settled_today": {
+                "wins": settled_today_wins,
+                "losses": settled_today_losses,
+                "total": settled_today_wins + settled_today_losses,
+                "pnl": round(settled_today_pnl, 2),
+                "win_rate": round(settled_today_wins / max(1, settled_today_wins + settled_today_losses) * 100, 1),
+            },
+            "best_trade": {
+                "title": best_trade.get("title", ""),
+                "pnl_usd": round(best_trade.get("pnl_usd", 0), 2),
+                "strategy": best_trade.get("strategy", ""),
+            } if best_trade and best_trade.get("pnl_usd", 0) > 0 else None,
+            "worst_trade": {
+                "title": worst_trade.get("title", ""),
+                "pnl_usd": round(worst_trade.get("pnl_usd", 0), 2),
+                "strategy": worst_trade.get("strategy", ""),
+            } if worst_trade and worst_trade.get("pnl_usd", 0) < 0 else None,
+            "all_bets": all_bets_today,
+            "settled_list": settled_today_list,
         })
     except Exception as e:
         return jsonify({"error": str(e)})
@@ -14815,17 +15047,28 @@ def performance_history():
             pts = [p for p in pts if p.get("ts", "")[:10] >= since]
         if limit and limit > 0:
             pts = pts[-limit:]
-        # Downsample to max 500 points — preserves first, last, and evenly-spaced interior
-        max_pts = 500
+        # Two-tier downsample: keep last 24h at full resolution (for 1H/6H/TODAY)
+        # and downsample older data (for 7D/ALL).  This ensures short time ranges
+        # always have enough points to render.
+        max_pts = 1500
         if len(pts) > max_pts:
-            step = max(1, len(pts) / (max_pts - 2))  # -2 for first and last
-            sampled = [pts[0]]
-            for i in range(1, max_pts - 1):
-                idx = int(i * step)
-                if idx < len(pts):
-                    sampled.append(pts[idx])
-            sampled.append(pts[-1])
-            pts = sampled
+            _now_iso = datetime.datetime.now(tz=_PACIFIC).isoformat()
+            _24h_ago = (datetime.datetime.now(tz=_PACIFIC) - datetime.timedelta(hours=24)).isoformat()
+            recent = [p for p in pts if (p.get("ts", "") or "") >= _24h_ago]
+            older = [p for p in pts if (p.get("ts", "") or "") < _24h_ago]
+            # Downsample older data to fit within budget
+            older_budget = max(50, max_pts - len(recent) - 2)
+            if len(older) > older_budget:
+                step = max(1, len(older) / older_budget)
+                sampled_older = [older[0]] if older else []
+                for i in range(1, older_budget - 1):
+                    idx = int(i * step)
+                    if idx < len(older):
+                        sampled_older.append(older[idx])
+                if older:
+                    sampled_older.append(older[-1])
+                older = sampled_older
+            pts = older + recent
         # Ensure all points are JSON-serializable (no datetime objects)
         clean_pts = []
         for p in pts:
@@ -15030,6 +15273,9 @@ def trades_today_endpoint():
     moonshark_trades = BOT_STATE.get("moonshark_trades_today", [])
     closegame_trades = BOT_STATE.get("closegame_trades_today", [])
     manual_trades = BOT_STATE.get("manual_trades_today", [])
+    floor_trades = BOT_STATE.get("floor_trades_today", [])
+    swing_trades = BOT_STATE.get("swing_trades_today", [])
+    goalie_trades = BOT_STATE.get("goalie_trades_today", [])
     today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
 
     def _is_today_pacific(ts_str):
@@ -15123,6 +15369,57 @@ def trades_today_endpoint():
             "espn_edge": t.get("espn_edge"),
             "potential_profit": t.get("potential_profit", 0),
         })
+    for t in floor_trades:
+        all_today.append({
+            "ticker": t.get("ticker", ""),
+            "title": t.get("title", t.get("question", t.get("ticker", ""))),
+            "side": t.get("side", ""),
+            "price_cents": _get_price(t),
+            "count": t.get("count", 0),
+            "cost_usd": round(_get_cost(t), 2),
+            "time": _get_time(t),
+            "strategy": "floor",
+            "success": True,
+            "source": "bot",
+            "edge_reasons": t.get("edge_reasons", []),
+            "conviction": t.get("conviction", 0),
+            "espn_edge": t.get("espn_edge"),
+            "potential_profit": t.get("potential_profit", 0),
+        })
+    for t in swing_trades:
+        all_today.append({
+            "ticker": t.get("ticker", ""),
+            "title": t.get("title", t.get("question", t.get("ticker", ""))),
+            "side": t.get("side", ""),
+            "price_cents": _get_price(t),
+            "count": t.get("count", 0),
+            "cost_usd": round(_get_cost(t), 2),
+            "time": _get_time(t),
+            "strategy": "momentum_swing",
+            "success": True,
+            "source": "bot",
+            "edge_reasons": t.get("edge_reasons", []),
+            "conviction": t.get("conviction", 0),
+            "espn_edge": t.get("espn_edge"),
+            "potential_profit": t.get("potential_profit", 0),
+        })
+    for t in goalie_trades:
+        all_today.append({
+            "ticker": t.get("ticker", ""),
+            "title": t.get("title", t.get("question", t.get("ticker", ""))),
+            "side": t.get("side", ""),
+            "price_cents": _get_price(t),
+            "count": t.get("count", 0),
+            "cost_usd": round(_get_cost(t), 2),
+            "time": _get_time(t),
+            "strategy": "goalie_pulled",
+            "success": True,
+            "source": "bot",
+            "edge_reasons": t.get("edge_reasons", []),
+            "conviction": t.get("conviction", 0),
+            "espn_edge": t.get("espn_edge"),
+            "potential_profit": t.get("potential_profit", 0),
+        })
     for t in manual_trades:
         all_today.append({
             "ticker": t.get("ticker", ""),
@@ -15141,7 +15438,7 @@ def trades_today_endpoint():
     seen_tickers = set(t.get("ticker", "") for t in all_today)
     # Build set of tickers the bot ACTUALLY placed (from in-memory daily arrays)
     _bot_placed_tickers = set()
-    for _blist in [sniper_trades, moonshark_trades, closegame_trades, quant_trades]:
+    for _blist in [sniper_trades, moonshark_trades, closegame_trades, quant_trades, floor_trades, swing_trades, goalie_trades]:
         for _bt in _blist:
             _bot_placed_tickers.add(_bt.get("ticker", ""))
     for t in BOT_STATE.get("all_trades", []):
@@ -20133,6 +20430,28 @@ a:hover { color: #7da5f5; }
       </div>
     </div>
   </div>
+  <!-- Daily Highlights -->
+  <div id="daily-highlights-section" style="background:linear-gradient(135deg,#0d1a0d,#111);border:1px solid #1a3a1a;border-radius:12px;padding:16px;margin-bottom:16px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:16px">&#128202;</span>
+        <span style="color:#00dc5a;font-size:13px;font-weight:800;letter-spacing:0.5px">Daily Highlights</span>
+        <span id="dh-date" style="color:#555;font-size:10px"></span>
+      </div>
+      <button class="refresh-btn" onclick="loadDailyHighlights()" style="font-size:9px">Refresh</button>
+    </div>
+    <!-- Summary row -->
+    <div id="dh-summary" style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:14px">
+      <div style="color:#555;font-size:10px;padding:8px">Loading highlights...</div>
+    </div>
+    <!-- Strategy breakdown -->
+    <div id="dh-strategies" style="margin-bottom:14px"></div>
+    <!-- Today's settled results -->
+    <div id="dh-settled" style="margin-bottom:10px"></div>
+    <!-- All bets placed today -->
+    <div id="dh-bets-list"></div>
+  </div>
+
   <div style="display:flex;justify-content:flex-end;align-items:center;gap:12px;margin-bottom:6px">
     <button onclick="sellAllLosers()" style="background:#1a1a1a;border:1px solid #333;color:#888;padding:3px 10px;border-radius:6px;font-size:9px;cursor:pointer">Sell Losers</button>
     <label style="font-size:10px;color:#888;cursor:pointer"><input type="checkbox" id="hide-bot-trades" checked onchange="loadPortfolio();loadPositions()" style="margin-right:4px">Hide old bot trades &amp; penny positions</label>
@@ -21008,7 +21327,7 @@ async function loadPortfolio() {
       hdrDailyPnl.style.color = dailyPl >= 0 ? '#00dc5a' : dailyPl < 0 ? '#ff5000' : '#888';
     }
     if (hdrDailyPct) {
-      var dailyBase = pfVal > 0 ? pfVal : 500;
+      var dailyBase = DAY1_STARTING_BALANCE;
       var dailyPct = dailyBase > 0 ? (dailyPl / dailyBase * 100) : 0;
       hdrDailyPct.textContent = (dailyPct >= 0 ? '+' : '') + dailyPct.toFixed(2) + '%';
       hdrDailyPct.style.color = dailyPl >= 0 ? '#00dc5a' : dailyPl < 0 ? '#ff5000' : '#888';
@@ -21232,6 +21551,156 @@ async function loadActivity() {
 async function loadActivityDash() { loadActivity(); }
 async function loadBetsFeedDash() { loadBetsFeed(); }
 
+async function loadDailyHighlights() {
+  try {
+    var data = await fetch(API + '/daily-highlights').then(r => r.json());
+    if (data.error) { console.warn('Daily highlights error:', data.error); return; }
+
+    // Date label
+    var dateEl = document.getElementById('dh-date');
+    if (dateEl) dateEl.textContent = data.date || '';
+
+    // Summary cards
+    var sumEl = document.getElementById('dh-summary');
+    if (sumEl) {
+      function dhCard(label, value, color, sub) {
+        return '<div style="background:#0d0d0d;border:1px solid #1a2a1a;border-radius:8px;padding:8px 10px;text-align:center">' +
+          '<div style="color:#666;font-size:9px;font-weight:500;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px">' + label + '</div>' +
+          '<div style="color:' + color + ';font-size:18px;font-weight:800">' + value + '</div>' +
+          (sub ? '<div style="color:#444;font-size:9px;margin-top:1px">' + sub + '</div>' : '') +
+          '</div>';
+      }
+      var st = data.settled_today || {};
+      var stWins = st.wins || 0, stLosses = st.losses || 0;
+      var stTotal = stWins + stLosses;
+      var stPnl = st.pnl || 0;
+      var stWR = stTotal > 0 ? (stWins / stTotal * 100) : 0;
+      var wrColor = stWR >= 50 ? '#00dc5a' : stWR >= 30 ? '#ffb400' : '#ff5000';
+      var pnlColor = stPnl >= 0 ? '#00dc5a' : '#ff5000';
+
+      var html = '';
+      html += dhCard('Bets Placed', data.total_bets_placed || 0, '#ffb400', '');
+      html += dhCard('Budget Used', '$' + (data.daily_spent || 0).toFixed(2), data.budget_pct > 80 ? '#ff5000' : '#00dc5a', (data.budget_pct || 0).toFixed(0) + '% of $' + (data.daily_budget || 125));
+      html += dhCard('Settled Today', stTotal > 0 ? stWins + 'W / ' + stLosses + 'L' : 'None yet', stTotal > 0 ? wrColor : '#555', stTotal > 0 ? stWR.toFixed(0) + '% win rate' : 'waiting for results');
+      html += dhCard('Today P&L', stTotal > 0 ? ((stPnl >= 0 ? '+$' : '-$') + Math.abs(stPnl).toFixed(2)) : '--', stTotal > 0 ? pnlColor : '#555', '');
+      html += dhCard('Bot Status', data.bot_enabled ? 'ACTIVE' : 'PAUSED', data.bot_enabled ? '#00dc5a' : '#ff5000', '');
+      sumEl.innerHTML = html;
+      // Sync the "Bets Placed Today" badge in the Dashboard header —
+      // loadBetsFeed() can lag or return 0 after a deploy; daily-highlights
+      // pulls from the same per-strategy arrays and is the more reliable count.
+      var _dhCount = data.total_bets_placed || 0;
+      var _dhBadge = document.getElementById('bets-today-count-dash');
+      if (_dhBadge && _dhCount > 0) _dhBadge.textContent = _dhCount;
+      var _dhBadge2 = document.getElementById('bets-today-count');
+      if (_dhBadge2 && _dhCount > 0) _dhBadge2.textContent = _dhCount;
+    }
+
+    // Strategy breakdown
+    var stratEl = document.getElementById('dh-strategies');
+    if (stratEl) {
+      var strats = data.bets_by_strategy || {};
+      var stratKeys = Object.keys(strats);
+      if (stratKeys.length > 0) {
+        var shtml = '<div style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Strategy Breakdown</div>';
+        shtml += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:6px">';
+        var stratColors = {live_sniper:'#00dc5a',moonshark:'#00d4ff',closegame:'#e040fb',floor:'#ffb400',momentum_swing:'#ff8c00',goalie_pulled:'#00bcd4',manual:'#888'};
+        stratKeys.forEach(function(k) {
+          var s = strats[k];
+          var col = stratColors[k] || '#888';
+          shtml += '<div style="background:#0d0d0d;border:1px solid #222;border-left:3px solid ' + col + ';border-radius:6px;padding:8px 10px">';
+          shtml += '<div style="color:' + col + ';font-size:11px;font-weight:700">' + s.label + '</div>';
+          shtml += '<div style="color:#ccc;font-size:14px;font-weight:800;margin-top:2px">' + s.count + ' bet' + (s.count !== 1 ? 's' : '') + '</div>';
+          shtml += '<div style="color:#666;font-size:9px">$' + s.total_spent.toFixed(2) + ' spent</div>';
+          shtml += '</div>';
+        });
+        shtml += '</div>';
+        stratEl.innerHTML = shtml;
+      } else {
+        stratEl.innerHTML = '<div style="color:#555;font-size:10px;padding:4px">No bets placed today yet</div>';
+      }
+    }
+
+    // Settled results today
+    var settledEl = document.getElementById('dh-settled');
+    if (settledEl) {
+      var sList = data.settled_list || [];
+      if (sList.length > 0) {
+        var rhtml = '<div style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Settled Results</div>';
+        rhtml += '<div style="display:flex;flex-direction:column;gap:4px;max-height:200px;overflow-y:auto">';
+        sList.forEach(function(s) {
+          var isWin = s.won === true;
+          var isLoss = s.won === false;
+          var pnlAbs = Math.abs(s.pnl_usd || 0).toFixed(2);
+          var borderCol = isWin ? '#00dc5a' : isLoss ? '#ff5000' : '#555';
+          var pnlCol = isWin ? '#00dc5a' : isLoss ? '#ff5000' : '#888';
+          var label = isWin ? 'WON' : isLoss ? 'LOST' : 'EVEN';
+          rhtml += '<div style="background:rgba(' + (isWin ? '0,220,90' : isLoss ? '255,80,0' : '50,50,50') + ',0.06);border-left:3px solid ' + borderCol + ';padding:6px 10px;border-radius:4px;display:flex;justify-content:space-between;align-items:center">';
+          rhtml += '<div style="flex:1;min-width:0"><div style="color:#ccc;font-size:11px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (s.title || s.ticker || '') + '</div>';
+          rhtml += '<div style="color:#555;font-size:9px">' + (s.strategy || '') + (s.side ? ' · ' + s.side.toUpperCase() : '') + '</div></div>';
+          rhtml += '<div style="text-align:right;margin-left:12px;flex-shrink:0"><div style="color:' + pnlCol + ';font-size:13px;font-weight:800">' + (isWin ? '+$' : '-$') + pnlAbs + '</div>';
+          rhtml += '<div style="color:' + pnlCol + ';font-size:9px;font-weight:600">' + label + '</div></div></div>';
+        });
+        rhtml += '</div>';
+        settledEl.innerHTML = rhtml;
+      } else {
+        settledEl.innerHTML = '';
+      }
+    }
+
+    // All bets placed today
+    var betsEl = document.getElementById('dh-bets-list');
+    if (betsEl) {
+      var allBets = data.all_bets || [];
+      if (allBets.length > 0) {
+        var bhtml = '<div style="color:#888;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">All Bets Placed Today</div>';
+        bhtml += '<div style="display:flex;flex-direction:column;gap:3px;max-height:300px;overflow-y:auto">';
+        var stratColors2 = {live_sniper:'#00dc5a',sniper:'#00dc5a',moonshark:'#00d4ff',closegame:'#e040fb',floor:'#ffb400',momentum_swing:'#ff8c00',goalie_pulled:'#00bcd4',manual:'#888'};
+        allBets.forEach(function(b) {
+          var col = stratColors2[b.strategy] || '#888';
+          var timeStr = '';
+          if (b.time) {
+            try {
+              var d = new Date(b.time);
+              timeStr = d.toLocaleTimeString('en-US', {hour:'numeric',minute:'2-digit',hour12:true,timeZone:'America/Los_Angeles'});
+            } catch(e) { timeStr = b.time.slice(11,16); }
+          }
+          bhtml += '<div style="background:#0d0d0d;border-left:3px solid ' + col + ';padding:6px 10px;border-radius:4px;display:flex;justify-content:space-between;align-items:center">';
+          bhtml += '<div style="flex:1;min-width:0"><div style="color:#ccc;font-size:11px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (b.title || b.ticker) + '</div>';
+          bhtml += '<div style="color:#555;font-size:9px">' + (b.strategy_label || b.strategy || '') + ' · ' + (b.side || '').toUpperCase() + ' at ' + (b.price_cents || 0) + '&cent; · ' + (b.count || 0) + ' contracts</div></div>';
+          bhtml += '<div style="text-align:right;margin-left:10px;flex-shrink:0"><div style="color:#ffb400;font-size:12px;font-weight:700">$' + (b.cost_usd || 0).toFixed(2) + '</div>';
+          bhtml += '<div style="color:#555;font-size:9px">' + timeStr + '</div></div></div>';
+        });
+        bhtml += '</div>';
+        betsEl.innerHTML = bhtml;
+      } else {
+        betsEl.innerHTML = '<div style="color:#555;font-size:10px;padding:4px">No bets placed today yet — bot is scanning for opportunities</div>';
+      }
+    }
+
+    // Best/worst trade highlight
+    if (data.best_trade || data.worst_trade) {
+      var hlHtml = '<div style="display:flex;gap:8px;margin-top:8px">';
+      if (data.best_trade) {
+        hlHtml += '<div style="flex:1;background:rgba(0,220,90,0.08);border:1px solid rgba(0,220,90,0.2);border-radius:6px;padding:8px 10px">';
+        hlHtml += '<div style="color:#00dc5a;font-size:9px;font-weight:600;text-transform:uppercase">Best Trade</div>';
+        hlHtml += '<div style="color:#ccc;font-size:11px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + data.best_trade.title + '</div>';
+        hlHtml += '<div style="color:#00dc5a;font-size:16px;font-weight:800;margin-top:2px">+$' + data.best_trade.pnl_usd.toFixed(2) + '</div></div>';
+      }
+      if (data.worst_trade) {
+        hlHtml += '<div style="flex:1;background:rgba(255,80,0,0.08);border:1px solid rgba(255,80,0,0.2);border-radius:6px;padding:8px 10px">';
+        hlHtml += '<div style="color:#ff5000;font-size:9px;font-weight:600;text-transform:uppercase">Worst Trade</div>';
+        hlHtml += '<div style="color:#ccc;font-size:11px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + data.worst_trade.title + '</div>';
+        hlHtml += '<div style="color:#ff5000;font-size:16px;font-weight:800;margin-top:2px">-$' + Math.abs(data.worst_trade.pnl_usd).toFixed(2) + '</div></div>';
+      }
+      hlHtml += '</div>';
+      var betsListEl = document.getElementById('dh-bets-list');
+      if (betsListEl) betsListEl.innerHTML += hlHtml;
+    }
+  } catch(e) {
+    console.warn('Daily highlights error:', e);
+  }
+}
+
 async function loadBetsFeed() {
   try {
     var data = await fetch(API + '/trades-today').then(r => r.json());
@@ -21259,8 +21728,8 @@ async function loadBetsFeed() {
     trades.forEach(function(t) {
       var timeStr = fmtTime(t.time);
       var sideC = t.side === 'yes' ? '#00dc5a' : '#ff5000';
-      var stratColors = {sniper:'#ffb400', quant:'#00d4ff', bot:'#888', moonshark:'#e040fb', closegame:'#00d4ff', manual:'#5abf5a', moonshark_manual:'#5abf5a', live_sniper:'#ffb400'};
-      var stratLabels = {sniper:'SNIPER', quant:'QUANT', bot:'BOT', moonshark:'MOONSHARK', closegame:'CLOSEGAME', manual:'MANUAL', moonshark_manual:'MOONSHOT', live_sniper:'SNIPER'};
+      var stratColors = {sniper:'#ffb400', quant:'#00d4ff', bot:'#888', moonshark:'#e040fb', closegame:'#00d4ff', manual:'#5abf5a', moonshark_manual:'#5abf5a', live_sniper:'#ffb400', floor:'#ffb400', momentum_swing:'#ff8c00', goalie_pulled:'#00bcd4'};
+      var stratLabels = {sniper:'SNIPER', quant:'QUANT', bot:'BOT', moonshark:'MOONSHARK', closegame:'CLOSEGAME', manual:'MANUAL', moonshark_manual:'MOONSHOT', live_sniper:'SNIPER', floor:'FLOOR', momentum_swing:'SWING', goalie_pulled:'GOALIE'};
       var sc = stratColors[t.strategy] || '#888';
       var sl = stratLabels[t.strategy] || (t.strategy || 'bot').toUpperCase();
       var title = (t.title || t.ticker || '').substring(0, 40);
@@ -23235,13 +23704,10 @@ async function loadPerformance() {
       dailyPnls[day] += pnl;
     });
 
-    // Always use endpoint's authoritative W/L counts — they include HWM protection
-    // against Kalshi pruning old data, and match the header display.
-    // Client-side recount from settled list can under-count when data is pruned.
-    if (settledData.wins > 0 || settledData.losses > 0) {
-      wins = settledData.wins || 0;
-      losses = settledData.losses || 0;
-    }
+    // Use client-side filtered counts so Performance tab matches the filtered
+    // closed bets table (bot-only). The header W/L in loadPortfolio() already
+    // shows unfiltered all-time numbers from the endpoint.
+    // HWM protection still works at the endpoint level for the header display.
     var total = wins + losses;
     var winRate = total > 0 ? (wins / total * 100) : (settledData.win_rate || 0);
     var roi = totalWagered > 0 ? (totalPnl / totalWagered * 100) : 0;
@@ -25148,7 +25614,8 @@ async function _loadAnalytics_DEAD() {
 // Phase 1: critical dashboard data (fast)
 Promise.all([
   loadStatus(), loadActivity(), loadPortfolio(), loadPositions(),
-  loadBetsFeed(), loadTopPicks(), loadTodayPicks(), loadClosingSoon()
+  loadBetsFeed(), loadTopPicks(), loadTodayPicks(), loadClosingSoon(),
+  loadDailyHighlights()
 ]).catch(function(e){ console.warn('Init phase 1 partial fail:', e); });
 // Phase 2: slower/expensive endpoints (staggered to avoid 429s)
 setTimeout(function() {
@@ -25162,7 +25629,7 @@ setTimeout(function() {
 // FAST (10s): live status, activity feed, today's bets — changes frequently
 setInterval(() => { loadStatus(); loadActivity(); loadBetsFeed(); loadPortfolio(); }, 10000);
 // MEDIUM (30s): positions, trades, closing soon — changes with market activity
-setInterval(() => { loadPositions(); loadTrades(); loadClosingSoon(); loadTopPicks(); loadTodayPicks(); checkNotifications(); }, 30000);
+setInterval(() => { loadPositions(); loadTrades(); loadClosingSoon(); loadTopPicks(); loadTodayPicks(); checkNotifications(); loadDailyHighlights(); }, 30000);
 // SLOW (60s): settled stats, perf history, analytics — expensive + rarely changes
 setInterval(() => { loadSettled(); loadPerfHistory(); loadPerformance(); loadTicker(); loadSeventyFivers(); loadQuantPicks(); }, 60000);
 
