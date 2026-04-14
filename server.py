@@ -8963,8 +8963,11 @@ def _watchdog_check():
     except Exception:
         pass
 
-    # CHECK 13: AUTO-PAUSE KILL SWITCH — if recent settled trades are overwhelmingly losses,
-    # automatically pause trading. This prevents the bot from burning cash while we sleep.
+    # CHECK 13: WIN RATE ALERT — warn on Discord if recent win rate is low.
+    # NO LONGER AUTO-PAUSES. The drawdown circuit breaker handles risk intraday
+    # (tighten at -$40, halt at -$60). The old auto-pause was being triggered
+    # by Kalshi's data pruning (fake low win rate from missing trades) and
+    # left the bot offline with no way to recover without the API secret.
     try:
         _recent_cutoff = (datetime.datetime.now(tz=_PACIFIC) - datetime.timedelta(hours=48)).isoformat()
         _recent_wins = sum(1 for t in _wd_journal if t.get("result") == "win" and (t.get("settlement_time") or "") >= _recent_cutoff)
@@ -8972,16 +8975,8 @@ def _watchdog_check():
         _recent_total = _recent_wins + _recent_losses
         if _recent_total >= 8:
             _recent_wr = _recent_wins / _recent_total
-            if _recent_wr < 0.15:  # less than 15% win rate on last 48h of settled trades
-                if BOT_CONFIG.get("enabled", False):
-                    BOT_CONFIG["enabled"] = False
-                    BOT_STATE["auto_trade"] = False
-                    BOT_STATE["_auto_disable_date"] = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
-                    alerts.append(f"🛑 AUTO-PAUSED: 48h settled win rate {_recent_wr:.0%} ({_recent_wins}W/{_recent_losses}L) — trading stopped until manually re-enabled")
-                    try:
-                        _send_discord(f"🛑 **TRADING AUTO-PAUSED**\n48h win rate: {_recent_wr:.0%} ({_recent_wins}W/{_recent_losses}L)\nBot has stopped trading. Re-enable manually when ready.", color=0xff0000)
-                    except Exception:
-                        pass
+            if _recent_wr < 0.15:
+                alerts.append(f"⚠️ LOW WIN RATE: 48h settled {_recent_wr:.0%} ({_recent_wins}W/{_recent_losses}L) — drawdown breaker active, NOT auto-pausing")
     except Exception:
         pass
 
