@@ -644,24 +644,13 @@ def _load_state():
             _PAPER_TRADES.extend(saved_paper[-_PAPER_TRADES_MAX:])
             print(f"[STATE] Restored {len(_PAPER_TRADES)} paper trades from disk")
 
-        # Restore bot enabled state — kill switch must survive deploys
-        # BUT: if bot was auto-disabled on a previous day, re-enable on fresh deploy.
-        # The drawdown circuit breaker handles intraday risk now.
-        if "bot_enabled" in data:
-            _saved_disable_date = data.get("_auto_disable_date")
-            _today_restore = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
-            if not data["bot_enabled"] and _saved_disable_date and _saved_disable_date != _today_restore:
-                # Auto-disabled on a previous day — re-enable for fresh start
-                BOT_CONFIG["enabled"] = True
-                BOT_STATE["auto_trade"] = True
-                print(f"[STATE] ✅ Bot AUTO-RE-ENABLED — was disabled on {_saved_disable_date}, new day {_today_restore}")
-            else:
-                BOT_CONFIG["enabled"] = data["bot_enabled"]
-                if not data["bot_enabled"]:
-                    BOT_STATE["auto_trade"] = False
-                    print(f"[STATE] ⚠️ Bot is DISABLED (kill switch was active before deploy)")
-                else:
-                    print(f"[STATE] Bot enabled state restored: {data['bot_enabled']}")
+        # ALWAYS START ENABLED — the drawdown circuit breaker handles risk now.
+        # The old kill switch would leave the bot offline for hours/days with no
+        # way to re-enable without the API secret. Better to start fresh each
+        # deploy and let the circuit breaker do its job intraday.
+        BOT_CONFIG["enabled"] = True
+        BOT_STATE["auto_trade"] = True
+        print(f"[STATE] ✅ Bot ENABLED on startup (drawdown breaker provides intraday protection)")
 
         # Restore HWM — protects against Kalshi pruning old settled data
         # Take the MAX of saved state vs hard-coded floor (floor survives deploy wipes)
@@ -673,14 +662,6 @@ def _load_state():
             print(f"[STATE] Restored HWM: {_SETTLED_HWM['wins']}W/{_SETTLED_HWM['losses']}L (${_SETTLED_HWM['total_pnl']:.2f})")
         else:
             print(f"[STATE] Using hard-coded HWM floor: {_SETTLED_HWM_FLOOR['wins']}W/{_SETTLED_HWM_FLOOR['losses']}L")
-
-        # FORCE RE-ENABLE: the old -$20 daily loss kill switch disabled the bot.
-        # That logic has been replaced with the drawdown circuit breaker.
-        # Re-enable now so the bot doesn't stay offline from legacy disables.
-        if not BOT_CONFIG.get("enabled"):
-            BOT_CONFIG["enabled"] = True
-            BOT_STATE["auto_trade"] = True
-            print(f"[STATE] ✅ FORCE RE-ENABLED — legacy kill switch override removed")
 
         print(f"[STATE] Restored {len(BOT_STATE['all_trades'])} trades from disk, "
               f"daily_spent reset to $0 for new session, same_day={is_same_day}")
