@@ -10859,15 +10859,25 @@ def _background_loop():
             "wins": 0, "losses": 0, "breakeven": 0, "win_rate": 0,
             "total_realized_usd": 0, "settled_history": [],
         }
-        # Include today's settled results in startup daily P&L (fix: was unrealized-only)
+        # Include today's settled results in startup daily P&L
+        # ONLY count today's trades, not unrealized from legacy positions
         try:
-            _startup_daily = sum((p.get("unrealized_pnl_cents") or 0) for p in _pos_early) / 100
             _today_str_startup = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+            _startup_daily = 0
             with _TRADE_JOURNAL_LOCK:
                 _startup_journal = list(_TRADE_JOURNAL)
+            # Today's settled results
             for _jt in _startup_journal:
                 if _jt.get("result") is not None and str(_jt.get("settlement_time") or "")[:10] == _today_str_startup:
                     _startup_daily += float(_jt.get("pnl_usd") or _jt.get("pnl") or 0)
+            # Unrealized ONLY from today's positions
+            _today_tickers_startup = set()
+            for _jt in _startup_journal:
+                if _jt.get("result") is None and str(_jt.get("entry_time") or "")[:10] == _today_str_startup:
+                    _today_tickers_startup.add(_jt.get("ticker"))
+            for _p in _pos_early:
+                if _p.get("ticker") in _today_tickers_startup:
+                    _startup_daily += (_p.get("unrealized_pnl_cents") or 0) / 100.0
             _PORTFOLIO_CACHE["data"]["daily_pnl_usd"] = round(_startup_daily, 2)
         except Exception:
             pass
@@ -11229,11 +11239,20 @@ def _background_loop():
                     if _day_start_value and _day_start_value > 0:
                         _daily_pnl = round(_pf_value2 - _day_start_value, 2)
                     else:
-                        # Fallback: unrealized + today's settled (old method)
-                        _daily_pnl = _total_unrealized
+                        # Fallback: ONLY today's settled P&L + today's unrealized on TODAY's trades.
+                        # Do NOT include unrealized from legacy/old positions — those aren't "today's" loss.
+                        _daily_pnl = 0
                         for _jt in _pf_journal:
                             if _jt.get("result") is not None and str(_jt.get("settlement_time") or "")[:10] == _today_str:
                                 _daily_pnl += float(_jt.get("pnl_usd") or _jt.get("pnl") or 0)
+                        # Add unrealized ONLY from positions opened today
+                        _today_tickers = set()
+                        for _jt in _pf_journal:
+                            if _jt.get("result") is None and str(_jt.get("entry_time") or "")[:10] == _today_str:
+                                _today_tickers.add(_jt.get("ticker"))
+                        for _p in _pos2:
+                            if _p.get("ticker") in _today_tickers:
+                                _daily_pnl += (_p.get("unrealized_pnl_cents") or 0) / 100.0
                         _daily_pnl = round(_daily_pnl, 2)
                 except Exception:
                     pass
