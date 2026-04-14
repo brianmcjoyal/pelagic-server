@@ -24041,10 +24041,11 @@ async function loadPerformance() {
       dailyPnls[day] += pnl;
     });
 
-    // Use client-side filtered counts so Performance tab matches the filtered
-    // closed bets table (bot-only). The header W/L in loadPortfolio() already
-    // shows unfiltered all-time numbers from the endpoint.
-    // HWM protection still works at the endpoint level for the header display.
+    // USE HWM-PROTECTED NUMBERS from the endpoint, not raw client-side counts.
+    // Kalshi prunes old trades so the settled array shrinks over time.
+    // The endpoint's top-level wins/losses are protected by the hard-coded floor.
+    if (settledData.wins > wins) wins = settledData.wins;
+    if (settledData.losses > losses) losses = settledData.losses;
     var total = wins + losses;
     var winRate = total > 0 ? (wins / total * 100) : (settledData.win_rate || 0);
     var roi = totalWagered > 0 ? (totalPnl / totalWagered * 100) : 0;
