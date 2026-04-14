@@ -10857,6 +10857,11 @@ def _background_loop():
             for _jt in _startup_journal:
                 if _jt.get("result") is None and str(_jt.get("entry_time") or "")[:10] == _today_str_startup:
                     _today_tickers_startup.add(_jt.get("ticker"))
+            # Also check BOT_STATE trades for today's entries
+            for _bt in BOT_STATE.get("all_trades", []):
+                _bt_ts = str(_bt.get("placed_at") or _bt.get("ts") or "")[:10]
+                if _bt_ts == _today_str_startup and _bt.get("ticker"):
+                    _today_tickers_startup.add(_bt["ticker"])
             for _p in _pos_early:
                 if _p.get("ticker") in _today_tickers_startup:
                     _startup_daily += (_p.get("unrealized_pnl_cents") or 0) / 100.0
@@ -11206,36 +11211,33 @@ def _background_loop():
                 _pf_value2 = round(_bal2 + _positions_val2, 2)
                 _positions_value2 = _positions_val2
 
-                # Calculate true daily P&L: current portfolio value minus value at midnight PT
+                # Calculate true daily P&L using settled trades + today's unrealized.
+                # NEVER use perf_history baseline — Railway deploys wipe it,
+                # so the first entry is at deploy-time (not midnight), giving
+                # a wildly wrong baseline.  The settled-trades method is always
+                # accurate: sum today's settled P&L + unrealized on positions
+                # opened today.
                 _daily_pnl = 0
                 try:
                     _today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
-                    # Find the earliest perf_history entry from today as baseline
-                    _day_start_value = None
-                    with _PERF_HISTORY_LOCK:
-                        for _ph in _PERF_HISTORY:
-                            _ph_date = (_ph.get("ts") or "")[:10]
-                            if _ph_date == _today_str:
-                                _day_start_value = _ph.get("value", 0)
-                                break  # first entry today = closest to midnight
-                    if _day_start_value and _day_start_value > 0:
-                        _daily_pnl = round(_pf_value2 - _day_start_value, 2)
-                    else:
-                        # Fallback: ONLY today's settled P&L + today's unrealized on TODAY's trades.
-                        # Do NOT include unrealized from legacy/old positions — those aren't "today's" loss.
-                        _daily_pnl = 0
-                        for _jt in _pf_journal:
-                            if _jt.get("result") is not None and str(_jt.get("settlement_time") or "")[:10] == _today_str:
-                                _daily_pnl += float(_jt.get("pnl_usd") or _jt.get("pnl") or 0)
-                        # Add unrealized ONLY from positions opened today
-                        _today_tickers = set()
-                        for _jt in _pf_journal:
-                            if _jt.get("result") is None and str(_jt.get("entry_time") or "")[:10] == _today_str:
-                                _today_tickers.add(_jt.get("ticker"))
-                        for _p in _pos2:
-                            if _p.get("ticker") in _today_tickers:
-                                _daily_pnl += (_p.get("unrealized_pnl_cents") or 0) / 100.0
-                        _daily_pnl = round(_daily_pnl, 2)
+                    # 1) Today's settled P&L (wins + losses that settled today)
+                    for _jt in _pf_journal:
+                        if _jt.get("result") is not None and str(_jt.get("settlement_time") or "")[:10] == _today_str:
+                            _daily_pnl += float(_jt.get("pnl_usd") or _jt.get("pnl") or 0)
+                    # 2) Unrealized P&L ONLY from positions opened today
+                    _today_tickers = set()
+                    for _jt in _pf_journal:
+                        if _jt.get("result") is None and str(_jt.get("entry_time") or "")[:10] == _today_str:
+                            _today_tickers.add(_jt.get("ticker"))
+                    # Also check BOT_STATE trades for today's entries (belt-and-suspenders)
+                    for _bt in BOT_STATE.get("all_trades", []):
+                        _bt_ts = str(_bt.get("placed_at") or _bt.get("ts") or "")[:10]
+                        if _bt_ts == _today_str and _bt.get("ticker"):
+                            _today_tickers.add(_bt["ticker"])
+                    for _p in _pos2:
+                        if _p.get("ticker") in _today_tickers:
+                            _daily_pnl += (_p.get("unrealized_pnl_cents") or 0) / 100.0
+                    _daily_pnl = round(_daily_pnl, 2)
                 except Exception:
                     pass
 
