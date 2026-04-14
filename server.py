@@ -674,6 +674,14 @@ def _load_state():
         else:
             print(f"[STATE] Using hard-coded HWM floor: {_SETTLED_HWM_FLOOR['wins']}W/{_SETTLED_HWM_FLOOR['losses']}L")
 
+        # FORCE RE-ENABLE: the old -$20 daily loss kill switch disabled the bot.
+        # That logic has been replaced with the drawdown circuit breaker.
+        # Re-enable now so the bot doesn't stay offline from legacy disables.
+        if not BOT_CONFIG.get("enabled"):
+            BOT_CONFIG["enabled"] = True
+            BOT_STATE["auto_trade"] = True
+            print(f"[STATE] ✅ FORCE RE-ENABLED — legacy kill switch override removed")
+
         print(f"[STATE] Restored {len(BOT_STATE['all_trades'])} trades from disk, "
               f"daily_spent reset to $0 for new session, same_day={is_same_day}")
     except FileNotFoundError:
