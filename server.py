@@ -645,13 +645,23 @@ def _load_state():
             print(f"[STATE] Restored {len(_PAPER_TRADES)} paper trades from disk")
 
         # Restore bot enabled state — kill switch must survive deploys
+        # BUT: if bot was auto-disabled on a previous day, re-enable on fresh deploy.
+        # The drawdown circuit breaker handles intraday risk now.
         if "bot_enabled" in data:
-            BOT_CONFIG["enabled"] = data["bot_enabled"]
-            if not data["bot_enabled"]:
-                BOT_STATE["auto_trade"] = False
-                print(f"[STATE] ⚠️ Bot is DISABLED (kill switch was active before deploy)")
+            _saved_disable_date = data.get("_auto_disable_date")
+            _today_restore = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+            if not data["bot_enabled"] and _saved_disable_date and _saved_disable_date != _today_restore:
+                # Auto-disabled on a previous day — re-enable for fresh start
+                BOT_CONFIG["enabled"] = True
+                BOT_STATE["auto_trade"] = True
+                print(f"[STATE] ✅ Bot AUTO-RE-ENABLED — was disabled on {_saved_disable_date}, new day {_today_restore}")
             else:
-                print(f"[STATE] Bot enabled state restored: {data['bot_enabled']}")
+                BOT_CONFIG["enabled"] = data["bot_enabled"]
+                if not data["bot_enabled"]:
+                    BOT_STATE["auto_trade"] = False
+                    print(f"[STATE] ⚠️ Bot is DISABLED (kill switch was active before deploy)")
+                else:
+                    print(f"[STATE] Bot enabled state restored: {data['bot_enabled']}")
 
         # Restore HWM — protects against Kalshi pruning old settled data
         # Take the MAX of saved state vs hard-coded floor (floor survives deploy wipes)
@@ -6100,6 +6110,10 @@ def floor_quota_snipe():
             if _espn_prob is None or _espn_prob <= 0:
                 continue  # no ESPN signal → no bet
 
+            # MUST be LIVE — no pre-game or finished game bets
+            if not _game or _game.get("state") != "in":
+                continue
+
             # Pick the side with the best edge
             best = None
             for side_name, ask in (("yes", yes_ask), ("no", no_ask)):
@@ -8972,7 +8986,8 @@ def _watchdog_check():
             if _recent_wr < 0.15:  # less than 15% win rate on last 48h of settled trades
                 if BOT_CONFIG.get("enabled", False):
                     BOT_CONFIG["enabled"] = False
-                    BOT_STATE["auto_trade"] = False  # also set for dashboard display
+                    BOT_STATE["auto_trade"] = False
+                    BOT_STATE["_auto_disable_date"] = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
                     alerts.append(f"🛑 AUTO-PAUSED: 48h settled win rate {_recent_wr:.0%} ({_recent_wins}W/{_recent_losses}L) — trading stopped until manually re-enabled")
                     try:
                         _send_discord(f"🛑 **TRADING AUTO-PAUSED**\n48h win rate: {_recent_wr:.0%} ({_recent_wins}W/{_recent_losses}L)\nBot has stopped trading. Re-enable manually when ready.", color=0xff0000)
@@ -8981,25 +8996,34 @@ def _watchdog_check():
     except Exception:
         pass
 
-    # CHECK 14: DAILY LOSS LIMIT — if today's realized losses exceed $20, pause for the day
+    # CHECK 14: DAILY LOSS LIMIT — handled by drawdown circuit breaker now.
+    # The circuit breaker tightens at -$40 (conv≥6) and halts at -$60.
+    # No longer disables the bot entirely — that was too aggressive at -$20
+    # and required manual re-enable which left the bot offline for hours.
     try:
-        _today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
-        _today_losses = sum(
-            float(t.get("pnl_usd") or t.get("pnl") or 0)
-            for t in _wd_journal
-            if t.get("result") == "loss" and str(t.get("settlement_time") or "")[:10] == _today_str
-        )
-        if _today_losses < -20:  # lost more than $20 today on settled trades
-            if BOT_CONFIG.get("enabled", False):
-                BOT_CONFIG["enabled"] = False
-                BOT_STATE["auto_trade"] = False
-                alerts.append(f"🛑 DAILY LOSS LIMIT HIT: ${_today_losses:.2f} realized losses today — trading auto-paused")
-                try:
-                    _send_discord(f"🛑 **DAILY LOSS LIMIT**\nRealized losses today: ${_today_losses:.2f}\nTrading auto-paused. Re-enable manually.", color=0xff0000)
-                except Exception:
-                    pass
-            else:
-                alerts.append(f"DAILY LOSS LIMIT: ${_today_losses:.2f} realized losses today (already paused)")
+        _dd_lvl = _drawdown_level()
+        if _dd_lvl >= 2:
+            alerts.append(f"🛑 DRAWDOWN HALT: circuit breaker level 2 — all trading paused until tomorrow")
+        elif _dd_lvl >= 1:
+            alerts.append(f"⚠️ DRAWDOWN TIGHTEN: circuit breaker level 1 — requiring conviction ≥ 6")
+    except Exception:
+        pass
+
+    # CHECK 14B: AUTO-RE-ENABLE ON NEW DAY — if bot was auto-paused by the old
+    # daily loss limit or 48h win rate check, re-enable at the start of a new
+    # trading day so it doesn't sit offline forever.
+    try:
+        _today_str_re = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+        _last_disable_date = BOT_STATE.get("_auto_disable_date")
+        if not BOT_CONFIG.get("enabled") and _last_disable_date and _last_disable_date != _today_str_re:
+            BOT_CONFIG["enabled"] = True
+            BOT_STATE["auto_trade"] = True
+            BOT_STATE.pop("_auto_disable_date", None)
+            alerts.append(f"✅ AUTO-RE-ENABLED: new trading day — bot restarted after previous auto-pause")
+            try:
+                _send_discord(f"✅ **BOT AUTO-RE-ENABLED**\nNew trading day: {_today_str_re}\nDrawdown circuit breaker will protect against losses.", color=0x00ff00)
+            except Exception:
+                pass
     except Exception:
         pass
 
