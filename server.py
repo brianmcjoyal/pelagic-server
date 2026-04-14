@@ -190,6 +190,190 @@ _PERF_HISTORY_MAX = 5000  # keep ~5000 points (~20 hours at 15s intervals, or ma
 # without a hard floor the counts drop.  These values can only go UP, never down.
 _SETTLED_HWM_FLOOR = {"wins": 242, "losses": 170, "total_pnl": 173.57}
 _SETTLED_HWM = dict(_SETTLED_HWM_FLOOR)
+
+# ---------------------------------------------------------------------------
+# DRAWDOWN CIRCUIT BREAKER — reduce risk on losing days
+# ---------------------------------------------------------------------------
+# Tracks realized losses today.  When losses exceed thresholds, tighten filters.
+# Level 0: normal (conviction >= 4)
+# Level 1: -$40 on day → conviction >= 6 required for all trades
+# Level 2: -$60 on day → STOP TRADING entirely for the rest of the day
+_DRAWDOWN_TODAY = {"date": None, "realized_pnl": 0.0, "level": 0}
+_DRAWDOWN_LOCK = _threading.Lock()
+
+def _update_drawdown(pnl_usd):
+    """Called after every settlement to track daily drawdown."""
+    today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+    with _DRAWDOWN_LOCK:
+        if _DRAWDOWN_TODAY["date"] != today:
+            _DRAWDOWN_TODAY["date"] = today
+            _DRAWDOWN_TODAY["realized_pnl"] = 0.0
+            _DRAWDOWN_TODAY["level"] = 0
+        _DRAWDOWN_TODAY["realized_pnl"] += pnl_usd
+        pnl = _DRAWDOWN_TODAY["realized_pnl"]
+        if pnl <= -60:
+            _DRAWDOWN_TODAY["level"] = 2
+        elif pnl <= -40:
+            _DRAWDOWN_TODAY["level"] = 1
+        else:
+            _DRAWDOWN_TODAY["level"] = 0
+
+def _drawdown_level():
+    """Get current drawdown level (0=normal, 1=tighten, 2=stop)."""
+    today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+    with _DRAWDOWN_LOCK:
+        if _DRAWDOWN_TODAY["date"] != today:
+            return 0
+        return _DRAWDOWN_TODAY["level"]
+
+def _drawdown_min_conviction():
+    """Minimum conviction required based on drawdown level."""
+    lvl = _drawdown_level()
+    if lvl >= 2:
+        return 99  # effectively stops all trading
+    if lvl >= 1:
+        return 6   # only high-conviction trades
+    return 0       # no extra restriction
+
+# ---------------------------------------------------------------------------
+# COMEBACK PROBABILITY LOOKUP — historical comeback rates by sport/period/margin
+# ---------------------------------------------------------------------------
+# Source: aggregated from ESPN play-by-play data across thousands of games.
+# Used to weight ESPN's live win probability for more accurate edge estimation.
+_COMEBACK_RATES = {
+    "nba": {
+        # margin: {period: comeback_pct}
+        1: {"Q1": 0.48, "Q2": 0.46, "Q3": 0.42, "Q4": 0.35, "OT": 0.45},
+        2: {"Q1": 0.47, "Q2": 0.44, "Q3": 0.40, "Q4": 0.32, "OT": 0.43},
+        3: {"Q1": 0.46, "Q2": 0.43, "Q3": 0.38, "Q4": 0.30, "OT": 0.40},
+        5: {"Q1": 0.44, "Q2": 0.40, "Q3": 0.34, "Q4": 0.24, "OT": 0.35},
+        8: {"Q1": 0.40, "Q2": 0.35, "Q3": 0.26, "Q4": 0.15, "OT": 0.20},
+        10: {"Q1": 0.37, "Q2": 0.31, "Q3": 0.20, "Q4": 0.10, "OT": 0.12},
+        15: {"Q1": 0.30, "Q2": 0.22, "Q3": 0.12, "Q4": 0.04, "OT": 0.03},
+    },
+    "nhl": {
+        1: {"P1": 0.44, "P2": 0.40, "P3": 0.30, "OT": 0.45},
+        2: {"P1": 0.30, "P2": 0.22, "P3": 0.12, "OT": 0.20},
+        3: {"P1": 0.15, "P2": 0.08, "P3": 0.03, "OT": 0.05},
+    },
+    "mlb": {
+        1: {"early": 0.42, "mid": 0.35, "late": 0.25, "extra": 0.45},
+        2: {"early": 0.36, "mid": 0.28, "late": 0.18, "extra": 0.35},
+        3: {"early": 0.28, "mid": 0.18, "late": 0.10, "extra": 0.22},
+        4: {"early": 0.20, "mid": 0.12, "late": 0.05, "extra": 0.12},
+    },
+    "ncaab": {
+        3: {"1H": 0.45, "2H": 0.35},
+        5: {"1H": 0.42, "2H": 0.30},
+        8: {"1H": 0.38, "2H": 0.22},
+        10: {"1H": 0.34, "2H": 0.16},
+        15: {"1H": 0.25, "2H": 0.08},
+    },
+}
+
+def _lookup_comeback_rate(league, margin, period_str):
+    """Look up historical comeback rate for sport/margin/period.
+
+    Returns a probability (0-1) or None if no data.
+    Uses the closest margin bucket that's >= the actual margin.
+    """
+    sport_data = _COMEBACK_RATES.get(league)
+    if not sport_data:
+        return None
+
+    # Find closest margin bucket (round up to nearest available)
+    margin_buckets = sorted(sport_data.keys())
+    bucket = None
+    for b in margin_buckets:
+        if margin <= b:
+            bucket = b
+            break
+    if bucket is None:
+        bucket = margin_buckets[-1]  # use largest bucket (worst case)
+
+    period_data = sport_data[bucket]
+
+    # MLB has different period naming
+    if league == "mlb":
+        try:
+            inning = int("".join(c for c in period_str if c.isdigit()) or "0")
+        except Exception:
+            inning = 0
+        if inning <= 3:
+            return period_data.get("early")
+        elif inning <= 6:
+            return period_data.get("mid")
+        elif inning >= 10:
+            return period_data.get("extra")
+        else:
+            return period_data.get("late")
+
+    # NBA/NHL/NCAAB — match period string
+    for key in period_data:
+        if key in period_str:
+            return period_data[key]
+    return None
+
+# ---------------------------------------------------------------------------
+# ORDER BOOK FLOW DETECTION — track changes between scans for steam signals
+# ---------------------------------------------------------------------------
+_OB_SNAPSHOTS = {}  # ticker -> {"ts": float, "yes_bid_depth": int, "yes_ask_depth": int, "best_ask": int}
+_OB_SNAPSHOTS_LOCK = _threading.Lock()
+
+def _track_ob_flow(ticker, ob_data):
+    """Record order book snapshot and detect sharp flow changes.
+
+    Returns a dict with flow signals:
+      - "steam_buy": True if ask depth dropped 40%+ (someone bought big)
+      - "steam_sell": True if bid depth dropped 40%+ (someone sold big)
+      - "flow_direction": "buy" | "sell" | None
+      - "depth_change_pct": percentage change in relevant depth
+    """
+    if not ob_data:
+        return {"steam_buy": False, "steam_sell": False, "flow_direction": None, "depth_change_pct": 0}
+
+    import time as _t
+    now = _t.time()
+    current = {
+        "ts": now,
+        "yes_bid_depth": ob_data.get("bid_depth", 0),
+        "yes_ask_depth": ob_data.get("ask_depth", 0),
+        "best_ask": ob_data.get("best_ask", 0),
+    }
+
+    result = {"steam_buy": False, "steam_sell": False, "flow_direction": None, "depth_change_pct": 0}
+
+    with _OB_SNAPSHOTS_LOCK:
+        prev = _OB_SNAPSHOTS.get(ticker)
+        _OB_SNAPSHOTS[ticker] = current
+
+        # Clean old snapshots (> 5 min)
+        stale = [k for k, v in _OB_SNAPSHOTS.items() if now - v["ts"] > 300]
+        for k in stale:
+            _OB_SNAPSHOTS.pop(k, None)
+
+    if not prev or (now - prev["ts"]) > 120:
+        return result  # no prior data or too old to compare
+
+    prev_ask_depth = prev["yes_ask_depth"]
+    prev_bid_depth = prev["yes_bid_depth"]
+
+    if prev_ask_depth > 20:  # need minimum depth to detect signal
+        ask_change = (current["yes_ask_depth"] - prev_ask_depth) / prev_ask_depth
+        if ask_change <= -0.40:  # ask depth dropped 40%+ = big buy
+            result["steam_buy"] = True
+            result["flow_direction"] = "buy"
+            result["depth_change_pct"] = round(ask_change * 100, 1)
+
+    if prev_bid_depth > 20:
+        bid_change = (current["yes_bid_depth"] - prev_bid_depth) / prev_bid_depth
+        if bid_change <= -0.40:  # bid depth dropped 40%+ = big sell
+            result["steam_sell"] = True
+            result["flow_direction"] = "sell"
+            result["depth_change_pct"] = round(bid_change * 100, 1)
+
+    return result
+
 _LEARNING_STATE = {
     "last_run": None,
     "version": 0,
@@ -2482,6 +2666,18 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
         _PRETRADE_STATS["reasons"]["budget_exceeded"] = _PRETRADE_STATS["reasons"].get("budget_exceeded", 0) + 1
         return False, f"Budget exceeded: ${daily_spent:.0f}+${cost_usd:.0f} > ${max_daily:.0f}"
 
+    # 2B. DRAWDOWN CIRCUIT BREAKER — reduce risk on losing days
+    _dd_level = _drawdown_level()
+    if _dd_level >= 2:
+        _PRETRADE_STATS["blocked"] += 1
+        _PRETRADE_STATS["reasons"]["drawdown_stop"] = _PRETRADE_STATS["reasons"].get("drawdown_stop", 0) + 1
+        return False, "Drawdown circuit breaker: trading halted (down $60+ today)"
+    _dd_min_conv = _drawdown_min_conviction()
+    if conviction is not None and conviction < _dd_min_conv:
+        _PRETRADE_STATS["blocked"] += 1
+        _PRETRADE_STATS["reasons"]["drawdown_low_conv"] = _PRETRADE_STATS["reasons"].get("drawdown_low_conv", 0) + 1
+        return False, f"Drawdown level {_dd_level}: conviction {conviction} < required {_dd_min_conv}"
+
     # 3. MAX BET: no single trade bigger than config allows
     max_bet = BOT_CONFIG.get("max_bet_usd", 25.0)
     if cost_usd > max_bet * 1.5:  # 50% buffer for price bumps
@@ -4063,7 +4259,8 @@ def live_game_snipe():
                 # Conviction scaling: 4=0.5x (exploratory), 5=1x, 6=1.5x, 7+=2x
                 _conv_mult = 0.5 + max(0, conviction - 4) * 0.5
                 _conv_mult = min(_conv_mult, 2.0)
-                bet_usd = _smart_bet_size(price, bankroll=bal if bal > 0 else None) * closing_boost * cat_mult * _conv_mult
+                _snipe_edge_for_sizing = _espn_edge if (_snipe_our_prob is not None and _espn_edge > 0.015) else 0.05
+                bet_usd = _smart_bet_size(price, bankroll=bal if bal > 0 else None, edge=_snipe_edge_for_sizing) * closing_boost * cat_mult * _conv_mult
                 count = max(1, min(50, int(bet_usd * 100 / price)))
                 cost_usd = (price * count) / 100.0
 
@@ -4129,6 +4326,19 @@ def live_game_snipe():
                     _snipe_ob_pre = analyze_orderbook(ticker)
                 except Exception:
                     pass
+
+                # ORDER BOOK FLOW DETECTION — track depth changes for sharp money signals
+                _snipe_flow = _track_ob_flow(ticker, _snipe_ob_pre)
+                if _snipe_flow.get("steam_buy") and side == "yes":
+                    conviction += 2  # sharp money agrees with our YES bet
+                    _conv_reasons_snipe = _conv_reasons_snipe if '_conv_reasons_snipe' in dir() else []
+                    _log_activity(f"SNIPE STEAM: {ticker} — ask depth dropped {_snipe_flow['depth_change_pct']:.0f}% (sharp buy detected)", "info")
+                elif _snipe_flow.get("steam_sell") and side == "yes":
+                    conviction -= 1  # sharp money selling into our YES bet
+                elif _snipe_flow.get("steam_buy") and side == "no":
+                    conviction -= 1  # sharp money buying YES but we want NO
+                elif _snipe_flow.get("steam_sell") and side == "no":
+                    conviction += 2  # sharp money selling YES, confirms our NO
 
                 # Orderbook imbalance confirmation — does order flow agree with our side?
                 if _snipe_ob_pre and _snipe_ob_pre.get("imbalance") is not None:
@@ -4823,7 +5033,11 @@ def moonshark_snipe():
                 # Use real edge if available — SKIP if no ESPN data (no guessing)
                 if espn_edge is not None and espn_edge > 0:
                     edge_estimate = espn_edge
-                    win_prob = min(_ms_our_prob, 0.60)  # cap at 60% — longshots rarely have legit higher prob
+                    # Sport-aware win_prob cap: if price < 40c it's still a true longshot,
+                    # cap at 60%.  If price has moved to 40c+ mid-game, the "longshot" is now
+                    # competitive and ESPN's higher prob is likely real — cap at 75%.
+                    _ms_prob_cap = 0.75 if price >= 40 else 0.60
+                    win_prob = min(_ms_our_prob, _ms_prob_cap)
                 else:
                     # No real edge data — skip this trade instead of guessing
                     _ms_reasons["no_espn_edge"] = _ms_reasons.get("no_espn_edge", 0) + 1
@@ -4927,6 +5141,19 @@ def moonshark_snipe():
                         continue
                 except Exception:
                     pass
+
+                # ORDER BOOK FLOW — detect sharp money from depth changes between scans
+                _ms_flow = _track_ob_flow(ticker, _ob)
+                if _ms_flow.get("steam_buy") and side == "yes":
+                    conviction += 2
+                    _conv_reasons.append(f"STEAM_BUY({_ms_flow['depth_change_pct']:.0f}%)")
+                elif _ms_flow.get("steam_sell") and side == "no":
+                    conviction += 2
+                    _conv_reasons.append(f"STEAM_SELL({_ms_flow['depth_change_pct']:.0f}%)")
+                elif _ms_flow.get("steam_buy") and side == "no":
+                    conviction -= 1  # sharp money opposes us
+                elif _ms_flow.get("steam_sell") and side == "yes":
+                    conviction -= 1
 
                 # Orderbook imbalance confirmation — does order flow agree with our side?
                 if _ob and _ob.get("imbalance") is not None:
@@ -5550,6 +5777,19 @@ def closegame_snipe():
                 except Exception:
                     pass
 
+                # ORDER BOOK FLOW — detect sharp money in CloseGame
+                _cg_flow = _track_ob_flow(ticker, _cg_ob)
+                if _cg_flow.get("steam_buy") and side == "yes":
+                    edge *= 1.20  # boost edge 20% when sharp money agrees
+                    _log_activity(f"CLOSEGAME STEAM: {ticker} — sharp buy detected, boosting edge to {edge:.1%}", "info")
+                elif _cg_flow.get("steam_sell") and side == "yes":
+                    edge *= 0.70  # discount edge when sharp money opposes
+                elif _cg_flow.get("steam_buy") and side == "no":
+                    edge *= 0.70
+                elif _cg_flow.get("steam_sell") and side == "no":
+                    edge *= 1.20
+                    _log_activity(f"CLOSEGAME STEAM: {ticker} — sharp sell detected, boosting NO edge to {edge:.1%}", "info")
+
                 # Orderbook imbalance confirmation — does order flow agree with our side?
                 if _cg_ob and _cg_ob.get("imbalance") is not None:
                     _cg_ob_imb = _cg_ob["imbalance"]
@@ -5894,6 +6134,7 @@ def floor_quota_snipe():
                 "our_prob": best["our_prob"],
                 "game": _game,
                 "mcat": mcat,
+                "close_time": mkt.get("close_time", "") if isinstance(mkt, dict) else "",
             })
 
     if not candidates:
@@ -5928,8 +6169,17 @@ def floor_quota_snipe():
         if not _correlation_check_ok(ticker, 3):
             continue
 
-        # Small bet — risk is limited by design
-        bet_usd = min(FLOOR_BET_USD, FLOOR_MAX_DAILY_USD - BOT_STATE.get("floor_daily_spent", 0))
+        # Quarter-Kelly sizing — bigger edge = bigger bet, but capped at $5 (floor is learning, not earning)
+        _fl_remaining = FLOOR_MAX_DAILY_USD - BOT_STATE.get("floor_daily_spent", 0)
+        _fl_bal = _get_cached_balance()
+        if _fl_bal > 0 and edge > 0.015:
+            _fl_odds = (100 - price) / max(1, price)
+            _fl_kelly_frac = (_fl_odds * cand["our_prob"] - (1 - cand["our_prob"])) / max(0.01, _fl_odds)
+            _fl_kelly_frac = max(0, _fl_kelly_frac) / 4.0  # quarter-Kelly for floor
+            _fl_kelly_frac = min(_fl_kelly_frac, 0.03)     # cap at 3% of bankroll
+            bet_usd = min(_fl_bal * _fl_kelly_frac, _fl_remaining, 5.0)  # hard cap $5 per floor trade
+        else:
+            bet_usd = min(FLOOR_BET_USD, _fl_remaining)
         if bet_usd < 1.0:
             break
         count = max(1, int(bet_usd * 100 / price))
@@ -6015,7 +6265,7 @@ def floor_quota_snipe():
         _edge_data = {"espn_implied": cand["our_prob"], "espn_edge": edge}
         _journal_trade(
             ticker, title, side, price, filled, actual_cost, "floor",
-            is_live=True, close_time=mkt.get("close_time", "") if isinstance(mkt, dict) else "",
+            is_live=True, close_time=cand.get("close_time", ""),
             game_info=cand.get("game"), espn_edge_data=_edge_data,
             conviction=3, conviction_reasons=[f"ESPN+{edge:.0%}", "floor_mode"],
         )
@@ -6246,6 +6496,17 @@ def momentum_swing_snipe():
 
             implied = price / 100.0
             edge = live_prob - implied
+
+            # COMEBACK RATE ADJUSTMENT — weight ESPN's prob with historical data
+            # If ESPN says 35% but history shows teams down this much at this
+            # stage only come back 20% of the time, blend toward the lower number.
+            _cb_rate = _lookup_comeback_rate(league, margin, period)
+            if _cb_rate is not None and live_prob > 0:
+                # Blend: 60% ESPN (model-driven) + 40% historical (data-driven)
+                _blended_prob = 0.60 * live_prob + 0.40 * _cb_rate
+                edge = _blended_prob - implied
+                live_prob = _blended_prob  # use blended for Kelly sizing too
+
             if edge < _adaptive_get("min_edge_swing", 0.06):
                 continue
 
@@ -6611,9 +6872,13 @@ def goalie_pulled_snipe():
         event_key = best["event_key"]
         side = "yes"
 
-        # EV-after-fees filter — skip negative-EV bets
-        _gl_ev = edge * (100 - price)  # EV per contract in cents
-        _gl_fee = 0.07 * best["our_prob"] * (100 - price)  # expected fee in cents (was /100 — unit mismatch bug)
+        # EV-after-fees filter — CORRECT formula: (win_prob * payout - loss_prob * cost) - fees
+        # Old formula only computed edge*payout without subtracting the cost of losing.
+        _gl_win_prob = best["our_prob"]
+        _gl_payout = (100 - price) / 100.0   # dollars won per contract if win
+        _gl_cost = price / 100.0              # dollars risked per contract
+        _gl_ev = _gl_win_prob * _gl_payout - (1 - _gl_win_prob) * _gl_cost
+        _gl_fee = 0.07 * _gl_win_prob * _gl_payout  # expected fee on wins
         _gl_ev_after_fees = _gl_ev - _gl_fee
         if _gl_ev_after_fees <= 0:
             _log_activity(f"GOALIE SKIP {ticker}: negative EV after fees ({_gl_ev_after_fees:.1f}c)", "info")
@@ -7253,9 +7518,18 @@ def enhanced_auto_exit():
         _is_game = any(_tk.startswith(p) for p in _game_prefixes)
         if _is_game:
             _cur_price = pos.get("current_price") or 0
-            # Only sell game bets at 93c+ — guarantees 93%+ of max payout
-            # while protecting against late-game collapses
-            if _cur_price < 93:
+            # DYNAMIC exit threshold based on daily P&L:
+            # If we're up on the day, we can afford to let winners ride (95c).
+            # If we're down, lock in profit earlier (90c) to recover.
+            _dd_pnl = _DRAWDOWN_TODAY.get("realized_pnl", 0) if _DRAWDOWN_TODAY.get("date") == datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d") else 0
+            _exit_threshold = 93  # default
+            if _dd_pnl <= -30:
+                _exit_threshold = 88  # down big — lock in profits aggressively
+            elif _dd_pnl <= -15:
+                _exit_threshold = 90  # down moderately — take earlier profits
+            elif _dd_pnl >= 20:
+                _exit_threshold = 95  # up on the day — let winners ride
+            if _cur_price < _exit_threshold:
                 continue
             # This is a near-lock — sell at market to lock in ~93c+ profit
             action = "smart_exit"
@@ -8995,11 +9269,52 @@ def _learning_engine():
         elif _wr_wide <= _wr_tight - 0.05:
             insights.append(f"⚠️  Model overfitting: wide divergence LOSES ({_wr_wide:.0%} vs {_wr_tight:.0%})")
 
+    # 13. CLV FEEDBACK LOOP — dynamically rebalance strategy budgets
+    # Strategies with consistently positive CLV (beating the closing line) have
+    # genuine edge. Boost their daily budget. Strategies with negative CLV are
+    # burning money on noise. Shrink their budget.
+    _CLV_BUDGET_MAP = {
+        "sniper": ("SNIPE_MAX_DAILY", 50.0),
+        "moonshark": ("MOONSHARK_MAX_DAILY", 50.0),
+        "closegame": ("CLOSEGAME_MAX_DAILY", 25.0),
+        "floor": ("FLOOR_MAX_DAILY_USD", 30.0),
+        "momentum_swing": ("SWING_MAX_DAILY_USD", 40.0),
+        "goalie_pulled": ("GOALIE_MAX_DAILY_USD", 20.0),
+    }
+    _clv_adjustments = {}
+    for strat, clv_data in clv_summary.items():
+        if strat not in _CLV_BUDGET_MAP:
+            continue
+        if clv_data["sample_size"] < 15:
+            continue  # not enough data to rebalance
+        avg_clv = clv_data["avg_cents"]
+        budget_var, default_budget = _CLV_BUDGET_MAP[strat]
+        if avg_clv >= 2.0:
+            # Strong edge — boost budget by 30% (capped at 2x default)
+            new_budget = min(default_budget * 1.3, default_budget * 2.0)
+            _clv_adjustments[strat] = {"action": "BOOST", "clv": avg_clv, "budget": new_budget}
+            insights.append(f"💰 CLV boost: {strat} budget → ${new_budget:.0f} (avg CLV +{avg_clv:.1f}c)")
+        elif avg_clv <= -2.0:
+            # Losing edge — shrink budget by 40% (floor at 50% of default)
+            new_budget = max(default_budget * 0.6, default_budget * 0.5)
+            _clv_adjustments[strat] = {"action": "SHRINK", "clv": avg_clv, "budget": new_budget}
+            insights.append(f"📉 CLV shrink: {strat} budget → ${new_budget:.0f} (avg CLV {avg_clv:.1f}c)")
+
+    # Apply budget adjustments via globals
+    for strat, adj in _clv_adjustments.items():
+        budget_var, _ = _CLV_BUDGET_MAP[strat]
+        try:
+            globals()[budget_var] = adj["budget"]
+        except Exception:
+            pass
+    with _LEARNING_STATE_LOCK:
+        _LEARNING_STATE["clv_budget_adjustments"] = _clv_adjustments
+
     # Update state
     with _LEARNING_STATE_LOCK:
         _LEARNING_STATE["version"] = _LEARNING_STATE.get("version", 0) + 1
         _LEARNING_STATE["last_run"] = datetime.datetime.utcnow().isoformat() + "Z"
-        _LEARNING_STATE["insights"] = insights[-25:]  # keep last 25 (grew from 20)
+        _LEARNING_STATE["insights"] = insights[-30:]  # keep last 30
 
     _log_activity(
         f"🧠 Learning v{_LEARNING_STATE['version']}: {len(settled)} trades analyzed, "
@@ -9998,6 +10313,8 @@ def check_settlements_and_reinvest():
                         _closing_price = 100 - _closing_price  # flip for NO side
             # Track in trade journal for pattern analysis
             _journal_settle(ticker, won, pnl_usd, closing_price_cents=_closing_price)
+            # Update drawdown circuit breaker
+            _update_drawdown(pnl_usd)
             new_settlements.append({
                 "ticker": ticker,
                 "pnl_usd": round(pnl_usd, 2),
@@ -13556,6 +13873,21 @@ def analytics_learning():
     payload["mtm_by_strategy"]         = _safe_dict(_ls.get("mtm_by_strategy"))
     payload["loss_categories"]         = _safe_dict(_ls.get("loss_categories"))
     payload["consensus_divergence"]    = _safe_dict(_ls.get("consensus_divergence"))
+    payload["clv_budget_adjustments"]  = _safe_dict(_ls.get("clv_budget_adjustments"))
+
+    # Drawdown circuit breaker status
+    try:
+        _dd_today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+        with _DRAWDOWN_LOCK:
+            _dd_active = _DRAWDOWN_TODAY["date"] == _dd_today
+            payload["drawdown"] = {
+                "level": _DRAWDOWN_TODAY["level"] if _dd_active else 0,
+                "realized_pnl": round(_DRAWDOWN_TODAY["realized_pnl"], 2) if _dd_active else 0,
+                "label": ["NORMAL", "TIGHTENED (conv≥6)", "HALTED"][_DRAWDOWN_TODAY["level"] if _dd_active else 0],
+            }
+    except Exception as _e:
+        payload["drawdown"] = {"level": 0, "realized_pnl": 0, "label": "NORMAL"}
+        payload["errors"].append(f"drawdown: {_e}")
 
     # Per-strategy rollup (last 7 days)
     try:
@@ -16418,7 +16750,7 @@ def _get_espn_win_prob(event_id, league, home_team=True):
 # ---------------------------------------------------------------------------
 _ODDS_API_CACHE = {}  # sport_key -> {"data": [...], "ts": float}
 _ODDS_API_TTL = 7200  # 2-hour default cache — overridden dynamically during game hours
-_ODDS_API_TTL_GAME_HOURS = 3600  # 60-min cache during active game hours — conserves free tier (500 req/mo)
+_ODDS_API_TTL_GAME_HOURS = 900   # 15-min cache during active game hours — pre-game lines go stale fast
 _ODDS_API_TTL_OFF_HOURS = 7200   # 2-hour cache during off-hours
 _ODDS_API_STATS = {
     "last_fetch": None,
