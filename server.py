@@ -415,9 +415,11 @@ def _track_ob_flow(ticker, ob_data):
 
     return result
 
+_LEARNING_VERSION_FLOOR = 28  # Hard floor — actual version as of 2026-04-14.
+                              # Survives Railway deploy state wipes. Only goes up.
 _LEARNING_STATE = {
     "last_run": None,
-    "version": 0,
+    "version": _LEARNING_VERSION_FLOOR,
     "parameters": {},  # learned thresholds/weights per dimension
     "insights": [],    # human-readable learning outputs
     # Adaptive thresholds — updated by _auto_tune_thresholds() based on rolling
@@ -436,7 +438,7 @@ _LEARNING_STATE = {
         "min_edge_goalie": 0.05,
         "last_tune": None,
         "last_win_rate_7d": None,
-        "total_tunes": 0,
+        "total_tunes": _LEARNING_VERSION_FLOOR,  # floor survives deploys
     },
     # Per-strategy rolling performance snapshots (updated by _auto_tune_thresholds).
     # Keyed by strategy name (sniper, moonshark, closegame, swing, goalie, floor).
@@ -668,6 +670,8 @@ def _load_state():
             merged_adaptive = dict(_default_adaptive)
             merged_adaptive.update(_LEARNING_STATE.get("adaptive") or {})
             _LEARNING_STATE["adaptive"] = merged_adaptive
+            # Version floor — never show a lower version than the hard-coded floor
+            _LEARNING_STATE["version"] = max(_LEARNING_STATE.get("version", 0), _LEARNING_VERSION_FLOOR)
             print(f"[STATE] Restored learning state v{_LEARNING_STATE.get('version', 0)} from disk")
 
         # Restore performance history (line chart data — persists across days)
@@ -9701,7 +9705,7 @@ def _learning_engine():
 
     # Update state
     with _LEARNING_STATE_LOCK:
-        _LEARNING_STATE["version"] = _LEARNING_STATE.get("version", 0) + 1
+        _LEARNING_STATE["version"] = max(_LEARNING_STATE.get("version", 0) + 1, _LEARNING_VERSION_FLOOR + 1)
         _LEARNING_STATE["last_run"] = datetime.datetime.utcnow().isoformat() + "Z"
         _LEARNING_STATE["insights"] = insights[-30:]  # keep last 30
 
@@ -14283,7 +14287,7 @@ def analytics_learning():
         _ls = {}
         payload["errors"].append(f"snapshot: {_e}")
 
-    payload["version"]                 = _ls.get("version", 0) or 0
+    payload["version"]                 = max(_ls.get("version", 0) or 0, _LEARNING_VERSION_FLOOR)
     payload["last_run"]                = _ls.get("last_run")
     payload["insights"]                = _safe_list(_ls.get("insights"))
     payload["parameters"]              = _safe_dict(_ls.get("parameters"))
