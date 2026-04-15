@@ -9220,8 +9220,32 @@ def _paper_trade_update():
 
             m = market_map.get(ticker)
             if not m:
-                # Market might be settled — check if > 24h old
-                if elapsed > 86400:
+                # Market not in active cache — likely settled. Check Kalshi API.
+                if ticker in _known_settled:
+                    # We know it settled — look up the result
+                    try:
+                        _pm_h = signed_headers("GET", f"/markets/{ticker}")
+                        _pm_r = requests.get(
+                            KALSHI_BASE_URL + KALSHI_API_PREFIX + f"/markets/{ticker}",
+                            headers=_pm_h, timeout=5,
+                        )
+                        if _pm_r.ok:
+                            _pm_mkt = _pm_r.json().get("market", {})
+                            _pm_result = _pm_mkt.get("result", "")
+                            if _pm_result:
+                                # result is "yes" or "no" — did OUR side win?
+                                won = (_pm_result == side)
+                                pt["result"] = "win" if won else "loss"
+                                pt["closing_price"] = 97 if won else 3
+                                pt["clv_final"] = pt["closing_price"] - entry_price
+                                if won:
+                                    pt["pnl_cents"] = round((100 - entry_price) * 0.93, 1)
+                                else:
+                                    pt["pnl_cents"] = -entry_price
+                                print(f"[PAPER] Settled {ticker}: {'WIN' if won else 'LOSS'} (result={_pm_result}, side={side})")
+                    except Exception as _pme:
+                        print(f"[PAPER] Market lookup error for {ticker}: {_pme}")
+                elif elapsed > 86400:
                     pt["result"] = "expired"
                 continue
 
