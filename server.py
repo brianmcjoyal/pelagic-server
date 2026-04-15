@@ -23886,52 +23886,50 @@ function _smoothPerfPoints(pts) {
   return result;
 }
 
+// Returns {pts: [...], tStart: ms, tEnd: ms} so chart X-axis spans the requested window
 function filterPerfData() {
-  if (!_perfChartData.length) return [];
-  if (_perfChartRange === 'all') return _smoothPerfPoints(_perfChartData.slice());
-
   var now = new Date();
+  var nowMs = now.getTime();
+  if (!_perfChartData.length) return {pts: [], tStart: nowMs, tEnd: nowMs};
+  if (_perfChartRange === 'all') return {pts: _smoothPerfPoints(_perfChartData.slice()), tStart: 0, tEnd: 0};
+
   var cutoff;
-  if (_perfChartRange === '1h') cutoff = new Date(now - 3600000);
-  else if (_perfChartRange === '6h') cutoff = new Date(now - 6 * 3600000);
+  if (_perfChartRange === '1h') cutoff = new Date(nowMs - 3600000);
+  else if (_perfChartRange === '6h') cutoff = new Date(nowMs - 6 * 3600000);
   else if (_perfChartRange === '1d') {
-    // "TODAY" = since midnight Pacific Time — matches Daily P&L header
     var ptNow = new Date(now.toLocaleString('en-US', {timeZone: 'America/Los_Angeles'}));
     var hrsSinceMidnight = ptNow.getHours() + ptNow.getMinutes() / 60;
-    cutoff = new Date(now - hrsSinceMidnight * 3600000);
+    cutoff = new Date(nowMs - hrsSinceMidnight * 3600000);
   }
-  else if (_perfChartRange === '7d') cutoff = new Date(now - 7 * 86400000);
-  else return _smoothPerfPoints(_perfChartData.slice());
+  else if (_perfChartRange === '7d') cutoff = new Date(nowMs - 7 * 86400000);
+  else return {pts: _smoothPerfPoints(_perfChartData.slice()), tStart: 0, tEnd: 0};
 
   var cutMs = cutoff.getTime();
 
-  // Parse all timestamps once, filter by cutoff
+  // Find points after cutoff, and the last point before cutoff as anchor
   var after = [];
   var lastBefore = null;
   for (var i = 0; i < _perfChartData.length; i++) {
     var p = _perfChartData[i];
     var d = new Date(p.ts);
     if (isNaN(d.getTime())) continue;
-    var ms = d.getTime();
-    if (ms >= cutMs) {
+    if (d.getTime() >= cutMs) {
       after.push(p);
     } else {
-      lastBefore = p;  // track the last point before cutoff for anchor
+      lastBefore = p;
     }
   }
 
-  // Always prepend anchor (last point before cutoff) so chart has a baseline.
-  // This gives TODAY view a starting value even right after deploy.
+  // Place anchor AT the cutoff time so it appears at the left edge of the window
   if (lastBefore) {
-    after.unshift(lastBefore);
+    after.unshift({ts: cutoff.toISOString(), value: lastBefore.value, cash: lastBefore.cash});
   }
 
-  // If we still have <2 points, grab the 2 most recent points from all data
   if (after.length < 2 && _perfChartData.length >= 2) {
-    return _smoothPerfPoints(_perfChartData.slice(-2));
+    after = _perfChartData.slice(-2);
   }
 
-  return _smoothPerfPoints(after);
+  return {pts: _smoothPerfPoints(after), tStart: cutMs, tEnd: nowMs};
 }
 
 function drawPerfLineChart() {
@@ -23946,7 +23944,10 @@ function drawPerfLineChart() {
   var w = rect.width, h = rect.height;
   ctx.clearRect(0, 0, w, h);
 
-  var pts = filterPerfData();
+  var filtered = filterPerfData();
+  var pts = filtered.pts;
+  var _xWindowStart = filtered.tStart;
+  var _xWindowEnd = filtered.tEnd;
   var startLabel = document.getElementById('perf-chart-start');
   var endLabel = document.getElementById('perf-chart-end');
   var changeLabel = document.getElementById('perf-chart-change');
@@ -23976,10 +23977,14 @@ function drawPerfLineChart() {
   var pad = { top: 20, right: 15, bottom: 8, left: 50 };
 
   // X-axis: time-based so each range view (1H/6H/TODAY/7D/ALL) zooms properly.
-  // Parse timestamps once, map to screen X by actual time position.
+  // Use the requested window bounds (tStart/tEnd) so different ranges show different zoom levels.
   var ptTimes = pts.map(function(p) { return new Date(p.ts).getTime(); });
-  var tMin = ptTimes[0], tMax = ptTimes[ptTimes.length - 1];
-  var tRange = tMax - tMin || 1;  // avoid /0 if all same timestamp
+  var tMin = _xWindowStart || ptTimes[0];
+  var tMax = _xWindowEnd || ptTimes[ptTimes.length - 1];
+  // Ensure data points are within window bounds
+  if (ptTimes[0] < tMin) tMin = ptTimes[0];
+  if (ptTimes[ptTimes.length - 1] > tMax) tMax = ptTimes[ptTimes.length - 1];
+  var tRange = tMax - tMin || 1;
   function xPos(i) { return pad.left + ((ptTimes[i] - tMin) / tRange) * (w - pad.left - pad.right); }
   function yPos(v) { return pad.top + (1 - (v - minV) / range) * (h - pad.top - pad.bottom); }
 
