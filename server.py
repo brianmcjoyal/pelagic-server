@@ -23975,7 +23975,12 @@ function drawPerfLineChart() {
   minV -= yPad; maxV += yPad; range = maxV - minV;
   var pad = { top: 20, right: 15, bottom: 8, left: 50 };
 
-  function xPos(i) { return pad.left + (i / (pts.length - 1)) * (w - pad.left - pad.right); }
+  // X-axis: time-based so each range view (1H/6H/TODAY/7D/ALL) zooms properly.
+  // Parse timestamps once, map to screen X by actual time position.
+  var ptTimes = pts.map(function(p) { return new Date(p.ts).getTime(); });
+  var tMin = ptTimes[0], tMax = ptTimes[ptTimes.length - 1];
+  var tRange = tMax - tMin || 1;  // avoid /0 if all same timestamp
+  function xPos(i) { return pad.left + ((ptTimes[i] - tMin) / tRange) * (w - pad.left - pad.right); }
   function yPos(v) { return pad.top + (1 - (v - minV) / range) * (h - pad.top - pad.bottom); }
 
   // Y-axis grid lines & labels — use "nice" round numbers
