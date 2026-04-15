@@ -13066,7 +13066,7 @@ def health():
         "storage": _storage,
         "state_file": _STATE_FILE,
         "journal_size": _jlen,
-        "hwm": {"wins": _hwm_w, "losses": _hwm_l},
+        "hwm": {"wins": _SETTLED_HWM.get("wins", 0), "losses": _SETTLED_HWM.get("losses", 0)},
         "learning_version": _LEARNING_STATE.get("version", 0),
         "integrity_warnings": _integrity,
         "watchdog_alerts": _WATCHDOG_ALERTS,
