@@ -11610,6 +11610,7 @@ def _background_loop():
     # to prevent re-processing old settlements after 200+ trades
     try:
         _settle_cursor = None
+        _settle_pages = 0
         for _settle_page in range(20):  # max 20 pages = 4000 positions
             sh = signed_headers("GET", "/portfolio/positions")
             if not sh:
@@ -11620,18 +11621,24 @@ def _background_loop():
             sr = requests.get(
                 KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/positions",
                 headers=sh, params=_settle_params,
-                timeout=TIMEOUT,
+                timeout=10,
             )
+            if sr.status_code == 429:
+                print(f"[SETTLE] Rate limited on page {_settle_page+1}, using {len(_known_settled)} positions so far")
+                break
             if not sr.ok:
+                print(f"[SETTLE] API error {sr.status_code} on page {_settle_page+1}")
                 break
             _settle_positions = sr.json().get("market_positions", [])
             for pos in _settle_positions:
                 _known_settled.add(pos.get("ticker", ""))
+            _settle_pages += 1
             _settle_cursor = sr.json().get("cursor")
             if not _settle_cursor or not _settle_positions:
                 break
-        print(f"[SETTLE] Initialized {len(_known_settled)} known settled positions (paginated)")
-    except Exception:
+        print(f"[SETTLE] Initialized {len(_known_settled)} known settled positions ({_settle_pages} pages)")
+    except Exception as _se:
+        print(f"[SETTLE] Init error (non-fatal): {_se}")
         pass
     # Rebuild trade journal & category stats from Kalshi settled positions
     # This is the real persistence: even if /tmp is wiped on deploy, we rebuild from API
