@@ -459,7 +459,17 @@ _LEARNING_STATE = {
 # increment them with minimal ceremony. They get folded into the learning
 # state every time the supervisor runs.
 _SKIP_REASONS_TODAY = {}  # {strategy: {reason: count}}
-_SKIP_REASONS_LOCK = None  # lazy-init (threading not imported yet at this point)
+
+# Locks — declared early so _save_state() and _load_state() can use them.
+# threading is imported at line 24, so these are safe to create here.
+_BOT_STATE_LOCK = _threading.Lock()
+_TRADE_JOURNAL_LOCK = _threading.Lock()
+_CATEGORY_STATS_LOCK = _threading.Lock()
+_PERF_HISTORY_LOCK = _threading.Lock()
+_STATE_FILE_LOCK = _threading.Lock()
+_PAPER_TRADES_LOCK = _threading.Lock()
+_SKIP_REASONS_LOCK = _threading.Lock()
+_LEARNING_STATE_LOCK = _threading.Lock()
 
 # Paper trading — declared early so _load_state() can restore them
 _PAPER_TRADES = []       # list of paper trade dicts
@@ -1416,7 +1426,7 @@ def _rebuild_journal_from_kalshi():
             ticker = pos.get("ticker", "")
             pnl_cents = _parse_kalshi_dollars(pos.get("realized_pnl_dollars") or pos.get("realized_pnl"))
             pnl_usd = pnl_cents / 100
-            won = pnl_usd > 0
+            won = pnl_usd > 0.005
 
             # Get title from cache or existing trade data
             title = ""
@@ -1505,13 +1515,22 @@ def _rebuild_journal_from_kalshi():
             # Detect sport from ticker prefix (not hardcoded "other")
             _rebuild_sport = _sport_from_ticker(ticker) or cat or "other"
 
-            # Compute CLV from result: YES win closes ~97c, NO win closes ~3c
+            # Compute CLV from result. closing_price is the YES-side market price.
+            # YES side: CLV = closing - entry (higher close = good)
+            # NO side: CLV = entry - closing (lower close = good for NO holder)
             _rebuild_clv = None
             _rebuild_result = "win" if pnl_usd > 0.005 else ("loss" if pnl_usd < -0.005 else "even")
-            if _rebuild_result == "win" and entry_cents:
-                _rebuild_clv = 97 - entry_cents if side == "yes" else entry_cents - 97
-            elif _rebuild_result == "loss" and entry_cents:
-                _rebuild_clv = 3 - entry_cents if side == "yes" else entry_cents - 3
+            # YES-side closing price: 97 if market resolved YES, 3 if NO
+            _rebuild_closing = None
+            if _rebuild_result == "win":
+                _rebuild_closing = 97 if side == "yes" else 3   # YES win→YES, NO win→NO
+            elif _rebuild_result == "loss":
+                _rebuild_closing = 3 if side == "yes" else 97   # YES loss→NO, NO loss→YES
+            if _rebuild_closing is not None and entry_cents:
+                if side == "no":
+                    _rebuild_clv = entry_cents - _rebuild_closing
+                else:
+                    _rebuild_clv = _rebuild_closing - entry_cents
 
             # Loss post-mortem category (best-effort without MTM data)
             _rebuild_loss_cat = None
@@ -1548,7 +1567,7 @@ def _rebuild_journal_from_kalshi():
                 "source": "kalshi_rebuild",
                 "clv_cents": _rebuild_clv,
                 "clv_entry_price": entry_cents,
-                "clv_closing_price": (97 if side == "yes" else 3) if _rebuild_result == "win" else ((3 if side == "yes" else 97) if _rebuild_result == "loss" else None),
+                "clv_closing_price": _rebuild_closing,
                 "loss_category": _rebuild_loss_cat,
             }
             with _TRADE_JOURNAL_LOCK:
@@ -3878,16 +3897,9 @@ BOT_STATE["moonshark_date"] = None
 
 # GLOBAL event lock — prevents ALL strategies from betting both sides of the same game
 # Key = event (e.g. "KXMLBGAME-26APR012020CLELAD"), resets daily
-import threading as _threading
+# NOTE: Most locks are defined early (near line 462) so _save_state()/_load_state() can use them.
+# Only locks NOT needed before _load_state() are defined here.
 _EVENT_LOCK = _threading.Lock()
-_BOT_STATE_LOCK = _threading.Lock()
-_TRADE_JOURNAL_LOCK = _threading.Lock()  # protects _TRADE_JOURNAL append/iterate from cross-thread RuntimeError
-_SKIP_REASONS_LOCK = _threading.Lock()   # protects _SKIP_REASONS_TODAY from background + learning thread races
-_LEARNING_STATE_LOCK = _threading.Lock() # protects _LEARNING_STATE updates from the dedicated learning thread
-_PERF_HISTORY_LOCK = _threading.Lock()   # protects _PERF_HISTORY from concurrent read/write
-_STATE_FILE_LOCK = _threading.Lock()     # protects _save_state() from concurrent writes (bg thread + request handlers)
-_PAPER_TRADES_LOCK = _threading.Lock()   # protects _PAPER_TRADES from concurrent bg thread write + Flask read
-_CATEGORY_STATS_LOCK = _threading.Lock() # protects _CATEGORY_STATS from concurrent read/write
 _RESTING_SELLS_LOCK = _threading.Lock()  # protects _resting_sells from concurrent bg thread + exit thread races
 _REENTRY_LOCK = _threading.Lock()        # protects _REENTRY_COOLDOWN from concurrent read/write
 _POSITION_HWM_LOCK = _threading.Lock()   # protects _position_high_water from concurrent read/write
@@ -10888,7 +10900,7 @@ def check_settlements_and_reinvest():
             _known_settled.add(ticker)
             pnl_cents = _parse_kalshi_dollars(pos.get("realized_pnl_dollars") or pos.get("realized_pnl"))
             pnl_usd = pnl_cents / 100
-            won = pnl_usd > 0
+            won = pnl_usd > 0.005
             # Track category performance
             title = pos.get("market_title", "") or pos.get("title", "") or ticker
             _update_category_stats(ticker, title, won, pnl_usd)
@@ -19149,7 +19161,7 @@ def moonshark_stats():
             cost_usd = round((entry_cents * count) / 100, 2)
             pnl_cents = _parse_kalshi_dollars(pos.get("realized_pnl_dollars") or pos.get("realized_pnl"))
             pnl_usd = round(pnl_cents / 100, 2)
-            won = pnl_usd > 0
+            won = pnl_usd > 0.005
             # Try to get title
             title = ticker
             trade_rec = {}
