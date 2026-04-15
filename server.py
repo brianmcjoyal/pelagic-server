@@ -1042,40 +1042,36 @@ _load_state()
 
 
 def _seed_perf_history_from_fills():
-    """Backfill _PERF_HISTORY with daily snapshots so the chart has multi-day data.
+    """Backfill _PERF_HISTORY with daily snapshots using ACTUAL P&L from Kalshi fills.
 
-    Uses Kalshi fills API to find which dates had trading activity, then creates
-    approximate daily portfolio values by linearly interpolating from Day 1 ($500)
-    to current value across all trading days.
+    Computes cumulative realized P&L per day from fill data, then builds daily
+    portfolio value points (starting balance $500 + cumulative P&L). This gives
+    an accurate chart instead of linear interpolation.
+
+    Idempotent: if history already has 10+ points spanning multiple days, skip.
+    Never re-seeds over existing data to avoid the sawtooth pattern.
     """
     import requests as _req
-    import traceback
 
-    # Skip if we already have dense multi-day history (no gaps > 1 day between points)
-    if len(_PERF_HISTORY) >= 10:
+    # Skip if we already have multi-day history (10+ points across 2+ distinct dates)
+    with _PERF_HISTORY_LOCK:
+        _existing_count = len(_PERF_HISTORY)
+    if _existing_count >= 10:
         try:
-            _gap_ok = True
-            for _gi in range(1, min(len(_PERF_HISTORY), 50)):
-                _t1 = _PERF_HISTORY[_gi - 1].get("ts", "")[:10]
-                _t2 = _PERF_HISTORY[_gi].get("ts", "")[:10]
-                if _t1 and _t2:
-                    _d1 = datetime.datetime.strptime(_t1, "%Y-%m-%d")
-                    _d2 = datetime.datetime.strptime(_t2, "%Y-%m-%d")
-                    if abs((_d2 - _d1).days) > 1:
-                        _gap_ok = False
-                        print(f"[PERF-SEED] Found {abs((_d2 - _d1).days)}-day gap between {_t1} and {_t2} — re-running backfill")
-                        break
-            if _gap_ok:
-                first_date = _PERF_HISTORY[0].get("ts", "")[:10]
-                last_date = _PERF_HISTORY[-1].get("ts", "")[:10]
-                print(f"[PERF-SEED] Already have dense history ({first_date} to {last_date}, {len(_PERF_HISTORY)} pts), skipping")
+            _dates_in_history = set()
+            for _p in _PERF_HISTORY[:200]:
+                _d = _p.get("ts", "")[:10]
+                if _d:
+                    _dates_in_history.add(_d)
+            if len(_dates_in_history) >= 2:
+                print(f"[PERF-SEED] Already have {_existing_count} pts across {len(_dates_in_history)} dates, skipping")
                 return
         except Exception:
             pass
 
-    print(f"[PERF-SEED] Starting backfill (current history: {len(_PERF_HISTORY)} pts)...")
+    print(f"[PERF-SEED] Starting backfill (current history: {_existing_count} pts)...")
 
-    # Fetch fills (paginated) to find trading dates
+    # Fetch ALL fills (paginated) to compute actual daily P&L
     fills = []
     cursor = None
     for _page in range(10):
@@ -1091,6 +1087,9 @@ def _seed_perf_history_from_fills():
                 KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/fills",
                 headers=_ph, params=params, timeout=15,
             )
+            if resp.status_code == 429:
+                print(f"[PERF-SEED] Rate limited on page {_page}, using {len(fills)} fills")
+                break
             if not resp.ok:
                 print(f"[PERF-SEED] Fills API returned {resp.status_code} on page {_page}")
                 break
@@ -1102,72 +1101,98 @@ def _seed_perf_history_from_fills():
                 break
         except Exception as e:
             print(f"[PERF-SEED] Fills page {_page} error: {e}")
-            traceback.print_exc()
             break
 
     print(f"[PERF-SEED] Fetched {len(fills)} fills")
+    if not fills:
+        print("[PERF-SEED] No fills — skipping backfill")
+        return
 
-    # Extract unique trading dates from fills
-    all_dates = set()
+    # Compute net cost per day from fills (buy = spend, sell = receive)
+    # Each fill has: action (buy/sell), count, yes_price/no_price, side, created_time
+    daily_net = {}  # date -> net cash flow (negative = spent, positive = received)
     for fill in fills:
         ts = fill.get("created_time", "")
         if not ts:
             continue
         try:
-            # Parse ISO timestamp and convert to Pacific date
             ts_clean = ts.replace("Z", "+00:00")
             dt = datetime.datetime.fromisoformat(ts_clean)
             dt_pac = dt.astimezone(_PACIFIC)
-            all_dates.add(dt_pac.strftime("%Y-%m-%d"))
+            date_str = dt_pac.strftime("%Y-%m-%d")
         except Exception:
-            # Fallback: just grab the date portion from the string
             if len(ts) >= 10:
-                all_dates.add(ts[:10])
+                date_str = ts[:10]
+            else:
+                continue
 
-    sorted_dates = sorted(all_dates)
-    print(f"[PERF-SEED] Found {len(sorted_dates)} trading dates: {sorted_dates[:5]}...{sorted_dates[-3:] if len(sorted_dates) > 5 else ''}")
+        action = fill.get("action", "")
+        count = fill.get("count", 0) or 0
+        # Price in cents — try dollar-string first, then integer cents
+        side = fill.get("side", "yes")
+        price_cents = 0
+        if side == "yes":
+            _pd = fill.get("yes_price_dollars") or fill.get("yes_price")
+        else:
+            _pd = fill.get("no_price_dollars") or fill.get("no_price")
+        if _pd is not None:
+            try:
+                _pf = float(str(_pd))
+                price_cents = _pf * 100 if _pf < 1.01 else _pf  # dollar string vs cents
+            except Exception:
+                pass
+        cost_cents = price_cents * count
+        if action == "buy":
+            daily_net.setdefault(date_str, 0.0)
+            daily_net[date_str] -= cost_cents / 100.0  # spending money
+        elif action == "sell":
+            daily_net.setdefault(date_str, 0.0)
+            daily_net[date_str] += cost_cents / 100.0  # receiving money
 
-    if not sorted_dates:
-        # No fills at all — just add Day 1 anchor
-        with _PERF_HISTORY_LOCK:
-            _PERF_HISTORY.insert(0, {"ts": "2026-03-31T09:00:00-07:00", "value": 500.00, "cash": 500.00})
-        print("[PERF-SEED] No fills found, added Day 1 anchor only")
-        _save_state()
+    # Also add settlement P&L from settled positions
+    try:
+        _sh = signed_headers("GET", "/portfolio/positions")
+        if _sh:
+            _sr = _req.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/positions",
+                headers=_sh, params={"limit": 200, "settlement_status": "settled"},
+                timeout=10,
+            )
+            if _sr.ok:
+                for _sp in _sr.json().get("market_positions", []):
+                    _rpnl = _parse_kalshi_dollars(_sp.get("realized_pnl_dollars") or _sp.get("realized_pnl"))
+                    _close_time = _sp.get("close_time") or _sp.get("expiration_time") or ""
+                    if _close_time and _rpnl:
+                        try:
+                            _ct = datetime.datetime.fromisoformat(_close_time.replace("Z", "+00:00"))
+                            _ct_date = _ct.astimezone(_PACIFIC).strftime("%Y-%m-%d")
+                        except Exception:
+                            _ct_date = _close_time[:10] if len(_close_time) >= 10 else None
+                        if _ct_date:
+                            daily_net.setdefault(_ct_date, 0.0)
+                            daily_net[_ct_date] += _rpnl / 100.0  # settlement payout
+    except Exception:
+        pass  # non-fatal — fills alone give a reasonable picture
+
+    if not daily_net:
+        print("[PERF-SEED] No daily P&L data computed — skipping")
         return
 
-    # Current portfolio value for calibration
+    # Build cumulative portfolio value from $500 start
     DAY1_VALUE = 500.00
-    current_value = None
-    if _PORTFOLIO_CACHE.get("data"):
-        cv = _PORTFOLIO_CACHE["data"].get("portfolio_value_usd")
-        if cv and cv > 0:
-            current_value = cv
-    if current_value is None:
-        # Portfolio cache not populated yet — fetch balance directly from Kalshi
-        try:
-            _bal_h = signed_headers("GET", "/portfolio/balance")
-            if _bal_h:
-                _bal_r = _req.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
-                                  headers=_bal_h, timeout=TIMEOUT)
-                if _bal_r.ok:
-                    _bal_d = _bal_r.json()
-                    _cash = (_bal_d.get("balance") or _bal_d.get("available_balance") or 0) / 100.0
-                    _invested = (_bal_d.get("portfolio_value") or 0) / 100.0
-                    current_value = _cash + _invested if (_cash + _invested) > 0 else None
-                    if current_value:
-                        print(f"[PERF-SEED] Fetched live balance for backfill: ${current_value:.2f}")
-        except Exception as _e:
-            print(f"[PERF-SEED] Balance fetch failed: {_e}")
-    if current_value is None:
-        print("[PERF-SEED] Skipping backfill — no portfolio data available")
-        return
+    sorted_dates = sorted(daily_net.keys())
+    today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
 
-    total_pnl = current_value - DAY1_VALUE
-    num_days = max(1, len(sorted_dates))
+    # Fill in all calendar days (not just trading days) for smooth chart
+    _first_d = datetime.datetime.strptime(sorted_dates[0], "%Y-%m-%d")
+    _last_d = datetime.datetime.strptime(today_str, "%Y-%m-%d")
+    _all_days = []
+    _d = _first_d
+    while _d <= _last_d:
+        _all_days.append(_d.strftime("%Y-%m-%d"))
+        _d += datetime.timedelta(days=1)
 
-    # Build historical points: Day 1 anchor + 2 points per trading day
     historical_points = []
-
     # Day before first trade = starting balance
     historical_points.append({
         "ts": "2026-03-30T20:00:00-07:00",
@@ -1175,53 +1200,34 @@ def _seed_perf_history_from_fills():
         "cash": DAY1_VALUE,
     })
 
-    today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
-    # Also fill in non-trading dates between first and last trading date
-    # so the chart has continuous data for all time ranges
-    if len(sorted_dates) >= 2:
-        _first_d = datetime.datetime.strptime(sorted_dates[0], "%Y-%m-%d")
-        _last_d = datetime.datetime.strptime(today_str, "%Y-%m-%d")
-        _all_days = []
-        _d = _first_d
-        while _d <= _last_d:
-            _all_days.append(_d.strftime("%Y-%m-%d"))
-            _d += datetime.timedelta(days=1)
-        sorted_dates = _all_days
-        num_days = max(1, len(sorted_dates))
-
-    for i, date_str in enumerate(sorted_dates):
-        # Skip today — real-time data covers it
+    cumulative_pnl = 0.0
+    for date_str in _all_days:
         if date_str == today_str:
-            continue
-        progress_start = i / num_days
-        progress_end = (i + 1) / num_days
+            continue  # real-time data covers today
+        cumulative_pnl += daily_net.get(date_str, 0.0)
+        _val = round(DAY1_VALUE + cumulative_pnl, 2)
+        # One end-of-day point per date (8pm PT)
+        historical_points.append({
+            "ts": datetime.datetime.strptime(f"{date_str} 20:00", "%Y-%m-%d %H:%M").replace(tzinfo=_PACIFIC).isoformat(),
+            "value": _val,
+            "cash": _val,
+        })
 
-        # Generate 4 points per day (every 4 hours from 8am-8pm) for smoother chart
-        _hours = [8, 12, 16, 20]
-        for _hi, _hr in enumerate(_hours):
-            _frac = progress_start + (progress_end - progress_start) * (_hi / len(_hours))
-            _val = round(DAY1_VALUE + total_pnl * _frac, 2)
-            historical_points.append({
-                "ts": datetime.datetime.strptime(f"{date_str} {_hr:02d}:00", "%Y-%m-%d %H:%M").replace(tzinfo=_PACIFIC).isoformat(),
-                "value": _val,
-                "cash": _val,
-            })
-
-    if not historical_points:
-        print("[PERF-SEED] No historical points generated")
+    if len(historical_points) < 2:
+        print("[PERF-SEED] Not enough historical points — skipping")
         return
 
-    # Merge: prepend historical points before existing real-time data (under lock)
+    # Replace any existing seeded data, keep only today's real-time points
     with _PERF_HISTORY_LOCK:
-        existing_real = list(_PERF_HISTORY)
+        # Keep only points from today (real-time data)
+        today_real = [p for p in _PERF_HISTORY if p.get("ts", "")[:10] == today_str]
         _PERF_HISTORY.clear()
         _PERF_HISTORY.extend(historical_points)
-        _PERF_HISTORY.extend(existing_real)
-        # Trim to max
+        _PERF_HISTORY.extend(today_real)
         if len(_PERF_HISTORY) > _PERF_HISTORY_MAX:
             _PERF_HISTORY[:] = _PERF_HISTORY[-_PERF_HISTORY_MAX:]
 
-    print(f"[PERF-SEED] Success! Added {len(historical_points)} historical points across {len(sorted_dates)} trading days. Total history: {len(_PERF_HISTORY)} pts")
+    print(f"[PERF-SEED] Built {len(historical_points)} historical points from actual P&L data. Total: {len(_PERF_HISTORY)} pts")
     _save_state()
 
 
@@ -11555,15 +11561,10 @@ def _background_loop():
         _chart_value = _pf_value if _pf_value > 0 else _bal_early
         if _chart_value > 0:
             _now_pt = datetime.datetime.now(tz=_PACIFIC)
-            # If history is empty after deploy, seed with Day 1 anchor + current
-            # so the chart renders immediately instead of showing "Waiting for data"
+            # Append current portfolio value to chart history.
+            # Don't insert fake $500 anchors — _seed_perf_history_from_fills()
+            # handles backfill with actual P&L data.
             with _PERF_HISTORY_LOCK:
-                if len(_PERF_HISTORY) < 2:
-                    _PERF_HISTORY.insert(0, {
-                        "ts": "2026-03-31T09:00:00-07:00",
-                        "value": 500.00,
-                        "cash": 500.00,
-                    })
                 _PERF_HISTORY.append({
                     "ts": _now_pt.isoformat(),
                     "value": round(_chart_value, 2),
