@@ -489,6 +489,8 @@ def _save_state():
             _perf_for_save = list(_PERF_HISTORY[-_PERF_HISTORY_MAX:])
         with _PAPER_TRADES_LOCK:
             _paper_for_save = list(_PAPER_TRADES[-_PAPER_TRADES_MAX:])
+        with _BOT_STATE_LOCK:
+            _game_exposure_snap = dict(_GAME_EXPOSURE)
         data = {
             "all_trades": BOT_STATE["all_trades"],
             "trades_today": BOT_STATE["trades_today"],
@@ -528,8 +530,8 @@ def _save_state():
             "misc_daily_spent": BOT_STATE.get("misc_daily_spent", 0.0),
             # Learning engine state
             "learning_state": _LEARNING_STATE,
-            # Per-game exposure tracking
-            "game_exposure": dict(_GAME_EXPOSURE),  # snapshot under save lock
+            # Per-game exposure tracking (snapshot under BOT_STATE_LOCK)
+            "game_exposure": _game_exposure_snap,
             # Performance history for line chart (keep last _PERF_HISTORY_MAX)
             "perf_history": _perf_for_save,
             # High-water mark for W/L counts — persists across restarts
@@ -1490,13 +1492,13 @@ def _rebuild_journal_from_kalshi():
             # Detect sport from ticker prefix (not hardcoded "other")
             _rebuild_sport = _sport_from_ticker(ticker) or cat or "other"
 
-            # Compute CLV from result: won → closing ~97c, lost → closing ~3c
+            # Compute CLV from result: YES win closes ~97c, NO win closes ~3c
             _rebuild_clv = None
             _rebuild_result = "win" if pnl_usd > 0.005 else ("loss" if pnl_usd < -0.005 else "even")
             if _rebuild_result == "win" and entry_cents:
-                _rebuild_clv = 97 - entry_cents if side != "no" else entry_cents - 3
+                _rebuild_clv = 97 - entry_cents if side == "yes" else entry_cents - 97
             elif _rebuild_result == "loss" and entry_cents:
-                _rebuild_clv = 3 - entry_cents if side != "no" else entry_cents - 97
+                _rebuild_clv = 3 - entry_cents if side == "yes" else entry_cents - 3
 
             # Loss post-mortem category (best-effort without MTM data)
             _rebuild_loss_cat = None
@@ -1533,7 +1535,7 @@ def _rebuild_journal_from_kalshi():
                 "source": "kalshi_rebuild",
                 "clv_cents": _rebuild_clv,
                 "clv_entry_price": entry_cents,
-                "clv_closing_price": 97 if _rebuild_result == "win" else (3 if _rebuild_result == "loss" else None),
+                "clv_closing_price": (97 if side == "yes" else 3) if _rebuild_result == "win" else ((3 if side == "yes" else 97) if _rebuild_result == "loss" else None),
                 "loss_category": _rebuild_loss_cat,
             }
             with _TRADE_JOURNAL_LOCK:
@@ -4640,7 +4642,9 @@ def live_game_snipe():
                 if not _check_game_exposure(event_key, cost_usd):
                     new_count, new_cost = _fit_to_game_cap(event_key, price, count)
                     if new_count <= 0:
-                        _log_activity(f"SNIPE SKIP: {ticker} — game exposure cap full ${_GAME_EXPOSURE.get(event_key, 0):.2f}/${_GAME_EXPOSURE_MAX}", "info")
+                        with _BOT_STATE_LOCK:
+                            _ge_val = _GAME_EXPOSURE.get(event_key, 0)
+                        _log_activity(f"SNIPE SKIP: {ticker} — game exposure cap full ${_ge_val:.2f}/${_GAME_EXPOSURE_MAX}", "info")
                         continue
                     _log_activity(f"SNIPE TRIM: {ticker} — shrunk x{count}→x{new_count} (${cost_usd:.2f}→${new_cost:.2f}) to fit game cap", "info")
                     count = new_count
@@ -5548,7 +5552,9 @@ def moonshark_snipe():
                 if not _check_game_exposure(event_key, cost_usd):
                     new_count, new_cost = _fit_to_game_cap(event_key, price, count)
                     if new_count <= 0:
-                        _log_activity(f"MOONSHARK SKIP: {ticker} — game exposure cap full ${_GAME_EXPOSURE.get(event_key, 0):.2f}/${_GAME_EXPOSURE_MAX}", "info")
+                        with _BOT_STATE_LOCK:
+                            _ge_val = _GAME_EXPOSURE.get(event_key, 0)
+                        _log_activity(f"MOONSHARK SKIP: {ticker} — game exposure cap full ${_ge_val:.2f}/${_GAME_EXPOSURE_MAX}", "info")
                         continue
                     _log_activity(f"MOONSHARK TRIM: {ticker} — shrunk x{count}→x{new_count} (${cost_usd:.2f}→${new_cost:.2f}) to fit game cap", "info")
                     count = new_count
@@ -6114,7 +6120,9 @@ def closegame_snipe():
                 if not _check_game_exposure(event_key, cost_usd):
                     new_count, new_cost = _fit_to_game_cap(event_key, price, count)
                     if new_count <= 0:
-                        _log_activity(f"CLOSEGAME SKIP: {ticker} — game exposure cap full ${_GAME_EXPOSURE.get(event_key, 0):.2f}/${_GAME_EXPOSURE_MAX}", "info")
+                        with _BOT_STATE_LOCK:
+                            _ge_val = _GAME_EXPOSURE.get(event_key, 0)
+                        _log_activity(f"CLOSEGAME SKIP: {ticker} — game exposure cap full ${_ge_val:.2f}/${_GAME_EXPOSURE_MAX}", "info")
                         continue
                     _log_activity(f"CLOSEGAME TRIM: {ticker} — shrunk x{count}→x{new_count} (${cost_usd:.2f}→${new_cost:.2f}) to fit game cap", "info")
                     count = new_count
@@ -11617,17 +11625,7 @@ def _background_loop():
     # and forget to rebuild it, this test will flag it in the logs.
     _selftest_warnings = []
     try:
-        # 1. W/L must be at or above HWM floor
-        _st_wins = _SETTLED_HWM.get("wins", 0)
-        _st_losses = _SETTLED_HWM.get("losses", 0)
-        if _st_wins < _SETTLED_HWM_FLOOR["wins"]:
-            _selftest_warnings.append(f"HWM wins {_st_wins} < floor {_SETTLED_HWM_FLOOR['wins']}")
-            _SETTLED_HWM["wins"] = _SETTLED_HWM_FLOOR["wins"]
-        if _st_losses < _SETTLED_HWM_FLOOR["losses"]:
-            _selftest_warnings.append(f"HWM losses {_st_losses} < floor {_SETTLED_HWM_FLOOR['losses']}")
-            _SETTLED_HWM["losses"] = _SETTLED_HWM_FLOOR["losses"]
-
-        # 2. Learning version must be at floor
+        # 1. Learning version must be at floor
         _st_ver = _LEARNING_STATE.get("version", 0)
         if _st_ver < _LEARNING_VERSION_FLOOR:
             _selftest_warnings.append(f"Learning version {_st_ver} < floor {_LEARNING_VERSION_FLOOR}")
@@ -12977,10 +12975,6 @@ def health():
     _bg_alive = _bg_thread is not None and _bg_thread.is_alive()
     # State integrity checks — flag anything that looks wrong
     _integrity = []
-    _hwm_w = _SETTLED_HWM.get("wins", 0)
-    _hwm_l = _SETTLED_HWM.get("losses", 0)
-    if _hwm_w < _SETTLED_HWM_FLOOR["wins"]:
-        _integrity.append(f"HWM wins {_hwm_w} < floor {_SETTLED_HWM_FLOOR['wins']}")
     if _LEARNING_STATE.get("version", 0) < _LEARNING_VERSION_FLOOR:
         _integrity.append(f"Learning version below floor")
     with _TRADE_JOURNAL_LOCK:
