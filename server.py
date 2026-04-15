@@ -540,6 +540,8 @@ def _save_state():
             "paper_trades": _paper_for_save,
             # Persist bot enabled state so kill switch survives deploys
             "bot_enabled": BOT_CONFIG.get("enabled", True),
+            # Drawdown circuit breaker state — must survive deploys
+            "drawdown_today": dict(_DRAWDOWN_TODAY),
             # Timestamp for date-check on load
             "save_date": datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d"),
         }
@@ -614,6 +616,12 @@ def _load_state():
             BOT_STATE["misc_daily_spent"] = data.get("misc_daily_spent", 0.0)
             # Restore manual trades for same-day
             BOT_STATE["manual_trades_today"] = data.get("manual_trades_today", [])
+            # Restore drawdown circuit breaker for same-day
+            saved_dd = data.get("drawdown_today", {})
+            if saved_dd and saved_dd.get("date") == today_str:
+                with _DRAWDOWN_LOCK:
+                    _DRAWDOWN_TODAY.update(saved_dd)
+                print(f"[STATE] Restored drawdown: level={_DRAWDOWN_TODAY['level']}, pnl=${_DRAWDOWN_TODAY['realized_pnl']:.2f}")
             # Restore per-game exposure for same-day
             saved_exposure = data.get("game_exposure", {})
             if saved_exposure:
@@ -3146,7 +3154,7 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
                 "side": side,
                 "type": "limit",
                 "count": count_int,
-                "client_order_id": str(uuid.uuid4()),
+                "client_order_id": payload["client_order_id"],  # reuse to prevent duplicate orders
                 "time_in_force": "immediate_or_cancel",
             }
             if side == "yes":
@@ -3215,7 +3223,7 @@ def sell_kalshi_position(ticker, side, price_cents, count=1, resting=False):
         "action": "sell",
         "side": side,
         "type": "limit",
-        "count_fp": f"{int(count)}.00",
+        "count": max(1, int(count)),
         "client_order_id": str(uuid.uuid4()),
         "time_in_force": tif,
     }
@@ -3733,6 +3741,15 @@ def run_bot_scan():
 
     # Daily reset
     if BOT_STATE["trade_date"] != today:
+        # Capture yesterday's stats BEFORE reset for Discord summary
+        _yesterday_ms_trades = len(BOT_STATE.get("moonshark_trades_today", []))
+        _yesterday_cg_trades = len(BOT_STATE.get("closegame_trades_today", []))
+        _yesterday_sn_trades = len(BOT_STATE.get("snipe_trades_today", []))
+        _yesterday_ms_spent = BOT_STATE.get("moonshark_daily_spent", 0)
+        _yesterday_cg_spent = BOT_STATE.get("closegame_daily_spent", 0)
+        _yesterday_sn_spent = BOT_STATE.get("snipe_daily_spent", 0)
+        _yesterday_pnl = _PORTFOLIO_CACHE.get("data", {}).get("total_realized_usd", 0)
+
         BOT_STATE["trade_date"] = today
         BOT_STATE["trades_today"] = []
         BOT_STATE["daily_spent_usd"] = 0.0
@@ -3772,18 +3789,14 @@ def run_bot_scan():
         with _BOT_STATE_LOCK:
             _GAME_EXPOSURE.clear()
         _log_activity("Daily reset — new trading day started")
-        # Send daily summary to Discord
+        # Send daily summary to Discord (using pre-reset values)
         try:
-            ms_trades = len(BOT_STATE.get("moonshark_trades_today", []))
-            cg_trades = len(BOT_STATE.get("closegame_trades_today", []))
-            ms_spent = BOT_STATE.get("moonshark_daily_spent", 0)
-            cg_spent = BOT_STATE.get("closegame_daily_spent", 0)
-            total_pnl = _PORTFOLIO_CACHE.get("data", {}).get("total_realized_usd", 0)
             _send_discord(
                 f"📊 **Daily Summary**\n"
-                f"MoonShark: {ms_trades} trades (${ms_spent:.2f})\n"
-                f"CloseGame: {cg_trades} trades (${cg_spent:.2f})\n"
-                f"Total P&L: ${total_pnl:+.2f}",
+                f"Sniper: {_yesterday_sn_trades} trades (${_yesterday_sn_spent:.2f})\n"
+                f"MoonShark: {_yesterday_ms_trades} trades (${_yesterday_ms_spent:.2f})\n"
+                f"CloseGame: {_yesterday_cg_trades} trades (${_yesterday_cg_spent:.2f})\n"
+                f"Total P&L: ${_yesterday_pnl:+.2f}",
                 0x7a7aff
             )
         except Exception:
@@ -7241,9 +7254,8 @@ def goalie_pulled_snipe():
         _gl_win_prob = best["our_prob"]
         _gl_payout = (100 - price) / 100.0   # dollars won per contract if win
         _gl_cost = price / 100.0              # dollars risked per contract
-        _gl_ev = _gl_win_prob * _gl_payout - (1 - _gl_win_prob) * _gl_cost
-        _gl_fee = 0.07 * _gl_win_prob * _gl_payout  # expected fee on wins
-        _gl_ev_after_fees = _gl_ev - _gl_fee
+        # EV after 7% fee on winnings: fee reduces payout, not a separate subtraction
+        _gl_ev_after_fees = _gl_win_prob * _gl_payout * 0.93 - (1 - _gl_win_prob) * _gl_cost
         if _gl_ev_after_fees <= 0:
             _log_activity(f"GOALIE SKIP {ticker}: negative EV after fees ({_gl_ev_after_fees:.1f}c)", "info")
             continue
@@ -10889,7 +10901,7 @@ def check_settlements_and_reinvest():
             elif _settle_result == "no":
                 _closing_price = 3   # NO settled → YES price ≈3c at close
             else:
-                # Try to infer from realized P&L direction + side
+                # Try to infer market result from realized P&L direction + side
                 _pos_side = ""
                 _avg_yes = float(str(pos.get("average_yes_price_dollars") or pos.get("average_yes_price") or 0))
                 _avg_no = float(str(pos.get("average_no_price_dollars") or pos.get("average_no_price") or 0))
@@ -10898,10 +10910,15 @@ def check_settlements_and_reinvest():
                 elif _avg_no > 0:
                     _pos_side = "no"
                 if _pos_side:
-                    # If YES side won → result was YES (97c), lost → NO (3c)
-                    _closing_price = 97 if won else 3
-                    if _pos_side == "no":
-                        _closing_price = 100 - _closing_price  # flip for NO side
+                    # Infer market result from side + win/loss:
+                    # YES side won → market resolved YES (closing ~97c)
+                    # YES side lost → market resolved NO (closing ~3c)
+                    # NO side won → market resolved NO (closing ~3c)
+                    # NO side lost → market resolved YES (closing ~97c)
+                    if _pos_side == "yes":
+                        _closing_price = 97 if won else 3
+                    else:
+                        _closing_price = 3 if won else 97
             # Track in trade journal for pattern analysis
             _journal_settle(ticker, won, pnl_usd, closing_price_cents=_closing_price)
             # Update drawdown circuit breaker
