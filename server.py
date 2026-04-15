@@ -21494,7 +21494,7 @@ a:hover { color: #7da5f5; }
   <button class="tab" onclick="switchTab('positions')">Dashboard</button>
   <button class="tab" onclick="switchTab('brain')" style="color:#00d4ff">&#129504; Brain</button>
   <button class="tab" onclick="switchTab('trends')" style="color:#e040fb">Trends</button>
-  <button class="tab" onclick="switchTab('paper')" style="color:#00dc5a">&#128196; Paper</button>
+  <button class="tab" onclick="switchTab('paper')" style="color:#00dc5a">&#128196; Paper <span id="paper-tab-count" style="background:#1a1a2e;color:#00d4ff;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:2px"></span></button>
   <!-- MoonShark tab removed -->
 </div>
 
@@ -25949,12 +25949,13 @@ async function loadPaperTrades(force) {
       verdictEl.textContent = data.message;
       verdictEl.style.color = '#888';
     }
-    // Tracking counter (header area)
+    // Tracking counter (header area + tab badge)
     var _ptCount = data.total || 0;
     var _ptPending = data.pending || 0;
     var _ptSettled = data.settled || 0;
     _setText('paper-tracking-count', _ptCount);
     _setText('paper-tracking-detail', _ptSettled + ' settled / ' + _ptPending + ' pending');
+    _setText('paper-tab-count', _ptCount > 0 ? _ptCount : '');
     // Stats
     document.getElementById('paper-total').textContent = _ptCount;
     var wr = data.win_rate;
