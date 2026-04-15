@@ -951,8 +951,13 @@ def _hydrate_from_kalshi():
                     _EVENTS_BET_TODAY.add("-".join(parts[:2]))
         # Rebuild paper trades from today's Kalshi fills so the Paper tab
         # has data even after a Railway deploy (state file wipe).
-        # Only backfill if _PAPER_TRADES is empty (don't duplicate if state survived).
-        if not _PAPER_TRADES and today_trades:
+        # Backfill if no paper trades exist from TODAY (old entries from
+        # previous days don't count — they won't cover today's bets).
+        _today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+        _has_today_paper = any(
+            (_today_str in (p.get("entry_time", "") or "")) for p in _PAPER_TRADES
+        )
+        if not _has_today_paper and today_trades:
             _paper_rebuilt = 0
             for _ht in today_trades:
                 _ht_ticker = _ht.get("ticker", "")
