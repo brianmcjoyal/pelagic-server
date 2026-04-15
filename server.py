@@ -23909,6 +23909,16 @@ function filterPerfData() {
       var d = new Date(p.ts);
       return !isNaN(d.getTime()) && d.getTime() >= cutMs;
     });
+    // If filter returns <2 points (e.g. right after deploy), prepend the last
+    // data point before the cutoff as an anchor so the chart still renders
+    if (pts.length < 2) {
+      var anchor = null;
+      for (var i = _perfChartData.length - 1; i >= 0; i--) {
+        var d = new Date(_perfChartData[i].ts);
+        if (!isNaN(d.getTime()) && d.getTime() < cutMs) { anchor = _perfChartData[i]; break; }
+      }
+      if (anchor) pts.unshift(anchor);
+    }
   }
   return _smoothPerfPoints(pts);
 }
