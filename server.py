@@ -1053,21 +1053,15 @@ def _seed_perf_history_from_fills():
     """
     import requests as _req
 
-    # Skip if we already have multi-day history (10+ points across 2+ distinct dates)
+    # Skip if history was already seeded by THIS version (v2 = actual P&L data).
+    # Old interpolated data (v1) has a "seed_version" missing — always re-seed those.
+    _SEED_VERSION = 2
     with _PERF_HISTORY_LOCK:
         _existing_count = len(_PERF_HISTORY)
-    if _existing_count >= 10:
-        try:
-            _dates_in_history = set()
-            for _p in _PERF_HISTORY[:200]:
-                _d = _p.get("ts", "")[:10]
-                if _d:
-                    _dates_in_history.add(_d)
-            if len(_dates_in_history) >= 2:
-                print(f"[PERF-SEED] Already have {_existing_count} pts across {len(_dates_in_history)} dates, skipping")
-                return
-        except Exception:
-            pass
+        _has_version = any(p.get("seed_version") == _SEED_VERSION for p in _PERF_HISTORY[:5])
+    if _existing_count >= 10 and _has_version:
+        print(f"[PERF-SEED] Already seeded with v{_SEED_VERSION} ({_existing_count} pts), skipping")
+        return
 
     print(f"[PERF-SEED] Starting backfill (current history: {_existing_count} pts)...")
 
@@ -1193,11 +1187,12 @@ def _seed_perf_history_from_fills():
         _d += datetime.timedelta(days=1)
 
     historical_points = []
-    # Day before first trade = starting balance
+    # Day before first trade = starting balance (tagged with seed version)
     historical_points.append({
         "ts": "2026-03-30T20:00:00-07:00",
         "value": DAY1_VALUE,
         "cash": DAY1_VALUE,
+        "seed_version": _SEED_VERSION,
     })
 
     cumulative_pnl = 0.0
