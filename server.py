@@ -21954,7 +21954,17 @@ a:hover { color: #7da5f5; }
       <div style="color:#00dc5a;font-size:18px;font-weight:800;letter-spacing:0.5px">&#128196; Paper Trading</div>
       <div style="color:#666;font-size:10px;margin-top:2px">Proving edge with zero risk — ESPN latency signal</div>
     </div>
-    <button class="refresh-btn" onclick="loadPaperTrades(true)">Refresh</button>
+    <div style="display:flex;align-items:center;gap:12px">
+      <div id="paper-tracker" style="background:#1a1a2e;border:1px solid #333;border-radius:8px;padding:8px 14px;text-align:right">
+        <div style="color:#666;font-size:9px;text-transform:uppercase;letter-spacing:0.5px">Tracking</div>
+        <div style="display:flex;align-items:baseline;gap:4px;justify-content:flex-end">
+          <span id="paper-tracking-count" style="font-size:22px;font-weight:800;color:#00d4ff">--</span>
+          <span style="color:#666;font-size:10px">trades</span>
+        </div>
+        <div id="paper-tracking-detail" style="color:#555;font-size:9px;margin-top:2px">--</div>
+      </div>
+      <button class="refresh-btn" onclick="loadPaperTrades(true)">Refresh</button>
+    </div>
   </div>
 
   <!-- Verdict Banner -->
@@ -25939,8 +25949,14 @@ async function loadPaperTrades(force) {
       verdictEl.textContent = data.message;
       verdictEl.style.color = '#888';
     }
+    // Tracking counter (header area)
+    var _ptCount = data.total || 0;
+    var _ptPending = data.pending || 0;
+    var _ptSettled = data.settled || 0;
+    _setText('paper-tracking-count', _ptCount);
+    _setText('paper-tracking-detail', _ptSettled + ' settled / ' + _ptPending + ' pending');
     // Stats
-    document.getElementById('paper-total').textContent = data.total || 0;
+    document.getElementById('paper-total').textContent = _ptCount;
     var wr = data.win_rate;
     var wrEl = document.getElementById('paper-winrate');
     wrEl.textContent = wr !== undefined ? wr + '%' : '--';
@@ -26750,7 +26766,7 @@ setTimeout(function() {
 // FAST (10s): live status, activity feed, today's bets — changes frequently
 setInterval(() => { loadStatus(); loadActivity(); loadBetsFeed(); loadPortfolio(); }, 10000);
 // MEDIUM (30s): positions, trades, closing soon — changes with market activity
-setInterval(() => { loadPositions(); loadTrades(); loadClosingSoon(); loadTopPicks(); loadTodayPicks(); checkNotifications(); loadDailyHighlights(); }, 30000);
+setInterval(() => { loadPositions(); loadTrades(); loadClosingSoon(); loadTopPicks(); loadTodayPicks(); checkNotifications(); loadDailyHighlights(); loadPaperTrades(); }, 30000);
 // SLOW (60s): settled stats, perf history, analytics — expensive + rarely changes
 setInterval(() => { loadSettled(); loadPerfHistory(); loadPerformance(); loadTicker(); loadSeventyFivers(); loadQuantPicks(); }, 60000);
 
