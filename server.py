@@ -477,7 +477,7 @@ _LEARNING_STATE_LOCK = _threading.Lock()
 
 # Paper trading — declared early so _load_state() can restore them
 _PAPER_TRADES = []       # list of paper trade dicts
-_PAPER_TRADES_MAX = 500  # keep last 500
+_PAPER_TRADES_MAX = 5000  # keep 30+ days of paper trades for edge analysis
 _PAPER_SEEN = set()      # tickers already paper-traded this cycle (dedup)
 _PAPER_COOLDOWN = {}     # ticker -> timestamp of last paper trade (avoid spam)
 
@@ -11769,6 +11769,7 @@ def _background_loop():
             try:
                 _paper_trade_sniper()
                 _paper_trade_update()
+                _save_state()  # persist CLV updates and settlement results
             except Exception as _pe:
                 print(f"[PAPER] Error: {_pe}")
 
