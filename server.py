@@ -226,10 +226,9 @@ def _price_velocity(ticker, window_sec=180):
         return newest - oldest
 _PERF_HISTORY = []  # [{ts: ISO string, value: portfolio_value_usd, cash: balance_usd}]
 _PERF_HISTORY_MAX = 5000  # keep ~5000 points (~20 hours at 15s intervals, or many days of hourly)
-# High-water mark for W/L counts — HARD-CODED FLOOR from verified data (2026-04-14).
-# Kalshi prunes old settled positions and Railway wipes state on deploy, so
-# without a hard floor the counts drop.  These values can only go UP, never down.
-_SETTLED_HWM_FLOOR = {"wins": 242, "losses": 170, "total_pnl": 173.57}
+# High-water mark tracking (no artificial floor — shows REAL Kalshi data).
+# Previous floor of 242W/170L was masking actual 4W/50L performance.
+_SETTLED_HWM_FLOOR = {"wins": 0, "losses": 0, "total_pnl": 0.0}
 _SETTLED_HWM = dict(_SETTLED_HWM_FLOOR)
 
 # ---------------------------------------------------------------------------
@@ -530,7 +529,7 @@ def _save_state():
             # Learning engine state
             "learning_state": _LEARNING_STATE,
             # Per-game exposure tracking
-            "game_exposure": _GAME_EXPOSURE,
+            "game_exposure": dict(_GAME_EXPOSURE),  # snapshot under save lock
             # Performance history for line chart (keep last _PERF_HISTORY_MAX)
             "perf_history": _perf_for_save,
             # High-water mark for W/L counts — persists across restarts
@@ -616,11 +615,13 @@ def _load_state():
             # Restore per-game exposure for same-day
             saved_exposure = data.get("game_exposure", {})
             if saved_exposure:
-                _GAME_EXPOSURE.clear()
-                _GAME_EXPOSURE.update(saved_exposure)
+                with _BOT_STATE_LOCK:
+                    _GAME_EXPOSURE.clear()
+                    _GAME_EXPOSURE.update(saved_exposure)
         else:
             # New day — reset all daily counters
-            _GAME_EXPOSURE.clear()
+            with _BOT_STATE_LOCK:
+                _GAME_EXPOSURE.clear()
             BOT_STATE["trades_today"] = []
             BOT_STATE["daily_spent_usd"] = 0.0
             BOT_STATE["trade_date"] = today_str
@@ -1486,6 +1487,27 @@ def _rebuild_journal_from_kalshi():
             created = trade_rec.get("timestamp", "")
             close_time = title_map.get(ticker, {}).get("close_time", "")
 
+            # Detect sport from ticker prefix (not hardcoded "other")
+            _rebuild_sport = _sport_from_ticker(ticker) or cat or "other"
+
+            # Compute CLV from result: won → closing ~97c, lost → closing ~3c
+            _rebuild_clv = None
+            _rebuild_result = "win" if pnl_usd > 0.005 else ("loss" if pnl_usd < -0.005 else "even")
+            if _rebuild_result == "win" and entry_cents:
+                _rebuild_clv = 97 - entry_cents if side != "no" else entry_cents - 3
+            elif _rebuild_result == "loss" and entry_cents:
+                _rebuild_clv = 3 - entry_cents if side != "no" else entry_cents - 97
+
+            # Loss post-mortem category (best-effort without MTM data)
+            _rebuild_loss_cat = None
+            if _rebuild_result == "loss":
+                if entry_cents and entry_cents <= 15:
+                    _rebuild_loss_cat = "longshot_miss"   # deep longshot that missed
+                elif entry_cents and entry_cents >= 75:
+                    _rebuild_loss_cat = "favorite_upset"  # heavy favorite that lost
+                else:
+                    _rebuild_loss_cat = "unknown"          # no MTM data to diagnose further
+
             journal_entry = {
                 "ticker": ticker,
                 "title": title,
@@ -1495,20 +1517,24 @@ def _rebuild_journal_from_kalshi():
                 "cost_usd": round(cost_usd, 2),
                 "strategy": strategy,
                 "category": cat,
-                "sport_type": "other",
+                "sport_type": _rebuild_sport,
                 "is_live": False,
                 "volatility": 0,
                 "entry_time": created or close_time or "",
                 "entry_hour": _extract_hour_from_timestamp(created or close_time or ""),
                 "entry_day": "",
                 "entry_date": (created or "")[:10] if created else "",
-                "result": "win" if pnl_usd > 0.005 else ("loss" if pnl_usd < -0.005 else "even"),
+                "result": _rebuild_result,
                 "pnl_usd": round(pnl_usd, 2),
                 "settlement_time": close_time or "",
                 "hold_duration_mins": None,
                 "price_at_entry": entry_cents,
                 "bot_version": bot_version,
                 "source": "kalshi_rebuild",
+                "clv_cents": _rebuild_clv,
+                "clv_entry_price": entry_cents,
+                "clv_closing_price": 97 if _rebuild_result == "win" else (3 if _rebuild_result == "loss" else None),
+                "loss_category": _rebuild_loss_cat,
             }
             with _TRADE_JOURNAL_LOCK:
                 _TRADE_JOURNAL.append(journal_entry)
@@ -3081,13 +3107,13 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
         "type": "limit",
         "count": count_int,
         "client_order_id": str(uuid.uuid4()),
-        "time_in_force": "ioc",
+        "time_in_force": "immediate_or_cancel",
     }
-    # Set price field for the chosen side
+    # Set price field using v2 dollar-string format (avoids retry path)
     if side == "yes":
-        payload["yes_price"] = fill_price  # cents as integer
+        payload["yes_price_dollars"] = price_dollars
     else:
-        payload["no_price"] = fill_price   # cents as integer
+        payload["no_price_dollars"] = price_dollars
 
     try:
         print(f"[ORDER] {action.upper()} {side} {ticker} @ {fill_price}c (ask={price_cents}c) x{count_int}")
@@ -3171,8 +3197,9 @@ def sell_kalshi_position(ticker, side, price_cents, count=1, resting=False):
         return {"error": "No API key"}
 
     # If resting and we already have a resting order for this ticker, skip
-    if resting and ticker in _resting_sells:
-        return {"error": "Resting sell already exists", "skipped": True}
+    with _RESTING_SELLS_LOCK:
+        if resting and ticker in _resting_sells:
+            return {"error": "Resting sell already exists", "skipped": True}
 
     price_dollars = f"{price_cents / 100:.2f}"
     tif = "gtc" if resting else "immediate_or_cancel"
@@ -3221,8 +3248,9 @@ def _place_take_profit(ticker, side, entry_price, count, strategy="", game_info=
     """
     if entry_price >= 80:
         return  # near-settlement, just let it settle
-    if ticker in _resting_sells:
-        return  # already have a resting sell
+    with _RESTING_SELLS_LOCK:
+        if ticker in _resting_sells:
+            return  # already have a resting sell
 
     # Dynamic TP based on game stage
     _tp_offset = 20  # default for longshots
@@ -3244,7 +3272,8 @@ def _place_take_profit(ticker, side, entry_price, count, strategy="", game_info=
     try:
         result = sell_kalshi_position(ticker, side, take_profit_price, count, resting=True)
         if "error" not in result or result.get("skipped"):
-            _resting_sells.add(ticker)
+            with _RESTING_SELLS_LOCK:
+                _resting_sells.add(ticker)
             _log_activity(
                 f"📋 TAKE-PROFIT set: {ticker} @ {take_profit_price}c (entry={entry_price}c, +{take_profit_price - entry_price}c) [{strategy}]",
                 "info"
@@ -3668,10 +3697,13 @@ def auto_exit_check():
                 print(f"[AUTO-EXIT] {action}: {ticker} FILLED {filled}/{count} at {sell_price}c (${pnl_usd:+.2f})")
             elif success and filled == 0:
                 # No instant fill — place a resting GTC order so it sits on the book
-                if ticker not in _resting_sells:
+                with _RESTING_SELLS_LOCK:
+                    _already_resting = ticker in _resting_sells
+                if not _already_resting:
                     resting_result = sell_kalshi_position(ticker, side, sell_price, count, resting=True)
                     if "error" not in resting_result:
-                        _resting_sells.add(ticker)
+                        with _RESTING_SELLS_LOCK:
+                            _resting_sells.add(ticker)
                         _log_activity(f"Auto-exit: {ticker} — placed resting sell at {sell_price}c (waiting for buyer)", "info")
                         print(f"[AUTO-EXIT] {action}: {ticker} — resting sell placed at {sell_price}c")
                     else:
@@ -3725,10 +3757,13 @@ def run_bot_scan():
         _price_history.clear()
         _price_move_history.clear()
         _known_fill_ids.clear()
-        _resting_sells.clear()
+        with _RESTING_SELLS_LOCK:
+            _resting_sells.clear()
         _orderbook_cache.clear()
-        _position_high_water.clear()
-        _GAME_EXPOSURE.clear()
+        with _POSITION_HWM_LOCK:
+            _position_high_water.clear()
+        with _BOT_STATE_LOCK:
+            _GAME_EXPOSURE.clear()
         _log_activity("Daily reset — new trading day started")
         # Send daily summary to Discord
         try:
@@ -3833,6 +3868,9 @@ _PERF_HISTORY_LOCK = _threading.Lock()   # protects _PERF_HISTORY from concurren
 _STATE_FILE_LOCK = _threading.Lock()     # protects _save_state() from concurrent writes (bg thread + request handlers)
 _PAPER_TRADES_LOCK = _threading.Lock()   # protects _PAPER_TRADES from concurrent bg thread write + Flask read
 _CATEGORY_STATS_LOCK = _threading.Lock() # protects _CATEGORY_STATS from concurrent read/write
+_RESTING_SELLS_LOCK = _threading.Lock()  # protects _resting_sells from concurrent bg thread + exit thread races
+_REENTRY_LOCK = _threading.Lock()        # protects _REENTRY_COOLDOWN from concurrent read/write
+_POSITION_HWM_LOCK = _threading.Lock()   # protects _position_high_water from concurrent read/write
 _EVENTS_BET_TODAY = set()  # shared across all strategies
 _similarity_local = _threading.local()
 
@@ -3844,23 +3882,26 @@ _BALANCE_CACHE_LOCK = _threading.Lock()
 
 def _get_cached_balance(max_age=10):
     """Get Kalshi balance with caching to avoid redundant API calls within a cycle.
-    Thread-safe — prevents race conditions where multiple strategies read stale balance."""
+    Thread-safe — uses double-check pattern to avoid holding lock during HTTP I/O."""
     import time as _t
+    now = _t.time()
     with _BALANCE_CACHE_LOCK:
-        now = _t.time()
         if now - _balance_cache["ts"] < max_age and _balance_cache["balance"] > 0:
             return _balance_cache["balance"]
-        try:
-            bal_h = signed_headers("GET", "/portfolio/balance")
-            bal_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
-                                 headers=bal_h, timeout=TIMEOUT)
-            if bal_r.ok:
-                bal = bal_r.json().get("balance", 0) / 100
+    # Fetch OUTSIDE the lock so other threads aren't blocked during I/O
+    try:
+        bal_h = signed_headers("GET", "/portfolio/balance")
+        bal_r = requests.get(KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/balance",
+                             headers=bal_h, timeout=TIMEOUT)
+        if bal_r.ok:
+            bal = bal_r.json().get("balance", 0) / 100
+            with _BALANCE_CACHE_LOCK:
                 _balance_cache["balance"] = bal
-                _balance_cache["ts"] = now
-                return bal
-        except Exception:
-            pass
+                _balance_cache["ts"] = _t.time()
+            return bal
+    except Exception:
+        pass
+    with _BALANCE_CACHE_LOCK:
         return _balance_cache["balance"]  # return stale if fetch fails
 _EVENTS_BET_DATE = None
 
@@ -3906,20 +3947,29 @@ def _fit_to_game_cap(event_key, price_cents, count):
 
     Returns (new_count, new_cost_usd). If no room at all (< $1), returns (0, 0).
     This replaces the "skip" behavior that was killing otherwise-good trades.
+    Now atomically reserves the trimmed amount to prevent exposure bypass.
     """
     with _BOT_STATE_LOCK:
         current = _GAME_EXPOSURE.get(event_key, 0.0)
-    remaining = _GAME_EXPOSURE_MAX - current
-    if remaining < 1.0:
-        return (0, 0.0)
-    if price_cents <= 0:
-        return (0, 0.0)
-    max_count = int((remaining * 100.0) / price_cents)
-    if max_count <= 0:
-        return (0, 0.0)
-    new_count = min(count, max_count)
-    new_cost = (price_cents * new_count) / 100.0
+        remaining = _GAME_EXPOSURE_MAX - current
+        if remaining < 1.0:
+            return (0, 0.0)
+        if price_cents <= 0:
+            return (0, 0.0)
+        max_count = int((remaining * 100.0) / price_cents)
+        if max_count <= 0:
+            return (0, 0.0)
+        new_count = min(count, max_count)
+        new_cost = (price_cents * new_count) / 100.0
+        # Atomically reserve the trimmed amount (same as _check_game_exposure)
+        _GAME_EXPOSURE[event_key] = current + new_cost
     return (new_count, new_cost)
+
+
+def _snap_game_exposure():
+    """Thread-safe snapshot of _GAME_EXPOSURE for Flask endpoints."""
+    with _BOT_STATE_LOCK:
+        return dict(_GAME_EXPOSURE)
 
 
 # ---------------------------------------------------------------------------
@@ -4437,6 +4487,7 @@ def live_game_snipe():
                 # Compare ESPN's model to Kalshi price before betting
                 _snipe_espn_prob = None
                 _snipe_our_prob = None  # will be set if ESPN data available
+                _snipe_league = None  # initialized here to avoid NameError if no event_id
                 implied_prob_snipe = price / 100.0
                 _record_price(ticker, price)  # feed velocity tracker
                 if _snipe_game and _snipe_game.get("event_id"):
@@ -7131,7 +7182,8 @@ def goalie_pulled_snipe():
         # Build uppercase dedup sets for case-insensitive matching
         _existing_upper = {t.upper() for t in existing_tickers}
         _events_upper = {e.upper() for e in existing_events}
-        _bet_today_upper = {e.upper() for e in _EVENTS_BET_TODAY}
+        with _EVENT_LOCK:
+            _bet_today_upper = {e.upper() for e in _EVENTS_BET_TODAY}
         for mkt in markets:
             _raw_ticker = mkt.get("ticker", "") or ""
             ticker = _raw_ticker.upper()  # uppercase for matching
@@ -7886,7 +7938,9 @@ def enhanced_auto_exit():
             # Let the other half ride to settlement for max upside.
             if _cur_price >= _entry_price_exit + 12 and _exit_count >= 3 and _cur_price < 90:
                 _half_key = f"partial_{ticker}"
-                if _half_key not in _resting_sells:
+                with _RESTING_SELLS_LOCK:
+                    _half_already = _half_key in _resting_sells
+                if not _half_already:
                     _partial_count = max(1, _exit_count // 2)
                     _partial_price = max(1, _cur_price - 1)
                     try:
@@ -7903,7 +7957,8 @@ def enhanced_auto_exit():
                                 "success"
                             )
                             exits.append({"ticker": ticker, "action": "partial_exit", "filled": _pf, "pnl_usd": _ppnl})
-                            _resting_sells.add(_half_key)
+                            with _RESTING_SELLS_LOCK:
+                                _resting_sells.add(_half_key)
                     except Exception:
                         pass
                 # Don't continue — still check profit lock below
@@ -7941,12 +7996,12 @@ def enhanced_auto_exit():
             continue
 
         # Update high water mark
-        if ticker not in _position_high_water:
-            _position_high_water[ticker] = pnl_pct
-        else:
-            _position_high_water[ticker] = max(_position_high_water[ticker], pnl_pct)
-
-        high_water = _position_high_water[ticker]
+        with _POSITION_HWM_LOCK:
+            if ticker not in _position_high_water:
+                _position_high_water[ticker] = pnl_pct
+            else:
+                _position_high_water[ticker] = max(_position_high_water[ticker], pnl_pct)
+            high_water = _position_high_water[ticker]
         side = pos["side"]
         count = pos["count"]
         current = pos.get("current_price")
@@ -8021,14 +8076,18 @@ def enhanced_auto_exit():
                 )
                 exits.append({"ticker": ticker, "action": action, "filled": filled, "pnl_usd": pnl_usd})
                 # Clean up tracking
-                if filled >= count and ticker in _position_high_water:
-                    del _position_high_water[ticker]
+                with _POSITION_HWM_LOCK:
+                    if filled >= count and ticker in _position_high_water:
+                        del _position_high_water[ticker]
             elif success and filled == 0:
                 # Place resting order
-                if ticker not in _resting_sells:
+                with _RESTING_SELLS_LOCK:
+                    _already = ticker in _resting_sells
+                if not _already:
                     resting = sell_kalshi_position(ticker, side, sell_price, sell_count, resting=True)
                     if "error" not in resting:
-                        _resting_sells.add(ticker)
+                        with _RESTING_SELLS_LOCK:
+                            _resting_sells.add(ticker)
                         _log_activity(f"🔄 {action}: {ticker} — resting sell at {sell_price}c", "info")
 
     return exits
@@ -8068,7 +8127,9 @@ def score_aware_reentry():
             continue
 
         # Cooldown: 30 min per ticker
-        if ticker in _REENTRY_COOLDOWN and now - _REENTRY_COOLDOWN[ticker] < 1800:
+        with _REENTRY_LOCK:
+            _on_cooldown = ticker in _REENTRY_COOLDOWN and now - _REENTRY_COOLDOWN[ticker] < 1800
+        if _on_cooldown:
             continue
 
         # Only re-enter if price dropped (making our edge bigger)
@@ -8142,7 +8203,8 @@ def score_aware_reentry():
                     "success"
                 )
                 reentries.append({"ticker": ticker, "filled": _filled, "cost": _actual, "edge": _current_edge})
-                _REENTRY_COOLDOWN[ticker] = now
+                with _REENTRY_LOCK:
+                    _REENTRY_COOLDOWN[ticker] = now
         except Exception:
             pass
 
@@ -9378,7 +9440,9 @@ def _watchdog_check():
                 try:
                     _et = datetime.datetime.fromisoformat(_entry_time.replace("Z", "+00:00")).replace(tzinfo=None)
                     _hours = (datetime.datetime.utcnow() - _et).total_seconds() / 3600
-                    if _hours > 24 and _ptk not in _resting_sells:
+                    with _RESTING_SELLS_LOCK:
+                        _ptk_has_resting = _ptk in _resting_sells
+                    if _hours > 24 and not _ptk_has_resting:
                         _pnl = p.get("pnl_pct", 0) or 0
                         if _pnl < -30:
                             alerts.append(f"STUCK LOSER: {_ptk} held {_hours:.0f}h, P&L={_pnl}% — no exit order")
@@ -9511,13 +9575,17 @@ def _watchdog_check():
         pass
 
     # CHECK 15: GATEWAY INTEGRITY — verify place_kalshi_order actually calls the gateway
-    # by checking that checked count grows when trades are placed
+    # by checking that checked count grows when trades are placed.
+    # NOTE: Only count trades placed TODAY (not all_trades which includes historical
+    # Kalshi fills rebuilt on deploy). _PRETRADE_STATS resets on deploy, so we
+    # must compare against the same time window.
     try:
-        _trades_today = len(BOT_STATE.get("all_trades", []))
+        _today_str_gw = datetime.datetime.now(_pacific_tz).strftime("%Y-%m-%d")
+        _trades_placed_today = len(BOT_STATE.get("trades_today", []))  # actual today, not all-time
         _gateway_checked = _PRETRADE_STATS.get("checked", 0)
-        # If we've placed trades but gateway shows 0 checks, something bypassed it
-        if _trades_today > 5 and _gateway_checked == 0:
-            alerts.append(f"⚠️ GATEWAY BYPASS: {_trades_today} trades today but gateway checked 0 — trades may be bypassing safety checks")
+        # If we've placed trades today but gateway shows 0 checks, something bypassed it
+        if _trades_placed_today > 5 and _gateway_checked == 0:
+            alerts.append(f"⚠️ GATEWAY BYPASS: {_trades_placed_today} trades today but gateway checked 0 — trades may be bypassing safety checks")
     except Exception:
         pass
 
@@ -11527,9 +11595,12 @@ def _background_loop():
                     _ro_ticker = _ro.get("ticker", "")
                     _ro_action = _ro.get("action", "")
                     if _ro_ticker and _ro_action == "sell":
-                        _resting_sells.add(_ro_ticker)
-                if _resting_sells:
-                    print(f"[STARTUP] Rebuilt {len(_resting_sells)} resting sell orders from Kalshi")
+                        with _RESTING_SELLS_LOCK:
+                            _resting_sells.add(_ro_ticker)
+                with _RESTING_SELLS_LOCK:
+                    _rs_count = len(_resting_sells)
+                if _rs_count > 0:
+                    print(f"[STARTUP] Rebuilt {_rs_count} resting sell orders from Kalshi")
     except Exception as e:
         print(f"[BG] Resting sells rebuild error (non-fatal): {e}")
 
@@ -13684,6 +13755,7 @@ def settled_positions():
                 "won": won,
                 "total_traded": round(actual_cost, 2),
                 "category": category,
+                "sport_type": _sport_from_ticker(ticker) or category or "other",
                 "strategy": trade_strategy,
                 "side": side,
                 "count": count,
@@ -13915,13 +13987,15 @@ def settled_positions():
                 _edge_reasons.append(f"Entry at {_avg_entry}c ({_data_source})")
 
             _game_title = _title_cache.get(_fticker, _fticker)
+            _fcat = classify_market_category(_game_title, _fticker)
             settled.append({
                 "ticker": _fticker,
                 "title": _game_title,
                 "pnl_usd": round(_game_pnl, 2),
                 "won": _game_won,
                 "total_traded": round(_game_cost, 2),
-                "category": classify_market_category(_game_title, _fticker),
+                "category": _fcat,
+                "sport_type": _sport_from_ticker(_fticker) or _fcat or "other",
                 "strategy": _trade_strategy,
                 "side": _fill_side,
                 "count": _total_count,
@@ -14131,6 +14205,7 @@ def settled_positions():
                     "won": _zp_won,
                     "total_traded": round(_zp_cost, 2),
                     "category": _zp_cat,
+                    "sport_type": _sport_from_ticker(ticker) or _zp_cat or "other",
                     "strategy": _zp_strategy,
                     "side": _zp_side,
                     "count": _zp_count,
@@ -14218,21 +14293,17 @@ def settled_positions():
         _final_pnl = round(sum(s.get("pnl_usd", 0) for s in settled if s.get("won") is not None), 2)
         _final_total = _final_wins + _final_losses
 
-        # High-water mark: W/L counts should NEVER go down.  Kalshi can prune
-        # old positions or zero out data over time; HWM protects against that.
-        if _final_wins > _SETTLED_HWM["wins"]:
+        # NOTE: HWM floor REMOVED (2026-04-14). The old floor (242W/170L) was
+        # masking real performance (actual: 4W/50L). Dashboard now shows REAL
+        # settled numbers from the Kalshi API — no artificial inflation.
+        # If Kalshi prunes very old data, we log it but don't override.
+        _hwm_total = _SETTLED_HWM.get("wins", 0) + _SETTLED_HWM.get("losses", 0)
+        if _final_total > _hwm_total:
             _SETTLED_HWM["wins"] = _final_wins
-        if _final_losses > _SETTLED_HWM["losses"]:
             _SETTLED_HWM["losses"] = _final_losses
-        if _final_pnl > _SETTLED_HWM.get("total_pnl", 0.0):
             _SETTLED_HWM["total_pnl"] = _final_pnl
-        if _final_total < (_SETTLED_HWM["wins"] + _SETTLED_HWM["losses"]):
-            # Fewer trades than HWM = Kalshi pruned data; use HWM
-            _final_wins = _SETTLED_HWM["wins"]
-            _final_losses = _SETTLED_HWM["losses"]
-            _final_pnl = _SETTLED_HWM["total_pnl"]
-            _final_total = _final_wins + _final_losses
-            print(f"[SETTLED] HWM triggered: using {_final_wins}W/{_final_losses}L (${_final_pnl:.2f}) (Kalshi returned fewer trades)")
+        elif _final_total < _hwm_total and _hwm_total > 100:
+            print(f"[SETTLED] Note: Kalshi returned {_final_total} trades vs previous {_hwm_total} — possible data pruning")
 
         print(f"[SETTLED] Final W/L from settled array: {_final_wins}W/{_final_losses}L (${_final_pnl:.2f}) from {len(settled)} settled trades")
 
@@ -14622,7 +14693,7 @@ def analytics_endpoint():
         # --- Win Rate by Sport ---
         by_sport = {}
         for t in settled:
-            sport = t.get("sport_type") or t.get("category") or "other"
+            sport = t.get("sport_type") or _sport_from_ticker(t.get("ticker", "")) or t.get("category") or "other"
             if sport not in by_sport:
                 by_sport[sport] = {"wins": 0, "losses": 0, "pnl": 0.0, "total": 0}
             by_sport[sport]["total"] += 1
@@ -14714,7 +14785,9 @@ def analytics_endpoint():
 
         # Also include _CATEGORY_STATS for broader coverage
         cat_stats_copy = {}
-        for cat, data in _CATEGORY_STATS.items():
+        with _CATEGORY_STATS_LOCK:
+            _cat_items = list(_CATEGORY_STATS.items())
+        for cat, data in _cat_items:
             cat_stats_copy[cat] = {
                 "wins": data.get("wins", 0),
                 "losses": data.get("losses", 0),
@@ -15133,7 +15206,9 @@ def insights_endpoint():
                 "trend": "positive" if pct_used < 80 else "negative",
                 "action": "Budget resets at midnight UTC each day.",
             })
-            cat_count = len([c for c, s in _CATEGORY_STATS.items() if (s.get("wins", 0) + s.get("losses", 0)) > 0])
+            with _CATEGORY_STATS_LOCK:
+                _cat_insight_items = list(_CATEGORY_STATS.items())
+            cat_count = len([c for c, s in _cat_insight_items if (s.get("wins", 0) + s.get("losses", 0)) > 0])
             insights.append({
                 "title": "Category Learning",
                 "detail": f"Tracking performance across {cat_count} sport categories. Auto-learning adjusts bet sizes as win/loss data accumulates.",
@@ -15148,7 +15223,7 @@ def insights_endpoint():
         # 1. Best/worst performing sport
         by_sport = {}
         for t in settled:
-            sport = t.get("sport_type") or t.get("category") or "other"
+            sport = t.get("sport_type") or _sport_from_ticker(t.get("ticker", "")) or t.get("category") or "other"
             if sport not in by_sport:
                 by_sport[sport] = {"wins": 0, "losses": 0, "pnl": 0.0, "total": 0}
             by_sport[sport]["total"] += 1
@@ -16198,7 +16273,7 @@ def status():
             "momentum_tracked": len(_price_history),
         },
         "clv_stats": _get_clv_stats(),
-        "game_exposure": dict(_GAME_EXPOSURE),
+        "game_exposure": _snap_game_exposure(),
         "odds_api": {
             "configured": bool(ODDS_API_KEY),
             "last_fetch": _ODDS_API_STATS.get("last_fetch"),
@@ -16222,7 +16297,9 @@ def bot_activity():
 def category_stats():
     """Category win rate stats for auto-adjustment display."""
     stats = {}
-    for cat, data in _CATEGORY_STATS.items():
+    with _CATEGORY_STATS_LOCK:
+        _cat_items_ep = list(_CATEGORY_STATS.items())
+    for cat, data in _cat_items_ep:
         total = data["wins"] + data["losses"]
         stats[cat] = {
             "wins": data["wins"],
@@ -24660,11 +24737,10 @@ async function loadPerformance() {
       dailyPnls[day] += pnl;
     });
 
-    // USE HWM-PROTECTED NUMBERS from the endpoint, not raw client-side counts.
-    // Kalshi prunes old trades so the settled array shrinks over time.
-    // The endpoint's top-level wins/losses are protected by the hard-coded floor.
-    if (settledData.wins > wins) wins = settledData.wins;
-    if (settledData.losses > losses) losses = settledData.losses;
+    // Use REAL numbers from the endpoint — no artificial inflation.
+    // The endpoint returns actual Kalshi settled data (HWM floor removed).
+    wins = settledData.wins || wins;
+    losses = settledData.losses || losses;
     var total = wins + losses;
     var winRate = total > 0 ? (wins / total * 100) : (settledData.win_rate || 0);
     var roi = totalWagered > 0 ? (totalPnl / totalWagered * 100) : 0;
