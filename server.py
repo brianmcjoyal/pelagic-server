@@ -4833,6 +4833,8 @@ def live_game_snipe():
                             "category": classify_market_category(title, ticker),
                             "edge_reasons": _snipe_edge_reasons,
                             "conviction": conviction,
+                            "win_probability": round(_snipe_our_prob, 4) if _snipe_our_prob else None,
+                            "espn_edge": round(_snipe_our_prob - implied_prob_snipe, 4) if _snipe_our_prob else None,
                             "order_id": _snipe_order_id,
                         })
                         # Track in trade journal for pattern analysis (pass orderbook if available)
@@ -5679,6 +5681,7 @@ def moonshark_snipe():
                             "edge_reasons": _ms_edge_reasons,
                             "conviction": ms_conviction,
                             "espn_edge": round(espn_edge, 4) if espn_edge is not None else None,
+                            "win_probability": round(_ms_our_prob, 4) if _ms_our_prob else None,
                             "order_id": _ms_order_id,
                         })
                         # Track in trade journal for pattern analysis
@@ -6271,6 +6274,7 @@ def closegame_snipe():
                             "period": cg["period"],
                             "edge_reasons": _cg_edge_reasons,
                             "espn_edge": round(edge, 4) if edge else None,
+                            "win_probability": round(estimated_win_prob, 4) if estimated_win_prob else None,
                             "order_id": _cg_order_id,
                         })
                         _cg_game_info = {"home_score": cg.get("home_score"), "away_score": cg.get("away_score"), "clock": cg.get("period", ""), "state": "in", "league": cg.get("sport", "")}
@@ -22885,7 +22889,7 @@ async function loadBetsFeed() {
 
       // Compute Kelly criterion metrics for tooltip
       var _ttPrice = t.price_cents || 50;
-      var _ttWinProb = t.espn_implied || t.win_prob || (_ttPrice / 100);
+      var _ttWinProb = t.win_probability || t.espn_implied || t.win_prob || (_ttPrice / 100);
       var _ttOdds = (100 - _ttPrice) / Math.max(1, _ttPrice); // decimal odds
       var _ttKellyFrac = (_ttOdds * _ttWinProb - (1 - _ttWinProb)) / Math.max(0.01, _ttOdds);
       _ttKellyFrac = Math.max(0, _ttKellyFrac);
