@@ -23888,8 +23888,10 @@ function _smoothPerfPoints(pts) {
 
 function filterPerfData() {
   if (!_perfChartData.length) return [];
+  if (_perfChartRange === 'all') return _smoothPerfPoints(_perfChartData.slice());
+
   var now = new Date();
-  var cutoff = null;
+  var cutoff;
   if (_perfChartRange === '1h') cutoff = new Date(now - 3600000);
   else if (_perfChartRange === '6h') cutoff = new Date(now - 6 * 3600000);
   else if (_perfChartRange === '1d') {
@@ -23899,28 +23901,37 @@ function filterPerfData() {
     cutoff = new Date(now - hrsSinceMidnight * 3600000);
   }
   else if (_perfChartRange === '7d') cutoff = new Date(now - 7 * 86400000);
-  // 'all' = no cutoff
-  var pts;
-  if (!cutoff) {
-    pts = _perfChartData.slice();
-  } else {
-    var cutMs = cutoff.getTime();
-    pts = _perfChartData.filter(function(p) {
-      var d = new Date(p.ts);
-      return !isNaN(d.getTime()) && d.getTime() >= cutMs;
-    });
-    // If filter returns <2 points (e.g. right after deploy), prepend the last
-    // data point before the cutoff as an anchor so the chart still renders
-    if (pts.length < 2) {
-      var anchor = null;
-      for (var i = _perfChartData.length - 1; i >= 0; i--) {
-        var d = new Date(_perfChartData[i].ts);
-        if (!isNaN(d.getTime()) && d.getTime() < cutMs) { anchor = _perfChartData[i]; break; }
-      }
-      if (anchor) pts.unshift(anchor);
+  else return _smoothPerfPoints(_perfChartData.slice());
+
+  var cutMs = cutoff.getTime();
+
+  // Parse all timestamps once, filter by cutoff
+  var after = [];
+  var lastBefore = null;
+  for (var i = 0; i < _perfChartData.length; i++) {
+    var p = _perfChartData[i];
+    var d = new Date(p.ts);
+    if (isNaN(d.getTime())) continue;
+    var ms = d.getTime();
+    if (ms >= cutMs) {
+      after.push(p);
+    } else {
+      lastBefore = p;  // track the last point before cutoff for anchor
     }
   }
-  return _smoothPerfPoints(pts);
+
+  // Always prepend anchor (last point before cutoff) so chart has a baseline.
+  // This gives TODAY view a starting value even right after deploy.
+  if (lastBefore) {
+    after.unshift(lastBefore);
+  }
+
+  // If we still have <2 points, grab the 2 most recent points from all data
+  if (after.length < 2 && _perfChartData.length >= 2) {
+    return _smoothPerfPoints(_perfChartData.slice(-2));
+  }
+
+  return _smoothPerfPoints(after);
 }
 
 function drawPerfLineChart() {
