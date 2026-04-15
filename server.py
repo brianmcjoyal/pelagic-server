@@ -176,7 +176,11 @@ import json as _json
 import os as _os
 _DATA_DIR = "/data" if _os.path.isdir("/data") else "/tmp"
 _STATE_FILE = _os.path.join(_DATA_DIR, "tradeshark_state.json")
-print(f"[STORAGE] Using {'PERSISTENT volume' if _DATA_DIR == '/data' else 'EPHEMERAL /tmp'} at {_STATE_FILE}")
+if _DATA_DIR == "/data":
+    print(f"[STORAGE] Using PERSISTENT volume at {_STATE_FILE}")
+else:
+    print(f"[STORAGE] WARNING: Using EPHEMERAL /tmp — state will be LOST on deploy!")
+    print(f"[STORAGE] Add a Railway volume mounted at /data to fix this (see DEPLOY.md Step 5)")
 
 # Cumulative tracking — declared early so _load_state() can populate them.
 # The later sections that reference these will use the same objects (not re-assign).
@@ -552,6 +556,8 @@ def _save_state():
             "bot_enabled": BOT_CONFIG.get("enabled", True),
             # Drawdown circuit breaker state — must survive deploys
             "drawdown_today": dict(_DRAWDOWN_TODAY),
+            # Position high-water marks — trailing stop levels survive deploys
+            "position_high_water": dict(globals().get("_position_high_water", {})),
             # Timestamp for date-check on load
             "save_date": datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d"),
         }
@@ -667,6 +673,14 @@ def _load_state():
             BOT_STATE["manual_trades_today"] = []
 
         # --- Cumulative data: always restore regardless of day ---
+        # Restore position high-water marks so trailing stops survive deploys
+        saved_phw = data.get("position_high_water", {})
+        if saved_phw:
+            _phw = globals().get("_position_high_water")
+            if _phw is not None:
+                _phw.update(saved_phw)
+                print(f"[STATE] Restored {len(saved_phw)} position high-water marks")
+
         saved_journal = data.get("trade_journal", [])
         if saved_journal:
             with _TRADE_JOURNAL_LOCK:
@@ -11592,19 +11606,31 @@ def _background_loop():
             _known_fill_ids.add(t["order_id"])
     print(f"[SYNC] Seeded {len(_known_fill_ids)} known fill IDs")
 
-    # Initialize known settled positions on startup
+    # Initialize known settled positions on startup — MUST paginate all pages
+    # to prevent re-processing old settlements after 200+ trades
     try:
-        sh = signed_headers("GET", "/portfolio/positions")
-        if sh:
+        _settle_cursor = None
+        for _settle_page in range(20):  # max 20 pages = 4000 positions
+            sh = signed_headers("GET", "/portfolio/positions")
+            if not sh:
+                break
+            _settle_params = {"limit": 200, "settlement_status": "settled"}
+            if _settle_cursor:
+                _settle_params["cursor"] = _settle_cursor
             sr = requests.get(
                 KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/positions",
-                headers=sh, params={"limit": 200, "settlement_status": "settled"},
+                headers=sh, params=_settle_params,
                 timeout=TIMEOUT,
             )
-            if sr.ok:
-                for pos in sr.json().get("market_positions", []):
-                    _known_settled.add(pos.get("ticker", ""))
-                print(f"[SETTLE] Initialized {len(_known_settled)} known settled positions")
+            if not sr.ok:
+                break
+            _settle_positions = sr.json().get("market_positions", [])
+            for pos in _settle_positions:
+                _known_settled.add(pos.get("ticker", ""))
+            _settle_cursor = sr.json().get("cursor")
+            if not _settle_cursor or not _settle_positions:
+                break
+        print(f"[SETTLE] Initialized {len(_known_settled)} known settled positions (paginated)")
     except Exception:
         pass
     # Rebuild trade journal & category stats from Kalshi settled positions

@@ -63,7 +63,21 @@ Railway will keep this secret and encrypted.
 
 ---
 
-## Step 5 — Get your server URL
+## Step 5 — Add persistent storage (IMPORTANT)
+
+Without this, all trade history and settings are lost on every deploy.
+
+1. In Railway, click your service → **Settings** tab
+2. Scroll to **Volumes** → click **Add Volume**
+3. Set **Mount Path** to `/data`
+4. Click **Save** — Railway will restart your service
+
+The server automatically detects `/data` and uses it for state persistence.
+You'll see `[STORAGE] Using PERSISTENT volume` in the deploy logs.
+
+---
+
+## Step 6 — Get your server URL
 
 1. In Railway, click **Settings → Networking → Generate Domain**
 2. You'll get a URL like: `https://pelagic-server-production.up.railway.app`
@@ -72,7 +86,7 @@ Railway will keep this secret and encrypted.
 
 ---
 
-## Step 6 — Connect your HTML file
+## Step 7 — Connect your HTML file
 
 Open `prediction-market-finder.html` in a text editor.
 
