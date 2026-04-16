@@ -505,6 +505,13 @@ def _save_state():
             _paper_for_save = list(_PAPER_TRADES[-_PAPER_TRADES_MAX:])
         with _BOT_STATE_LOCK:
             _game_exposure_snap = dict(_GAME_EXPOSURE)
+        # Snapshot position high-water under lock (prevents RuntimeError during concurrent update)
+        _phw_lock = globals().get("_POSITION_HWM_LOCK")
+        if _phw_lock:
+            with _phw_lock:
+                _phw_snap = dict(globals().get("_position_high_water", {}))
+        else:
+            _phw_snap = dict(globals().get("_position_high_water", {}))
         data = {
             "all_trades": BOT_STATE["all_trades"],
             "trades_today": BOT_STATE["trades_today"],
@@ -557,7 +564,7 @@ def _save_state():
             # Drawdown circuit breaker state — must survive deploys
             "drawdown_today": dict(_DRAWDOWN_TODAY),
             # Position high-water marks — trailing stop levels survive deploys
-            "position_high_water": dict(globals().get("_position_high_water", {})),
+            "position_high_water": _phw_snap,
             # Timestamp for date-check on load
             "save_date": datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d"),
         }
@@ -2924,6 +2931,25 @@ def find_consensus_mispricings(all_markets):
 # ---------------------------------------------------------------------------
 
 _PRETRADE_STATS = {"checked": 0, "passed": 0, "blocked": 0, "reasons": {}}
+_PRETRADE_STATS_LOCK = _threading.Lock()
+
+def _pretrade_bump(key, reason=None):
+    """Atomically increment a pretrade stats counter.
+    Prevents dict-size-changed-during-iteration crashes in /health."""
+    with _PRETRADE_STATS_LOCK:
+        _PRETRADE_STATS[key] = _PRETRADE_STATS.get(key, 0) + 1
+        if reason:
+            _PRETRADE_STATS["reasons"][reason] = _PRETRADE_STATS["reasons"].get(reason, 0) + 1
+
+def _pretrade_stats_snapshot():
+    """Return a consistent snapshot of _PRETRADE_STATS for read-only use."""
+    with _PRETRADE_STATS_LOCK:
+        return {
+            "checked": _PRETRADE_STATS.get("checked", 0),
+            "passed": _PRETRADE_STATS.get("passed", 0),
+            "blocked": _PRETRADE_STATS.get("blocked", 0),
+            "reasons": dict(_PRETRADE_STATS.get("reasons", {})),
+        }
 
 def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None,
                        win_prob=None, edge=None, conviction=None):
@@ -3844,7 +3870,8 @@ def run_bot_scan():
         _volatility_scores.clear()
         _price_history.clear()
         _price_move_history.clear()
-        _known_fill_ids.clear()
+        with _KNOWN_FILL_IDS_LOCK:
+            _known_fill_ids.clear()
         with _RESTING_SELLS_LOCK:
             _resting_sells.clear()
         _orderbook_cache.clear()
@@ -6692,6 +6719,7 @@ def floor_quota_snipe():
             "strategy": "floor",
             "category": cand["mcat"],
             "espn_edge": round(edge, 4),
+            "win_probability": round(cand.get("our_prob") or 0, 4) or None,
             "edge_reasons": [f"ESPN edge +{edge:.1%}", f"cat={cand['mcat']}"],
             "conviction": 2,
             "order_id": order_data.get("order_id", ""),
@@ -7067,6 +7095,7 @@ def momentum_swing_snipe():
                 "period": period,
                 "edge_reasons": _reasons,
                 "espn_edge": round(edge, 4),
+                "win_probability": round(live_prob or 0, 4) or None,
                 "order_id": order_data.get("order_id", ""),
             })
             _oid = order_data.get("order_id", "")
@@ -7410,6 +7439,7 @@ def goalie_pulled_snipe():
             "period": period,
             "edge_reasons": _reasons,
             "espn_edge": round(edge, 4),
+            "win_probability": round((best.get("our_prob") or 0), 4) or None,
             "order_id": order_data.get("order_id", ""),
         })
         _oid = order_data.get("order_id", "")
@@ -8899,6 +8929,7 @@ def rank_by_volatility(tickers, min_score=2.0):
 
 _last_settlement_check = None
 _known_settled = set()  # tickers we already processed
+_KNOWN_SETTLED_LOCK = _threading.Lock()
 
 # Category win rate tracking — auto-adjust sizing based on what's winning
 # _CATEGORY_STATS declared early (near BOT_STATE) so _load_state() can populate it
@@ -9470,6 +9501,7 @@ def _paper_trade_stats():
 # ---------------------------------------------------------------------------
 
 _WATCHDOG_ALERTS = []  # list of active alerts
+_WATCHDOG_ALERTS_LOCK = _threading.Lock()
 
 def _watchdog_check():
     """Self-monitoring check for known bug patterns. Logs alerts when something looks wrong."""
@@ -9701,7 +9733,8 @@ def _watchdog_check():
 
     # Log alerts
     if alerts:
-        _WATCHDOG_ALERTS = [{"alert": a, "time": now_str} for a in alerts]
+        with _WATCHDOG_ALERTS_LOCK:
+            _WATCHDOG_ALERTS = [{"alert": a, "time": now_str} for a in alerts]
         for a in alerts:
             _log_activity(f"⚠️ WATCHDOG: {a}", "error")
         # Send critical alerts to Discord — send ALL alerts, not just budget/win rate
@@ -9711,7 +9744,8 @@ def _watchdog_check():
         except Exception:
             pass
     else:
-        _WATCHDOG_ALERTS = []
+        with _WATCHDOG_ALERTS_LOCK:
+            _WATCHDOG_ALERTS = []
 
     return alerts
 
@@ -10968,9 +11002,12 @@ def check_settlements_and_reinvest():
 
         for pos in settled:
             ticker = pos.get("ticker", "")
-            if ticker in _known_settled:
-                continue
-            _known_settled.add(ticker)
+            # Atomic check-then-add under lock to prevent race from two settlement
+            # callers processing the same ticker twice (e.g. bg loop + manual endpoint).
+            with _KNOWN_SETTLED_LOCK:
+                if ticker in _known_settled:
+                    continue
+                _known_settled.add(ticker)
             pnl_cents = _parse_kalshi_dollars(pos.get("realized_pnl_dollars") or pos.get("realized_pnl"))
             pnl_usd = pnl_cents / 100
 
@@ -11100,9 +11137,10 @@ def check_settlements_and_reinvest():
             return new_settlements
 
         # Cap known_settled to prevent memory bloat — keep most recent entries
-        if len(_known_settled) > 500:
-            _to_keep = set(list(_known_settled)[-300:])
-            _known_settled.intersection_update(_to_keep)
+        with _KNOWN_SETTLED_LOCK:
+            if len(_known_settled) > 500:
+                _to_keep = set(list(_known_settled)[-300:])
+                _known_settled.intersection_update(_to_keep)
 
         return []
     except Exception as e:
@@ -11366,6 +11404,7 @@ import time as _time
 
 # Track known fill order_ids so we can detect externally placed bets
 _known_fill_ids = set()
+_KNOWN_FILL_IDS_LOCK = _threading.Lock()
 
 def _sync_kalshi_fills():
     """Detect bets placed directly on kalshi.com and add them to today's feed."""
@@ -11388,7 +11427,8 @@ def _sync_kalshi_fills():
         fills = resp.json().get("fills", [])
 
         # Build set of order_ids we already track (from bot + manual trades)
-        tracked_ids = set(_known_fill_ids)  # start with globally tracked IDs
+        with _KNOWN_FILL_IDS_LOCK:
+            tracked_ids = set(_known_fill_ids)  # start with globally tracked IDs
         # Also build set of (ticker, side) pairs the bot placed today
         _bot_ticker_sides = set()
         for _tlist_name in ["snipe_trades_today", "moonshark_trades_today", "closegame_trades_today"]:
@@ -11432,10 +11472,12 @@ def _sync_kalshi_fills():
 
             # Skip if this ticker+side was already placed by the bot today
             if (ticker, side) in _bot_ticker_sides:
-                _known_fill_ids.add(order_id)
+                with _KNOWN_FILL_IDS_LOCK:
+                    _known_fill_ids.add(order_id)
                 continue
 
-            _known_fill_ids.add(order_id)
+            with _KNOWN_FILL_IDS_LOCK:
+                _known_fill_ids.add(order_id)
 
             count = 0
             try:
@@ -11736,8 +11778,9 @@ def _background_loop():
                 print(f"[SETTLE] API error {sr.status_code} on page {_settle_page+1}")
                 break
             _settle_positions = sr.json().get("market_positions", [])
-            for pos in _settle_positions:
-                _known_settled.add(pos.get("ticker", ""))
+            with _KNOWN_SETTLED_LOCK:
+                for pos in _settle_positions:
+                    _known_settled.add(pos.get("ticker", ""))
             _settle_pages += 1
             _settle_cursor = sr.json().get("cursor")
             if not _settle_cursor or not _settle_positions:
@@ -12203,137 +12246,152 @@ def _background_loop():
 _bg_thread = None
 _cg_thread_ref = None
 _learn_thread_ref = None
+# Store the actual loop functions at module level so the watchdog restart
+# branch below can reference them without NameError on any call path.
+_closegame_loop_fn = None
+_learning_loop_fn = None
+# Serialize _ensure_bg_thread across Gunicorn's 8 request threads so that
+# two concurrent requests can't race to spawn duplicate background threads.
+_BG_THREAD_LOCK = threading.Lock()
 
 def _ensure_bg_thread():
     global _bg_thread, _cg_thread_ref, _learn_thread_ref, _closegame_loop_fn, _learning_loop_fn
+    # Fast path: main thread already running. Check secondary threads under the
+    # lock so we don't double-spawn them from two concurrent /health requests.
     if _bg_thread is not None and _bg_thread.is_alive():
-        # Main thread alive — check secondary threads
-        if _cg_thread_ref is not None and not _cg_thread_ref.is_alive():
-            print("[WATCHDOG] Close-Game thread died — restarting")
-            _cg_thread_ref = threading.Thread(target=_closegame_loop_fn, daemon=True)
-            _cg_thread_ref.start()
-        if _learn_thread_ref is not None and not _learn_thread_ref.is_alive():
-            print("[WATCHDOG] Learning thread died — restarting")
-            _learn_thread_ref = threading.Thread(target=_learning_loop_fn, daemon=True)
-            _learn_thread_ref.start()
+        with _BG_THREAD_LOCK:
+            if _cg_thread_ref is not None and not _cg_thread_ref.is_alive() and _closegame_loop_fn is not None:
+                print("[WATCHDOG] Close-Game thread died — restarting")
+                _cg_thread_ref = threading.Thread(target=_closegame_loop_fn, daemon=True)
+                _cg_thread_ref.start()
+            if _learn_thread_ref is not None and not _learn_thread_ref.is_alive() and _learning_loop_fn is not None:
+                print("[WATCHDOG] Learning thread died — restarting")
+                _learn_thread_ref = threading.Thread(target=_learning_loop_fn, daemon=True)
+                _learn_thread_ref.start()
         return
-    _bg_thread = threading.Thread(target=_background_loop, daemon=True)
-    _bg_thread.start()
-    print("[STARTUP] Background thread started")
+    # Slow path: no main thread yet. Serialize the entire init so two concurrent
+    # requests can't race on spawning duplicate background / closegame / learning
+    # threads. Re-check inside the lock (double-checked locking).
+    with _BG_THREAD_LOCK:
+        if _bg_thread is not None and _bg_thread.is_alive():
+            return
+        _bg_thread = threading.Thread(target=_background_loop, daemon=True)
+        _bg_thread.start()
+        print("[STARTUP] Background thread started")
 
-    # Close-Game Sniper — fast 10s loop for live game edge
-    def _closegame_loop():
-        _time.sleep(20)  # brief warmup — main loop starts fast now
-        print("[CLOSEGAME] Fast sniper thread started (10s interval)")
-        _cg_cycle = 0
-        while True:
-            try:
-                _cg_cycle += 1
-                closegame_snipe()
-                # Blowout exit every 30s (every 3rd cycle)
-                if _cg_cycle % 3 == 0:
-                    _blowout_exit()
-                # Smart position management — 30s during final periods, 90s otherwise
-                # Final periods = Q4/OT (NBA), P3/OT (NHL), 7th+ inning (MLB)
-                _spm_interval = 9  # default: every 90s (9 * 10s cycle)
+        # Close-Game Sniper — fast 10s loop for live game edge
+        def _closegame_loop():
+            _time.sleep(20)  # brief warmup — main loop starts fast now
+            print("[CLOSEGAME] Fast sniper thread started (10s interval)")
+            _cg_cycle = 0
+            while True:
                 try:
-                    _scores_for_spm = _get_espn_scores()
-                    if _scores_for_spm:
-                        for _sg in _scores_for_spm.values():
-                            _sp = _sg.get("period", "")
-                            if any(kw in str(_sp).lower() for kw in ("q4", "ot", "p3", "so", "9th", "8th", "7th", "extra")):
-                                _spm_interval = 3  # every 30s during crunch time
-                                break
-                except Exception:
-                    pass
-                if _cg_cycle % _spm_interval == 0:
+                    _cg_cycle += 1
+                    closegame_snipe()
+                    # Blowout exit every 30s (every 3rd cycle)
+                    if _cg_cycle % 3 == 0:
+                        _blowout_exit()
+                    # Smart position management — 30s during final periods, 90s otherwise
+                    # Final periods = Q4/OT (NBA), P3/OT (NHL), 7th+ inning (MLB)
+                    _spm_interval = 9  # default: every 90s (9 * 10s cycle)
                     try:
-                        _smart_position_management()
-                    except Exception as _sme:
-                        print(f"[SMART_EXIT] Error: {_sme}")
-                # Game monitor every 60s (every 6th cycle)
-                if _cg_cycle % 6 == 0:
-                    _monitor_live_games()
-                # Price tracking every 60s (every 6th cycle, offset)
-                if _cg_cycle % 6 == 3:
-                    _track_prices()
-                # Arbitrage check every 2 min (every 12th cycle)
-                if _cg_cycle % 12 == 0:
-                    _check_arbitrage()
-            except Exception as e:
-                print(f"[CLOSEGAME] Error: {e}")
-            _time.sleep(10)
-
-    _closegame_loop_fn = _closegame_loop
-    _cg_thread_ref = threading.Thread(target=_closegame_loop, daemon=True)
-    _cg_thread_ref.start()
-    print("[STARTUP] Close-Game Sniper thread started (10s)")
-
-    # Dedicated learning thread — runs independently so a stuck trading loop
-    # (e.g. hung Kalshi API call) cannot block parameter adaptation.
-    def _learning_loop():
-        _time.sleep(120)  # let main loop settle before first tune
-        print("[LEARNING] Dedicated learning thread started (3 min interval)")
-        _learn_cycle = 0
-        while True:
-            try:
-                _learn_cycle += 1
-                _learning_engine()
-                _auto_tune_thresholds()
-                # Circuit-breaker: check each strategy for consecutive loss streaks
-                for _cb_strat in ["live_sniper", "moonshark", "closegame", "momentum_swing", "goalie_pulled"]:
-                    try:
-                        _check_consecutive_losses(_cb_strat, max_consec=5, pause_hours=2)
+                        _scores_for_spm = _get_espn_scores()
+                        if _scores_for_spm:
+                            for _sg in _scores_for_spm.values():
+                                _sp = _sg.get("period", "")
+                                if any(kw in str(_sp).lower() for kw in ("q4", "ot", "p3", "so", "9th", "8th", "7th", "extra")):
+                                    _spm_interval = 3  # every 30s during crunch time
+                                    break
                     except Exception:
                         pass
-                # rollback check gets fresher stats (2d window) so it can
-                # react quickly when a bad tune tanks a strategy.
-                try:
-                    _check_tune_rollback(_per_strategy_stats(days=2))
-                except Exception as _rbe:
-                    print(f"[LEARNING] Rollback check error: {_rbe}")
-                # Watchdog self-check — catches known bug patterns
-                try:
-                    _watchdog_check()
-                except Exception as _wde:
-                    print(f"[WATCHDOG] Error: {_wde}")
-                # Heartbeat log every 20 cycles (~1 hr)
-                if _learn_cycle % 20 == 0:
-                    with _LEARNING_STATE_LOCK:
-                        _v = _LEARNING_STATE.get("version", 0)
-                        _tunes = _LEARNING_STATE.get("adaptive", {}).get("total_tunes", 0)
-                    print(f"[LEARNING] Heartbeat cycle={_learn_cycle} version={_v} total_tunes={_tunes}")
-            except Exception as _le:
-                print(f"[LEARNING] Error: {_le}")
-            # Turbo mode: if any strategy just had 3+ losses in a row, tune faster
-            _turbo = False
-            try:
-                for _turbo_strat in ["live_sniper", "moonshark", "closegame", "momentum_swing", "goalie_pulled"]:
-                    _recent_results = []
-                    with _TRADE_JOURNAL_LOCK:
-                        for t in reversed(_TRADE_JOURNAL):
-                            if t.get("strategy") == _turbo_strat and t.get("result") in ("win", "loss"):
-                                _recent_results.append(t["result"])
-                                if len(_recent_results) >= 3:
-                                    break
-                    if len(_recent_results) >= 3 and all(r == "loss" for r in _recent_results):
-                        _turbo = True
-                        break
-            except Exception:
-                pass
-            _time.sleep(180 if _turbo else 600)  # 3min turbo / 10min normal
+                    if _cg_cycle % _spm_interval == 0:
+                        try:
+                            _smart_position_management()
+                        except Exception as _sme:
+                            print(f"[SMART_EXIT] Error: {_sme}")
+                    # Game monitor every 60s (every 6th cycle)
+                    if _cg_cycle % 6 == 0:
+                        _monitor_live_games()
+                    # Price tracking every 60s (every 6th cycle, offset)
+                    if _cg_cycle % 6 == 3:
+                        _track_prices()
+                    # Arbitrage check every 2 min (every 12th cycle)
+                    if _cg_cycle % 12 == 0:
+                        _check_arbitrage()
+                except Exception as e:
+                    print(f"[CLOSEGAME] Error: {e}")
+                _time.sleep(10)
 
-    _learning_loop_fn = _learning_loop
-    _learn_thread_ref = threading.Thread(target=_learning_loop, daemon=True)
-    _learn_thread_ref.start()
-    print("[STARTUP] Dedicated learning thread started (10 min)")
+        _closegame_loop_fn = _closegame_loop
+        _cg_thread_ref = threading.Thread(target=_closegame_loop, daemon=True)
+        _cg_thread_ref.start()
+        print("[STARTUP] Close-Game Sniper thread started (10s)")
 
-    # Start keep-alive watchdog (only once)
-    global _keepalive_thread
-    if _keepalive_thread is None or not _keepalive_thread.is_alive():
-        _keepalive_thread = threading.Thread(target=_keep_alive_loop, daemon=True)
-        _keepalive_thread.start()
-        print("[STARTUP] Keep-alive watchdog started (5 min)")
+        # Dedicated learning thread — runs independently so a stuck trading loop
+        # (e.g. hung Kalshi API call) cannot block parameter adaptation.
+        def _learning_loop():
+            _time.sleep(120)  # let main loop settle before first tune
+            print("[LEARNING] Dedicated learning thread started (3 min interval)")
+            _learn_cycle = 0
+            while True:
+                try:
+                    _learn_cycle += 1
+                    _learning_engine()
+                    _auto_tune_thresholds()
+                    # Circuit-breaker: check each strategy for consecutive loss streaks
+                    for _cb_strat in ["live_sniper", "moonshark", "closegame", "momentum_swing", "goalie_pulled"]:
+                        try:
+                            _check_consecutive_losses(_cb_strat, max_consec=5, pause_hours=2)
+                        except Exception:
+                            pass
+                    # rollback check gets fresher stats (2d window) so it can
+                    # react quickly when a bad tune tanks a strategy.
+                    try:
+                        _check_tune_rollback(_per_strategy_stats(days=2))
+                    except Exception as _rbe:
+                        print(f"[LEARNING] Rollback check error: {_rbe}")
+                    # Watchdog self-check — catches known bug patterns
+                    try:
+                        _watchdog_check()
+                    except Exception as _wde:
+                        print(f"[WATCHDOG] Error: {_wde}")
+                    # Heartbeat log every 20 cycles (~1 hr)
+                    if _learn_cycle % 20 == 0:
+                        with _LEARNING_STATE_LOCK:
+                            _v = _LEARNING_STATE.get("version", 0)
+                            _tunes = _LEARNING_STATE.get("adaptive", {}).get("total_tunes", 0)
+                        print(f"[LEARNING] Heartbeat cycle={_learn_cycle} version={_v} total_tunes={_tunes}")
+                except Exception as _le:
+                    print(f"[LEARNING] Error: {_le}")
+                # Turbo mode: if any strategy just had 3+ losses in a row, tune faster
+                _turbo = False
+                try:
+                    for _turbo_strat in ["live_sniper", "moonshark", "closegame", "momentum_swing", "goalie_pulled"]:
+                        _recent_results = []
+                        with _TRADE_JOURNAL_LOCK:
+                            for t in reversed(_TRADE_JOURNAL):
+                                if t.get("strategy") == _turbo_strat and t.get("result") in ("win", "loss"):
+                                    _recent_results.append(t["result"])
+                                    if len(_recent_results) >= 3:
+                                        break
+                        if len(_recent_results) >= 3 and all(r == "loss" for r in _recent_results):
+                            _turbo = True
+                            break
+                except Exception:
+                    pass
+                _time.sleep(180 if _turbo else 600)  # 3min turbo / 10min normal
+
+        _learning_loop_fn = _learning_loop
+        _learn_thread_ref = threading.Thread(target=_learning_loop, daemon=True)
+        _learn_thread_ref.start()
+        print("[STARTUP] Dedicated learning thread started (10 min)")
+
+        # Start keep-alive watchdog (only once)
+        global _keepalive_thread
+        if _keepalive_thread is None or not _keepalive_thread.is_alive():
+            _keepalive_thread = threading.Thread(target=_keep_alive_loop, daemon=True)
+            _keepalive_thread.start()
+            print("[STARTUP] Keep-alive watchdog started (5 min)")
 
 # Background thread starts on first request via before_request hook
 # (not at import time, to avoid issues with gunicorn --preload)
@@ -13165,6 +13223,10 @@ def health():
     elif _integrity:
         _status = "warning"
 
+    with _WATCHDOG_ALERTS_LOCK:
+        _watchdog_snap = [dict(a) for a in _WATCHDOG_ALERTS]
+    _pretrade_snap = _pretrade_stats_snapshot()
+
     return jsonify({
         "status": _status,
         "trading_thread": "alive" if _bg_alive else "dead",
@@ -13176,13 +13238,13 @@ def health():
         "hwm": {"wins": _SETTLED_HWM.get("wins", 0), "losses": _SETTLED_HWM.get("losses", 0)},
         "learning_version": _LEARNING_STATE.get("version", 0),
         "integrity_warnings": _integrity,
-        "watchdog_alerts": _WATCHDOG_ALERTS,
+        "watchdog_alerts": _watchdog_snap,
         "pretrade_gateway": {
-            "checked": _PRETRADE_STATS["checked"],
-            "passed": _PRETRADE_STATS["passed"],
-            "blocked": _PRETRADE_STATS["blocked"],
-            "block_rate": round(_PRETRADE_STATS["blocked"] / max(1, _PRETRADE_STATS["checked"]) * 100, 1),
-            "top_reasons": dict(sorted(_PRETRADE_STATS["reasons"].items(), key=lambda x: x[1], reverse=True)[:5]),
+            "checked": _pretrade_snap["checked"],
+            "passed": _pretrade_snap["passed"],
+            "blocked": _pretrade_snap["blocked"],
+            "block_rate": round(_pretrade_snap["blocked"] / max(1, _pretrade_snap["checked"]) * 100, 1),
+            "top_reasons": dict(sorted(_pretrade_snap["reasons"].items(), key=lambda x: x[1], reverse=True)[:5]),
         },
     })
 
@@ -13781,7 +13843,11 @@ def settled_positions():
             _avg_yes = float(str(pos.get("average_yes_price_dollars") or pos.get("average_yes_price") or 0))
             _avg_no = float(str(pos.get("average_no_price_dollars") or pos.get("average_no_price") or 0))
             if _avg_yes > 0 and _avg_no > 0:
-                # Both have prices — use trade history to determine which side we bought
+                # Both have prices — use trade history to determine which side we bought.
+                # If trade history below doesn't match, pick side whose avg_price is closer
+                # to typical bet range (>0), preferring the higher avg as hint (avg_yes=0.60
+                # means we paid 60c on a yes position; non-zero avg_no usually = we traded
+                # that side earlier). Leave `side` unset here so trade-history lookup wins.
                 pass
             elif _avg_yes > 0:
                 side = "yes"
