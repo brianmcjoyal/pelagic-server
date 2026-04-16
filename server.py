@@ -1412,11 +1412,35 @@ def _rebuild_journal_from_kalshi():
                 trade_map[t["ticker"]] = t
 
         new_count = 0
-        # Fetch market titles + results in parallel (needed for zero-PnL reconstruction)
-        unique_tickers = list(set(
-            p.get("ticker", "") for p in positions_list
-            if p.get("ticker", "") not in existing_tickers
-        ))
+        _repair_flipped = 0  # count loss→win flips so we can reset over-tightened thresholds
+        # Fetch market titles + results in parallel (needed for zero-PnL reconstruction).
+        # We need results for BOTH new entries AND existing ones being repaired —
+        # the repair block below uses title_map[ticker]["result"] to reconstruct PnL
+        # when Kalshi has zeroed out realized_pnl_dollars on older settlements.
+        # Prioritize tickers that need repair (existing entries with result=None or
+        # result=loss+pnl≈0) so we don't waste the 200-ticker budget on already-good data.
+        with _TRADE_JOURNAL_LOCK:
+            _needs_repair = set()
+            for r in _TRADE_JOURNAL:
+                _tk = r.get("ticker")
+                if not _tk:
+                    continue
+                _res = r.get("result")
+                _pnl = r.get("pnl_usd") or 0
+                if _res is None or (_res == "loss" and abs(_pnl) < 0.01):
+                    _needs_repair.add(_tk)
+        # New tickers first (so they can be journaled), then repair candidates
+        _new_t = [p.get("ticker", "") for p in positions_list
+                  if p.get("ticker", "") and p.get("ticker") not in existing_tickers]
+        _repair_t = [p.get("ticker", "") for p in positions_list
+                     if p.get("ticker", "") in _needs_repair]
+        # Deduplicate while preserving order (new first, then repair)
+        _seen_t = set()
+        unique_tickers = []
+        for _tk in _new_t + _repair_t:
+            if _tk and _tk not in _seen_t:
+                _seen_t.add(_tk)
+                unique_tickers.append(_tk)
         title_map = {}
         from concurrent.futures import ThreadPoolExecutor, as_completed
         def _fetch_mkt_info(tk):
@@ -1430,9 +1454,11 @@ def _rebuild_journal_from_kalshi():
             except Exception:
                 pass
             return (tk, tk, "", "")
+        # Increased from 200 to 600 so repair can cover more historical bad entries.
+        # 15 workers × ~0.3s per call = ~12s per 200 → ~36s for 600. Well under timeout.
         with ThreadPoolExecutor(max_workers=15) as executor:
-            _mkt_futs = {executor.submit(_fetch_mkt_info, tk): tk for tk in unique_tickers[:200]}
-            for future in as_completed(_mkt_futs, timeout=60):
+            _mkt_futs = {executor.submit(_fetch_mkt_info, tk): tk for tk in unique_tickers[:600]}
+            for future in as_completed(_mkt_futs, timeout=120):
                 try:
                     tk, title, close_time, result = future.result()
                     title_map[tk] = {"title": title, "close_time": close_time, "result": result}
@@ -1582,6 +1608,8 @@ def _rebuild_journal_from_kalshi():
                             break
                         if _old_result != _rebuild_result or abs(_old_pnl - pnl_usd) > 0.01:
                             print(f"[JOURNAL-REPAIR] {ticker[:40]} {_old_result}→{_rebuild_result} pnl ${_old_pnl:+.2f}→${pnl_usd:+.2f}")
+                        if _old_result == "loss" and _rebuild_result == "win":
+                            _repair_flipped += 1
                         _existing["result"] = _rebuild_result
                         _existing["pnl_usd"] = round(pnl_usd, 2)
                         if not _existing.get("settlement_time"):
@@ -1626,13 +1654,43 @@ def _rebuild_journal_from_kalshi():
                 _TRADE_JOURNAL.append(journal_entry)
             new_count += 1
 
+        # If many journal entries were flipped loss→win, the adaptive learning
+        # thresholds were trained on poisoned data. Reset them to safe defaults
+        # so the bot can trade again — learning engine will re-tune from fixed data
+        # on its next hourly cycle.
+        if _repair_flipped >= 5:
+            try:
+                with _LEARNING_STATE_LOCK:
+                    _adaptive_old = dict(_LEARNING_STATE.get("adaptive", {}))
+                    _LEARNING_STATE["adaptive"] = {
+                        "last_tune": _adaptive_old.get("last_tune"),
+                        "last_win_rate_7d": None,
+                        "total_tunes": _adaptive_old.get("total_tunes", 0),
+                        # Safe defaults (match _knobs defaults in _auto_tune_thresholds)
+                        "min_conviction_sniper": 4,
+                        "min_conviction_moonshark": 4,
+                        "min_edge_sniper": 0.04,
+                        "min_edge_moonshark": 0.06,
+                        "min_edge_closegame": 0.04,
+                        "min_edge_floor": 0.02,
+                        "min_edge_swing": 0.06,
+                        "min_edge_goalie": 0.05,
+                        "sport_strategy_penalties": {},
+                    }
+                print(f"[JOURNAL-REBUILD] Reset adaptive thresholds after {_repair_flipped} loss→win flips "
+                      f"(old conv_sniper={_adaptive_old.get('min_conviction_sniper')}, "
+                      f"conv_moonshark={_adaptive_old.get('min_conviction_moonshark')}, "
+                      f"edge_moonshark={_adaptive_old.get('min_edge_moonshark')})")
+            except Exception as _rae:
+                print(f"[JOURNAL-REBUILD] Adaptive reset error (non-fatal): {_rae}")
+
         _save_state()
         total_cats = len(_CATEGORY_STATS)
         with _TRADE_JOURNAL_LOCK:
             total_journal = len(_TRADE_JOURNAL)
         print(f"[JOURNAL-REBUILD] Rebuilt from {len(positions_list)} settled positions: "
               f"{new_count} new journal entries (total {total_journal}), "
-              f"{total_cats} categories tracked")
+              f"{total_cats} categories tracked, {_repair_flipped} loss→win flips")
     except Exception as e:
         print(f"[JOURNAL-REBUILD] Error: {e}")
         import traceback
