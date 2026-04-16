@@ -1516,10 +1516,6 @@ def _rebuild_journal_from_kalshi():
                     _CATEGORY_STATS[cat]["losses"] += 1
                 _CATEGORY_STATS[cat]["pnl"] += pnl_usd
 
-            # Add to journal if not already present
-            if ticker in existing_tickers:
-                continue
-
             # Determine bot version from trade history
             trade_rec = trade_map.get(ticker, {})
             bot_version = trade_rec.get("bot_version", "v1-legacy")
@@ -1556,6 +1552,40 @@ def _rebuild_journal_from_kalshi():
                     _rebuild_loss_cat = "favorite_upset"  # heavy favorite that lost
                 else:
                     _rebuild_loss_cat = "unknown"          # no MTM data to diagnose further
+
+            # If ticker already in journal, patch it when:
+            #  - result is still None (placed live but bot restarted before detect)
+            #  - result is "loss" with pnl_usd ≈ $0 (signature of the old
+            #    zero-PnL-treated-as-loss bug) AND reconstructed result disagrees
+            # We only reconstructed pnl_usd here if we had a market result AND
+            # entry/count data, so the reconstruction is trustworthy.
+            if ticker in existing_tickers:
+                with _TRADE_JOURNAL_LOCK:
+                    for _existing in _TRADE_JOURNAL:
+                        if _existing.get("ticker") != ticker:
+                            continue
+                        _old_result = _existing.get("result")
+                        _old_pnl = _existing.get("pnl_usd") or 0
+                        _should_repair = (
+                            _old_result is None
+                            or (_old_result == "loss" and abs(_old_pnl) < 0.01
+                                and _rebuild_result != "loss")
+                        )
+                        if not _should_repair:
+                            break
+                        if _old_result != _rebuild_result or abs(_old_pnl - pnl_usd) > 0.01:
+                            print(f"[JOURNAL-REPAIR] {ticker[:40]} {_old_result}→{_rebuild_result} pnl ${_old_pnl:+.2f}→${pnl_usd:+.2f}")
+                        _existing["result"] = _rebuild_result
+                        _existing["pnl_usd"] = round(pnl_usd, 2)
+                        if not _existing.get("settlement_time"):
+                            _existing["settlement_time"] = close_time or ""
+                        if _rebuild_clv is not None and _existing.get("clv_cents") is None:
+                            _existing["clv_cents"] = _rebuild_clv
+                            _existing["clv_closing_price"] = _rebuild_closing
+                        if _rebuild_loss_cat and _existing.get("loss_category") is None:
+                            _existing["loss_category"] = _rebuild_loss_cat
+                        break
+                continue
 
             journal_entry = {
                 "ticker": ticker,
@@ -10943,13 +10973,65 @@ def check_settlements_and_reinvest():
             _known_settled.add(ticker)
             pnl_cents = _parse_kalshi_dollars(pos.get("realized_pnl_dollars") or pos.get("realized_pnl"))
             pnl_usd = pnl_cents / 100
+
+            # Kalshi zeroes out realized_pnl_dollars on settled positions after a
+            # short window. If we got a zero PnL, reconstruct from position fields
+            # + market result before deciding win/loss — otherwise the journal ends
+            # up with every zeroed settlement marked as a "loss".
+            _settle_result = pos.get("result", "")
+            if abs(pnl_cents) < 1:
+                # Determine side from avg prices
+                _avg_yes = float(str(pos.get("average_yes_price_dollars") or pos.get("average_yes_price") or 0))
+                _avg_no = float(str(pos.get("average_no_price_dollars") or pos.get("average_no_price") or 0))
+                _r_side = ""
+                if _avg_yes > 0 and _avg_no == 0:
+                    _r_side = "yes"
+                elif _avg_no > 0 and _avg_yes == 0:
+                    _r_side = "no"
+                elif _avg_yes > 0 and _avg_no > 0:
+                    _r_side = "yes" if _avg_yes >= _avg_no else "no"
+                # Fallback to trade history for side
+                if not _r_side:
+                    for _tr in BOT_STATE.get("all_trades", []):
+                        if _tr.get("ticker") == ticker:
+                            _r_side = _tr.get("side") or ""
+                            break
+                _r_count = 0
+                try:
+                    _r_count = int(float(str(pos.get("total_count_fp") or pos.get("total_count") or 0)))
+                except Exception:
+                    pass
+                _r_entry = 0
+                if _r_side == "yes" and _avg_yes > 0:
+                    _r_entry = int(round(_avg_yes * 100))
+                elif _r_side == "no" and _avg_no > 0:
+                    _r_entry = int(round(_avg_no * 100))
+                # If position data is thin, fall back to trade history
+                if _r_count == 0 or _r_entry == 0:
+                    for _tr in BOT_STATE.get("all_trades", []):
+                        if _tr.get("ticker") == ticker and _tr.get("action", "buy") == "buy":
+                            if _r_count == 0:
+                                _r_count = _tr.get("count", 0) or 0
+                            if _r_entry == 0:
+                                _r_entry = _tr.get("price_cents", 0) or 0
+                            if not _r_side:
+                                _r_side = _tr.get("side") or "yes"
+                            break
+                # Reconstruct only if we have market result + side + entry + count
+                if _settle_result in ("yes", "no") and _r_side and _r_count > 0 and _r_entry > 0:
+                    if _settle_result == "yes":
+                        pnl_cents = (100 - _r_entry) * _r_count if _r_side == "yes" else -_r_entry * _r_count
+                    else:
+                        pnl_cents = -_r_entry * _r_count if _r_side == "yes" else (100 - _r_entry) * _r_count
+                    pnl_usd = pnl_cents / 100
+                    print(f"[SETTLE] Reconstructed {ticker[:40]} side={_r_side} entry={_r_entry}c count={_r_count} result={_settle_result} -> pnl=${pnl_usd:+.2f}")
+
             won = pnl_usd > 0.005
             # Track category performance
             title = pos.get("market_title", "") or pos.get("title", "") or ticker
             _update_category_stats(ticker, title, won, pnl_usd)
             # Derive closing price from market result for CLV tracking.
             # Settled positions tell us the result — map to closing YES price.
-            _settle_result = pos.get("result", "")
             _closing_price = None
             if _settle_result == "yes":
                 _closing_price = 97  # YES settled → YES price ≈97c at close
