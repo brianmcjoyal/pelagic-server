@@ -10857,6 +10857,86 @@ TRADE_JOURNAL_START = "2026-03-31"  # Skip pre-bugfix trades (03-16 to 03-20 wer
 
 # _TRADE_JOURNAL declared early (near BOT_STATE) so _load_state() can populate it
 
+def _compute_bet_quality_score(price_cents, conviction, espn_edge_data, orderbook_data, strategy):
+    """Composite 0-100 score estimating bet quality AT PLACEMENT TIME.
+
+    The point of this score is calibration: over time we can bucket settled
+    trades by score and ask "do 75+ score bets actually win 75%+?". If yes,
+    we trust the score. If no, we know the scorer needs retuning — or a
+    specific component is broken. Exposed via /bet-calibration so you can
+    answer "was that a smart bet?" retrospectively with real data, not
+    vibes.
+
+    Components (additive, each capped so no single signal can dominate):
+      - Edge magnitude (ESPN vs Kalshi implied)  0-25 pts
+      - Conviction score (0-7 strategy-specific)  0-20 pts
+      - Orderbook quality (spread + liquidity)    0-15 pts
+      - Strategy 7d win rate                      0-25 pts
+      - Price band (your 40-75c sweet spot)       0-15 pts
+    Max theoretical: 100. Most live bets will fall in 30-75.
+    """
+    score = 0.0
+    # 1. Edge magnitude — bigger edge = more cushion against model error
+    try:
+        _edge = None
+        if isinstance(espn_edge_data, dict):
+            _edge = espn_edge_data.get("espn_edge")
+        if _edge is not None:
+            # 5% edge -> 8pts, 10% -> 17pts, 15%+ -> 25pts (cap)
+            score += min(25, max(0, abs(float(_edge)) * 167))
+    except Exception:
+        pass
+    # 2. Conviction — more aligned signals = better
+    try:
+        _conv = int(conviction or 0)
+        # conv 3 -> 9pts, 5 -> 15pts, 7 -> 20pts (cap)
+        score += min(20, _conv * 3)
+    except Exception:
+        pass
+    # 3. Orderbook quality — tight spreads + depth = less slippage risk
+    try:
+        if isinstance(orderbook_data, dict):
+            _sp = orderbook_data.get("spread")
+            _liq = orderbook_data.get("liquidity_score")
+            if _sp is not None:
+                if _sp <= 3:
+                    score += 8
+                elif _sp <= 5:
+                    score += 5
+                elif _sp <= 8:
+                    score += 2
+            if _liq is not None:
+                if _liq >= 50:
+                    score += 7
+                elif _liq >= 25:
+                    score += 4
+                elif _liq >= 10:
+                    score += 2
+    except Exception:
+        pass
+    # 4. Strategy recent win rate — proven-hot strategies get credit
+    try:
+        _stats = (_LEARNING_STATE or {}).get("per_strategy_7d", {}) or {}
+        _s = _stats.get(strategy) or {}
+        if _s.get("sample_size", 0) >= 5:
+            _wr = float(_s.get("win_rate", 0) or 0)
+            # 30% WR -> 7pts, 50% -> 17pts, 65%+ -> 25pts
+            score += min(25, max(0, (_wr - 0.15) * 50))
+    except Exception:
+        pass
+    # 5. Price band — your historical sweet spot is 40-75c (per comment at
+    # pretrade gate #4 "61-80c is the most profitable range"). Soft-score it.
+    try:
+        if price_cents is not None:
+            if 40 <= price_cents <= 75:
+                score += 15
+            elif 25 <= price_cents <= 85:
+                score += 8
+    except Exception:
+        pass
+    return int(round(min(100, max(0, score))))
+
+
 def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, strategy, is_live=False, close_time=None, game_info=None, espn_edge_data=None, orderbook_data=None, conviction=0, conviction_reasons=None):
     """Create an enriched trade record with all metadata for pattern analysis."""
     now = datetime.datetime.now(tz=_PACIFIC)
@@ -11055,6 +11135,14 @@ def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, stra
         "mtm_worst_price": price_cents,       # lowest mid-hold price seen
         "mtm_best_pct": 0,                    # best pct gain during hold
         "mtm_worst_pct": 0,                   # worst pct drawdown during hold
+        # --- Bet quality score at placement (0-100) ---
+        # Composite of edge + conviction + orderbook quality + strategy WR +
+        # price band. Calibrated retrospectively via /bet-calibration — if
+        # score-band WRs don't line up with expectations, the scorer (not
+        # the market) is wrong.
+        "bet_quality_score": _compute_bet_quality_score(
+            price_cents, conviction, espn_edge_data, orderbook_data, strategy
+        ),
         # --- Loss post-mortem (filled on settlement for losses only) ---
         "loss_category": None,                # one of: ob_deceptive / stale_edge / late_fade / blowout / coinflip
     }
@@ -19525,6 +19613,122 @@ def trade_journal():
     with _TRADE_JOURNAL_LOCK:
         _journal_snap = list(_TRADE_JOURNAL)
     return jsonify({"trades": _journal_snap[-50:], "total": len(_journal_snap)})
+
+
+@app.route("/bet-calibration")
+def bet_calibration():
+    """Answer 'was that a smart bet?' with data, not vibes.
+
+    Buckets all settled journal entries by the bet_quality_score recorded
+    at placement, and returns actual win-rate and P&L per bucket. A
+    well-calibrated scorer will show monotonically-rising WR across
+    buckets: 0-25 band worst, 75-100 band best.
+
+    If the buckets DON'T line up (e.g. high-score bets win less than
+    low-score bets) the scorer is miscalibrated — raise an alert rather
+    than trust the score. Also returns the most recent pending (open)
+    bets with their scores so you can gauge open-position quality.
+    """
+    with _TRADE_JOURNAL_LOCK:
+        _snap = list(_TRADE_JOURNAL)
+
+    _bands = [
+        {"label": "75-100 (high)", "lo": 75, "hi": 101, "wins": 0, "losses": 0, "pnl": 0.0},
+        {"label": "50-74 (mid)",  "lo": 50, "hi": 75,   "wins": 0, "losses": 0, "pnl": 0.0},
+        {"label": "25-49 (low)",  "lo": 25, "hi": 50,   "wins": 0, "losses": 0, "pnl": 0.0},
+        {"label": "0-24 (dreg)",  "lo": 0,  "hi": 25,   "wins": 0, "losses": 0, "pnl": 0.0},
+    ]
+    _no_score_settled = {"wins": 0, "losses": 0, "pnl": 0.0}
+    for _r in _snap:
+        _q = _r.get("bet_quality_score")
+        _res = _r.get("result")
+        if _res not in ("win", "loss"):
+            continue
+        _pnl = _r.get("pnl_usd") or 0
+        if _q is None:
+            if _res == "win":
+                _no_score_settled["wins"] += 1
+            else:
+                _no_score_settled["losses"] += 1
+            _no_score_settled["pnl"] += _pnl
+            continue
+        for _b in _bands:
+            if _b["lo"] <= _q < _b["hi"]:
+                if _res == "win":
+                    _b["wins"] += 1
+                else:
+                    _b["losses"] += 1
+                _b["pnl"] += _pnl
+                break
+
+    # Compute WR and expected vs actual — calibration check
+    _results = []
+    _monotonic_ok = True
+    _prev_wr = None
+    for _b in _bands:
+        _tot = _b["wins"] + _b["losses"]
+        _wr = (_b["wins"] / _tot) if _tot else None
+        _results.append({
+            "band": _b["label"],
+            "settled": _tot,
+            "wins": _b["wins"],
+            "losses": _b["losses"],
+            "win_rate": round(_wr * 100, 1) if _wr is not None else None,
+            "total_pnl_usd": round(_b["pnl"], 2),
+        })
+        # Higher score should win more. Record monotonicity violation if a
+        # band with a smaller sample doesn't beat a LOWER band with a
+        # reasonable sample.
+        if _wr is not None and _tot >= 5:
+            if _prev_wr is not None and _wr < _prev_wr - 0.1:
+                _monotonic_ok = False
+            _prev_wr = _wr
+
+    # Recent open (unsettled) bets for live gauging
+    _open_bets = []
+    for _r in reversed(_snap):
+        if _r.get("result") is not None:
+            continue
+        _open_bets.append({
+            "ticker": _r.get("ticker"),
+            "title": (_r.get("title") or "")[:60],
+            "strategy": _r.get("strategy"),
+            "side": _r.get("side"),
+            "price_cents": _r.get("price_cents"),
+            "bet_quality_score": _r.get("bet_quality_score"),
+            "entry_time": _r.get("entry_time"),
+        })
+        if len(_open_bets) >= 20:
+            break
+
+    # Summary verdict
+    _high_band = _results[0]
+    _low_band = _results[3]
+    _verdict = "COLLECTING DATA"
+    _hi_wr = _high_band.get("win_rate")
+    _lo_wr = _low_band.get("win_rate")
+    if _high_band.get("settled", 0) >= 10 and _low_band.get("settled", 0) >= 10:
+        if _hi_wr is not None and _lo_wr is not None:
+            if _hi_wr - _lo_wr >= 15:
+                _verdict = "✅ SCORE CALIBRATED — high-score bets genuinely win more"
+            elif _hi_wr - _lo_wr >= 5:
+                _verdict = "⚠️ WEAKLY CALIBRATED — some signal, not strong"
+            else:
+                _verdict = "❌ SCORE NOT CALIBRATED — high-score bets don't win more than low-score. Scorer needs retuning or a component signal is broken."
+
+    return jsonify({
+        "verdict": _verdict,
+        "monotonic": _monotonic_ok,
+        "by_score_band": _results,
+        "unscored_settled": {
+            "wins": _no_score_settled["wins"],
+            "losses": _no_score_settled["losses"],
+            "total_pnl_usd": round(_no_score_settled["pnl"], 2),
+            "note": "Entries from before bet_quality_score was added (2026-04-17)",
+        },
+        "open_bets": _open_bets,
+        "journal_total": len(_snap),
+    })
 
 
 @app.route("/quick-bet", methods=["POST"])
