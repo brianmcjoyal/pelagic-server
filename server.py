@@ -9891,6 +9891,69 @@ def _watchdog_check():
     except Exception:
         pass
 
+    # CHECK 16: ENTRY_PRICE INFERENCE SANITY — the bug we hit on 2026-04-17 was
+    # check_position_prices picking any all_trades row (including sells) as the
+    # entry, producing pnl_pct of -99% or 0% (if fallback fired). Detect the
+    # regressed state: many open positions with pnl_pct = exactly 0.0 implies
+    # the market_exposure/count fallback is back, or many at exactly -99%
+    # implies sells are being mis-read as entries. Requires >=10 positions to
+    # avoid false alerts on small books.
+    try:
+        _wd_positions = check_position_prices() or []
+        _wd_active = [_p for _p in _wd_positions if (_p.get("count") or 0) > 0]
+        _flat_count = 0
+        _extreme_neg_count = 0
+        for _p in _wd_active:
+            _ppct = _p.get("pnl_pct")
+            if _ppct is None:
+                continue
+            if _ppct == 0.0:
+                _flat_count += 1
+            if _ppct <= -95:
+                _extreme_neg_count += 1
+        if len(_wd_active) >= 10:
+            if _flat_count / max(1, len(_wd_active)) >= 0.5:
+                alerts.append(f"⚠️ ENTRY_PRICE SUSPECT: {_flat_count}/{len(_wd_active)} positions show exactly 0% P&L — fallback may have regressed (commit f33a93b)")
+            if _extreme_neg_count >= 5:
+                alerts.append(f"⚠️ ENTRY_PRICE SUSPECT: {_extreme_neg_count} positions at ≤-95% P&L — possible sell-as-entry bug (commit f33a93b)")
+    except Exception:
+        pass
+
+    # CHECK 17: HWM REGRESSION — high-water mark is monotonic by definition.
+    # If it ever decreases between watchdog runs, something wrote corrupted state.
+    # Catches the scenario where a deploy or state-reset silently wiped HWM
+    # without the "always-increasing" guarantee holding.
+    try:
+        _prev_hwm = BOT_STATE.get("_watchdog_last_hwm")
+        _cur_hwm_w = _SETTLED_HWM.get("wins", 0)
+        _cur_hwm_l = _SETTLED_HWM.get("losses", 0)
+        if _prev_hwm:
+            _prev_w = _prev_hwm.get("wins", 0)
+            _prev_l = _prev_hwm.get("losses", 0)
+            if _cur_hwm_w < _prev_w or _cur_hwm_l < _prev_l:
+                alerts.append(f"⚠️ HWM REGRESSED: was {_prev_w}W/{_prev_l}L, now {_cur_hwm_w}W/{_cur_hwm_l}L — state may have been overwritten")
+        BOT_STATE["_watchdog_last_hwm"] = {"wins": _cur_hwm_w, "losses": _cur_hwm_l}
+    except Exception:
+        pass
+
+    # CHECK 18: CONFIG SANITY — catch config corruption that would silently
+    # disable safety gates. These values are read by _pretrade_validate on
+    # every trade; if any drop to zero or negative the gate becomes a no-op.
+    try:
+        _cfg_issues = []
+        if BOT_CONFIG.get("max_daily_usd", 0) <= 0:
+            _cfg_issues.append("max_daily_usd")
+        if BOT_CONFIG.get("max_bet_usd", 0) <= 0:
+            _cfg_issues.append("max_bet_usd")
+        if BOT_CONFIG.get("min_balance_usd", 0) < 0:
+            _cfg_issues.append("min_balance_usd")
+        if BOT_CONFIG.get("max_open_positions", 0) <= 0:
+            _cfg_issues.append("max_open_positions")
+        if _cfg_issues:
+            alerts.append(f"⚠️ CONFIG CORRUPTED: {', '.join(_cfg_issues)} at zero/negative — safety gates disabled, bot at risk")
+    except Exception:
+        pass
+
     # Log alerts
     if alerts:
         with _WATCHDOG_ALERTS_LOCK:
