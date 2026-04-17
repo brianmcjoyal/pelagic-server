@@ -714,6 +714,36 @@ def _load_state():
             _LEARNING_STATE["adaptive"] = merged_adaptive
             # Version floor — never show a lower version than the hard-coded floor
             _LEARNING_STATE["version"] = max(_LEARNING_STATE.get("version", 0), _LEARNING_VERSION_FLOOR)
+
+            # STUCK-TIGHT GUARD: if adaptive thresholds are all at the tight end
+            # (suggesting a long run of bad data locked us out), reset to safe
+            # defaults on startup. The learning engine will re-tune within an
+            # hour from current data — better than being permanently gated off.
+            _a = _LEARNING_STATE["adaptive"]
+            _at_max = (
+                _a.get("min_conviction_moonshark", 4) >= 6
+                or _a.get("min_edge_moonshark", 0.06) >= 0.10
+                or _a.get("min_conviction_sniper", 4) >= 6
+            )
+            _last_wr = _a.get("last_win_rate_7d")
+            _hwm_wr = (_SETTLED_HWM.get("wins", 0)
+                       / max(1, _SETTLED_HWM.get("wins", 0) + _SETTLED_HWM.get("losses", 0)))
+            _needs_reset = _at_max and (_last_wr is None or (_last_wr < 0.20 and _hwm_wr > 0.40))
+            if _needs_reset:
+                print(f"[STATE] STUCK-TIGHT adaptive detected (conv_ms={_a.get('min_conviction_moonshark')} "
+                      f"edge_ms={_a.get('min_edge_moonshark')} last_wr={_last_wr} hwm_wr={_hwm_wr:.1%}) — "
+                      f"resetting to safe defaults")
+                _a["min_conviction_sniper"] = 4
+                _a["min_conviction_moonshark"] = 4
+                _a["min_edge_sniper"] = 0.04
+                _a["min_edge_moonshark"] = 0.06
+                _a["min_edge_closegame"] = 0.04
+                _a["min_edge_floor"] = 0.02
+                _a["min_edge_swing"] = 0.06
+                _a["min_edge_goalie"] = 0.05
+                _a["sport_strategy_penalties"] = {}
+                _a["startup_resets"] = _a.get("startup_resets", 0) + 1
+
             print(f"[STATE] Restored learning state v{_LEARNING_STATE.get('version', 0)} from disk")
 
         # Restore performance history (line chart data — persists across days)
@@ -10244,6 +10274,48 @@ def _auto_tune_thresholds():
         adaptive = _LEARNING_STATE.setdefault("adaptive", {})
         stats = _per_strategy_stats(days=7)
         _LEARNING_STATE["per_strategy"] = stats
+
+        # POISONED-JOURNAL GUARD: if the journal's 7d win rate is wildly below
+        # the settled HWM's overall win rate, the journal has systemic bad data
+        # (zeroed PnL treated as loss, missing wins from auto-sells, etc).
+        # Skip tuning this cycle AND reset adaptive thresholds to safe defaults
+        # so the bot isn't permanently locked out by corrupt history.
+        try:
+            _j_wins = sum(s.get("wins", 0) for s in stats.values())
+            _j_losses = sum(s.get("losses", 0) for s in stats.values())
+            _j_total = _j_wins + _j_losses
+            _j_wr = (_j_wins / _j_total) if _j_total else None
+            _hwm_wins = _SETTLED_HWM.get("wins", 0)
+            _hwm_losses = _SETTLED_HWM.get("losses", 0)
+            _hwm_total = _hwm_wins + _hwm_losses
+            _hwm_wr = (_hwm_wins / _hwm_total) if _hwm_total else None
+            # Poisoned: >20 settled in 7d, journal WR < 20%, HWM WR > 40%
+            _is_poisoned = (
+                _j_wr is not None and _hwm_wr is not None
+                and _j_total >= 20
+                and _j_wr < 0.20
+                and _hwm_wr > 0.40
+                and (_hwm_wr - _j_wr) > 0.25
+            )
+            if _is_poisoned:
+                print(f"[AUTO-TUNE] POISONED JOURNAL detected: 7d WR={_j_wr:.1%} ({_j_wins}W/{_j_losses}L) "
+                      f"vs HWM WR={_hwm_wr:.1%} ({_hwm_wins}W/{_hwm_losses}L) — skipping tune, resetting adaptive")
+                # Reset to safe defaults so the bot can trade again
+                adaptive["min_conviction_sniper"] = 4
+                adaptive["min_conviction_moonshark"] = 4
+                adaptive["min_edge_sniper"] = 0.04
+                adaptive["min_edge_moonshark"] = 0.06
+                adaptive["min_edge_closegame"] = 0.04
+                adaptive["min_edge_floor"] = 0.02
+                adaptive["min_edge_swing"] = 0.06
+                adaptive["min_edge_goalie"] = 0.05
+                adaptive["sport_strategy_penalties"] = {}
+                adaptive["last_tune"] = datetime.datetime.utcnow().isoformat() + "Z"
+                adaptive["last_win_rate_7d"] = round(_j_wr, 4)
+                adaptive["poisoned_journal_skips"] = adaptive.get("poisoned_journal_skips", 0) + 1
+                return
+        except Exception as _pge:
+            print(f"[AUTO-TUNE] Poison check error (non-fatal): {_pge}")
 
         # Rollback check: if the most recent tune made a strategy WORSE, undo it.
         _check_tune_rollback(stats)
