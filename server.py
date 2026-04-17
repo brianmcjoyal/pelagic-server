@@ -3664,17 +3664,31 @@ def check_position_prices():
             if current_no_price is None and current_yes_price is not None:
                 current_no_price = max(1, 100 - current_yes_price)
 
-            # Find our entry price from trade history
+            # Find our entry price from trade history.
+            # Match ONLY buy fills on the same side as the open position —
+            # otherwise a later sell (e.g. "sell no @ 99c" to close a yes long)
+            # gets mis-read as the entry price and the position appears catastrophic
+            # when it's actually flat. This was firing false STUCK LOSER alerts and
+            # blocking stop-loss (which needs a real entry to compute its threshold).
             entry_price = None
-            for t in BOT_STATE.get("all_trades", []):
-                if t.get("ticker") == ticker:
-                    entry_price = t.get("price_cents")
-                    break
-            # Fallback: estimate from market_exposure / count
-            if entry_price is None and abs_count > 0:
-                exposure = _parse_kalshi_dollars(pos.get("market_exposure_dollars") or pos.get("market_exposure"))
-                if exposure > 0:
-                    entry_price = int(round(exposure / abs_count))
+            _entry_buys = [
+                t for t in BOT_STATE.get("all_trades", [])
+                if t.get("ticker") == ticker
+                and t.get("action") == "buy"
+                and t.get("side") == side
+                and t.get("price_cents") is not None
+            ]
+            if _entry_buys:
+                # Volume-weighted avg across all buys we've made on this side
+                _total_cost = sum((t.get("price_cents") or 0) * (t.get("count") or 0) for t in _entry_buys)
+                _total_count = sum((t.get("count") or 0) for t in _entry_buys)
+                if _total_count > 0:
+                    entry_price = int(round(_total_cost / _total_count))
+                else:
+                    entry_price = _entry_buys[0].get("price_cents")
+            # If we have no buy history we cannot infer cost basis reliably.
+            # (The old market_exposure/count fallback was using *current* market
+            # value, which made every position look exactly flat — misleading.)
 
             current_price = current_yes_price if side == "yes" else current_no_price
             unrealized_pnl = None
