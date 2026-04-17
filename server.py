@@ -3248,7 +3248,14 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
                        win_prob=None, edge=None, strategy=None):
     # PRE-TRADE VALIDATION — the last line of defense. Every buy must pass.
     if action == "buy":
-        cost_est = (price_cents * count) / 100.0
+        # Budget/cap validation must reflect the WORST-CASE actual fill cost,
+        # not the raw ask. IOC orders always get bumped 1-3c above ask to
+        # guarantee fills (see fill_price computation below). Previously
+        # cost_est used raw price_cents → daily budget cap could be exceeded
+        # by ~5-10% because actual fills were higher.
+        _max_bump_cents = 3  # conservative upper bound of the adaptive bump
+        _worst_fill_cents = min(price_cents + _max_bump_cents, 99) if aggressive else price_cents
+        cost_est = (_worst_fill_cents * count) / 100.0
         ok, reason = _pretrade_validate(
             ticker, side, price_cents, count, cost_est,
             strategy=strategy, win_prob=win_prob, edge=edge
@@ -3448,9 +3455,17 @@ def _place_take_profit(ticker, side, entry_price, count, strategy="", game_info=
     """
     if entry_price >= 80:
         return  # near-settlement, just let it settle
+
+    # ATOMIC RESERVATION to prevent duplicate take-profit orders.
+    # Previously: check (under lock) → release lock → place order → re-acquire
+    # lock → add ticker. Two threads calling _place_take_profit for the same
+    # ticker could both pass the check, both place GTC sell orders, and both
+    # add to the set — leaving the winning ticker with two resting sells.
+    # Now: reserve the ticker BEFORE the order call; release on failure.
     with _RESTING_SELLS_LOCK:
         if ticker in _resting_sells:
-            return  # already have a resting sell
+            return
+        _resting_sells.add(ticker)
 
     # Dynamic TP based on game stage
     _tp_offset = 20  # default for longshots
@@ -3469,17 +3484,24 @@ def _place_take_profit(ticker, side, entry_price, count, strategy="", game_info=
 
     take_profit_price = min(95, entry_price + _tp_offset)
 
+    _order_succeeded = False
     try:
         result = sell_kalshi_position(ticker, side, take_profit_price, count, resting=True)
         if "error" not in result or result.get("skipped"):
-            with _RESTING_SELLS_LOCK:
-                _resting_sells.add(ticker)
+            _order_succeeded = True
             _log_activity(
                 f"📋 TAKE-PROFIT set: {ticker} @ {take_profit_price}c (entry={entry_price}c, +{take_profit_price - entry_price}c) [{strategy}]",
                 "info"
             )
     except Exception as e:
         print(f"[TAKE-PROFIT] Error placing resting sell for {ticker}: {e}")
+
+    # Release reservation if order didn't succeed — otherwise the ticker is
+    # stuck in _resting_sells and future take-profit attempts are blocked
+    # indefinitely until daily reset.
+    if not _order_succeeded:
+        with _RESTING_SELLS_LOCK:
+            _resting_sells.discard(ticker)
 
 
 def _parse_kalshi_dollars(val):
@@ -5038,7 +5060,8 @@ def live_game_snipe():
                             _snipe_edge_pct = f"closing boost {closing_boost:.1f}x"
                         _snipe_order_id = order_data.get("order_id", "")
                         if _snipe_order_id:
-                            _known_fill_ids.add(_snipe_order_id)
+                            with _KNOWN_FILL_IDS_LOCK:
+                                _known_fill_ids.add(_snipe_order_id)
                         BOT_STATE["snipe_trades_today"].append({
                             "ticker": ticker, "title": title, "side": side,
                             "price": price, "count": filled, "cost": actual_cost,
@@ -5885,7 +5908,8 @@ def moonshark_snipe():
                             _ms_edge_reasons.insert(0, _ms_edge_detail)
                         _ms_order_id = order_data.get("order_id", "")
                         if _ms_order_id:
-                            _known_fill_ids.add(_ms_order_id)
+                            with _KNOWN_FILL_IDS_LOCK:
+                                _known_fill_ids.add(_ms_order_id)
                         BOT_STATE["moonshark_trades_today"].append({
                             "ticker": ticker, "title": title, "side": side,
                             "price": price, "count": filled, "cost": actual_cost,
@@ -6201,16 +6225,23 @@ def closegame_snipe():
                 except Exception:
                     continue
 
-                # Find side where underdog wins at our price range
+                # Find side where the UNDERDOG wins at our price range.
+                # The ticker matches `underdog` (line 6166), so YES on this
+                # ticker = betting the underdog wins. That's the whole point
+                # of closegame ("buy underdogs in tight late games").
+                #
+                # PREVIOUSLY there was a fallback to NO when yes_ask was out
+                # of range but no_ask was in range. That's a bug: NO on the
+                # underdog ticker means betting the underdog LOSES, i.e.
+                # betting the favorite — the opposite of the strategy. If
+                # the underdog's YES price is out of our 30-45c band, it
+                # means Kalshi doesn't agree it's actually an underdog, and
+                # we should skip — not flip sides.
                 side = None
                 price = None
-                # The underdog ticker usually means YES on that team
                 if yes_ask and CLOSEGAME_MIN_PRICE <= yes_ask <= CLOSEGAME_MAX_PRICE:
                     side = "yes"
                     price = yes_ask
-                elif no_ask and CLOSEGAME_MIN_PRICE <= no_ask <= CLOSEGAME_MAX_PRICE:
-                    side = "no"
-                    price = no_ask
 
                 if not side:
                     continue
@@ -6478,7 +6509,8 @@ def closegame_snipe():
                         _cg_edge_reasons.append(f"Win prob: {estimated_win_prob:.0%}")
                         _cg_order_id = order_data.get("order_id", "")
                         if _cg_order_id:
-                            _known_fill_ids.add(_cg_order_id)
+                            with _KNOWN_FILL_IDS_LOCK:
+                                _known_fill_ids.add(_cg_order_id)
                         BOT_STATE.setdefault("closegame_trades_today", []).append({
                             "ticker": ticker, "title": title, "side": side,
                             "price": price, "count": filled, "cost": actual_cost,
@@ -6885,7 +6917,8 @@ def floor_quota_snipe():
         })
         _order_id = order_data.get("order_id", "")
         if _order_id:
-            _known_fill_ids.add(_order_id)
+            with _KNOWN_FILL_IDS_LOCK:
+                _known_fill_ids.add(_order_id)
 
         _edge_data = {"espn_implied": cand["our_prob"], "espn_edge": edge}
         _journal_trade(
@@ -7259,7 +7292,8 @@ def momentum_swing_snipe():
             })
             _oid = order_data.get("order_id", "")
             if _oid:
-                _known_fill_ids.add(_oid)
+                with _KNOWN_FILL_IDS_LOCK:
+                    _known_fill_ids.add(_oid)
 
             _journal_trade(
                 ticker, title, side, price, filled, actual_cost, "momentum_swing",
@@ -7603,7 +7637,8 @@ def goalie_pulled_snipe():
         })
         _oid = order_data.get("order_id", "")
         if _oid:
-            _known_fill_ids.add(_oid)
+            with _KNOWN_FILL_IDS_LOCK:
+                _known_fill_ids.add(_oid)
 
         _journal_trade(
             ticker, title, side, price, filled, actual_cost, "goalie_pulled",
@@ -8723,16 +8758,23 @@ def run_quant_strategies(all_markets):
             "bot_version": BOT_VERSION,
         }
 
-        BOT_STATE["all_trades"].append(trade_record)
-        if success:
-            with _BOT_STATE_LOCK:
+        # Atomic list mutations under lock. Without this, a Flask handler
+        # iterating BOT_STATE["all_trades"] or ["trades_today"] concurrently
+        # can see a torn list or the trade gets silently dropped between
+        # competing appends from the quant loop and other strategies.
+        with _BOT_STATE_LOCK:
+            BOT_STATE["all_trades"].append(trade_record)
+            if success:
                 BOT_STATE["daily_spent_usd"] += cost_usd
                 BOT_STATE["misc_daily_spent"] = BOT_STATE.get("misc_daily_spent", 0) + cost_usd
-            BOT_STATE["trades_today"].append(trade_record)
-            trades_this_round += 1
-            kelly_sizes.append(cost_usd)
-            existing_tickers.add(ticker)
-            existing_events.add(event_key)
+                BOT_STATE["trades_today"].append(trade_record)
+                trades_this_round += 1
+                kelly_sizes.append(cost_usd)
+                existing_tickers.add(ticker)
+                existing_events.add(event_key)
+
+        # Activity log outside the lock (_log_activity acquires its own lock)
+        if success:
             _log_activity(
                 f"🧠 FILLED [{strategy}]: {side.upper()} {ticker} @ {price_cents}c x{count} = ${cost_usd:.2f}",
                 "success"
@@ -9440,12 +9482,18 @@ def _paper_trade_update():
                 _close = pt.get("closing_price")
                 _entry = pt.get("entry_price", 0)
                 if _close is not None and _entry:
+                    # Only backfill clv_5min and clv_final from the closing
+                    # delta. Previously we ALSO synthesized clv_15min and
+                    # clv_30min from the same value, which made all three
+                    # buckets show identical averages (the user observed
+                    # 5/15/30 min all reading +4.39c — a statistical artifact
+                    # from settled trades dominating every bucket with the
+                    # same synthetic number). Leaving 15/30 min as None for
+                    # settle-backfilled trades means they're excluded from
+                    # the 15/30 min averages — fewer data points, but those
+                    # points actually reflect live price evolution.
                     if pt.get("clv_5min") is None:
                         pt["clv_5min"] = _close - _entry
-                    if pt.get("clv_15min") is None:
-                        pt["clv_15min"] = _close - _entry
-                    if pt.get("clv_30min") is None:
-                        pt["clv_30min"] = _close - _entry
                     if pt.get("clv_final") is None:
                         pt["clv_final"] = _close - _entry
                 continue  # already settled
@@ -9467,8 +9515,12 @@ def _paper_trade_update():
                 #     Without this fallback, price_5min/clv_5min stay None FOREVER
                 #     because by the time the scan cycles back around, elapsed is
                 #     already past 5 minutes.
+                # Snapshot membership under lock — settlement thread can be
+                # mutating _known_settled concurrently.
+                with _KNOWN_SETTLED_LOCK:
+                    _ticker_settled = ticker in _known_settled
                 _should_fetch_direct = (
-                    ticker in _known_settled
+                    _ticker_settled
                     or (elapsed >= 300 and pt.get("price_5min") is None)
                     or (elapsed >= 900 and pt.get("price_15min") is None)
                     or (elapsed >= 1800 and pt.get("price_30min") is None)
@@ -9932,7 +9984,7 @@ def _watchdog_check():
     # Kalshi fills rebuilt on deploy). _PRETRADE_STATS resets on deploy, so we
     # must compare against the same time window.
     try:
-        _today_str_gw = datetime.datetime.now(_pacific_tz).strftime("%Y-%m-%d")
+        _today_str_gw = datetime.datetime.now(_PACIFIC).strftime("%Y-%m-%d")
         _trades_placed_today = len(BOT_STATE.get("trades_today", []))  # actual today, not all-time
         _gateway_checked = _PRETRADE_STATS.get("checked", 0)
         # If we've placed trades today but gateway shows 0 checks, something bypassed it
@@ -9957,14 +10009,24 @@ def _watchdog_check():
             _ppct = _p.get("pnl_pct")
             if _ppct is None:
                 continue
-            if _ppct == 0.0:
+            # Narrow band instead of exact 0.0 — a legitimately flat
+            # position (price moved 0c since entry) produces exactly 0.0%
+            # and would spam this alert every 3 minutes. Require tight
+            # clustering (−0.5% to 0.5%) which still catches the fallback
+            # regression (entry forced to current_price → always exactly 0).
+            if -0.5 < _ppct < 0.5:
                 _flat_count += 1
             if _ppct <= -95:
                 _extreme_neg_count += 1
         if len(_wd_active) >= 10:
-            if _flat_count / max(1, len(_wd_active)) >= 0.5:
-                alerts.append(f"⚠️ ENTRY_PRICE SUSPECT: {_flat_count}/{len(_wd_active)} positions show exactly 0% P&L — fallback may have regressed (commit f33a93b)")
-            if _extreme_neg_count >= 5:
+            # Require ≥60% (was 50%) — at 111 positions, 50 legitimately-flat
+            # positions (new MLB bets pre-move) would false-fire. 60%+ is
+            # strong evidence the fallback is regressed.
+            if _flat_count / max(1, len(_wd_active)) >= 0.6:
+                alerts.append(f"⚠️ ENTRY_PRICE SUSPECT: {_flat_count}/{len(_wd_active)} positions near 0% P&L — fallback may have regressed (commit f33a93b)")
+            # Raised threshold from 5 to 7 — a few futures bets near worthless
+            # (expected outcome for longshots) shouldn't trigger alert.
+            if _extreme_neg_count >= 7:
                 alerts.append(f"⚠️ ENTRY_PRICE SUSPECT: {_extreme_neg_count} positions at ≤-95% P&L — possible sell-as-entry bug (commit f33a93b)")
     except Exception:
         pass
@@ -9974,9 +10036,14 @@ def _watchdog_check():
     # Catches the scenario where a deploy or state-reset silently wiped HWM
     # without the "always-increasing" guarantee holding.
     try:
+        # dict() snapshot under CPython's atomic dict copy minimizes (but does
+        # not fully eliminate) the window where another thread's settlement
+        # update could produce a torn read across wins/losses. Full fix would
+        # need a dedicated lock on _SETTLED_HWM, deferred as low-value.
+        _hwm_snap = dict(_SETTLED_HWM)
         _prev_hwm = BOT_STATE.get("_watchdog_last_hwm")
-        _cur_hwm_w = _SETTLED_HWM.get("wins", 0)
-        _cur_hwm_l = _SETTLED_HWM.get("losses", 0)
+        _cur_hwm_w = _hwm_snap.get("wins", 0)
+        _cur_hwm_l = _hwm_snap.get("losses", 0)
         if _prev_hwm:
             _prev_w = _prev_hwm.get("wins", 0)
             _prev_l = _prev_hwm.get("losses", 0)
@@ -10914,9 +10981,12 @@ def _compute_bet_quality_score(price_cents, conviction, espn_edge_data, orderboo
                     score += 2
     except Exception:
         pass
-    # 4. Strategy recent win rate — proven-hot strategies get credit
+    # 4. Strategy recent win rate — proven-hot strategies get credit.
+    # Reads from "per_strategy" (written by _auto_tune_thresholds line ~10461),
+    # NOT "per_strategy_7d" (which is only computed transiently inside the
+    # /analytics/learning API response and not persisted in _LEARNING_STATE).
     try:
-        _stats = (_LEARNING_STATE or {}).get("per_strategy_7d", {}) or {}
+        _stats = (_LEARNING_STATE or {}).get("per_strategy", {}) or {}
         _s = _stats.get(strategy) or {}
         if _s.get("sample_size", 0) >= 5:
             _wr = float(_s.get("win_rate", 0) or 0)
@@ -11457,14 +11527,24 @@ def check_settlements_and_reinvest():
                             if not _r_side:
                                 _r_side = _tr.get("side") or "yes"
                             break
-                # Reconstruct only if we have market result + side + entry + count
+                # Reconstruct only if we have market result + side + entry + count.
+                # Apply Kalshi's 7% fee on the winning side (gross profit × 0.93)
+                # — without it, every reconstructed win overstates PnL by ~7%
+                # and the W/L mismatch watchdog permanently flags the
+                # discrepancy. Losses have no fee.
                 if _settle_result in ("yes", "no") and _r_side and _r_count > 0 and _r_entry > 0:
-                    if _settle_result == "yes":
-                        pnl_cents = (100 - _r_entry) * _r_count if _r_side == "yes" else -_r_entry * _r_count
+                    _won_reconstruction = (
+                        (_settle_result == "yes" and _r_side == "yes")
+                        or (_settle_result == "no" and _r_side == "no")
+                    )
+                    if _won_reconstruction:
+                        # Gross profit per contract × 0.93 (7% fee on profit)
+                        pnl_cents = int(round((100 - _r_entry) * _r_count * 0.93))
                     else:
-                        pnl_cents = -_r_entry * _r_count if _r_side == "yes" else (100 - _r_entry) * _r_count
+                        # Loss: entire entry lost, no fee
+                        pnl_cents = -_r_entry * _r_count
                     pnl_usd = pnl_cents / 100
-                    print(f"[SETTLE] Reconstructed {ticker[:40]} side={_r_side} entry={_r_entry}c count={_r_count} result={_settle_result} -> pnl=${pnl_usd:+.2f}")
+                    print(f"[SETTLE] Reconstructed {ticker[:40]} side={_r_side} entry={_r_entry}c count={_r_count} result={_settle_result} -> pnl=${pnl_usd:+.2f} (net of 7% fee)")
 
             won = pnl_usd > 0.005
             # Track category performance
@@ -12151,11 +12231,17 @@ def _background_loop():
     except Exception as e:
         print(f"[BG] Perf history seed error (non-fatal): {e}")
 
-    # Seed known fill IDs so sync doesn't re-detect existing trades
-    for t in BOT_STATE.get("all_trades", []):
-        if t.get("order_id"):
-            _known_fill_ids.add(t["order_id"])
-    print(f"[SYNC] Seeded {len(_known_fill_ids)} known fill IDs")
+    # Seed known fill IDs so sync doesn't re-detect existing trades.
+    # Snapshot all_trades under BOT_STATE lock, then batch-add fill IDs
+    # under KNOWN_FILL_IDS lock — holds each lock for the minimum time.
+    with _BOT_STATE_LOCK:
+        _seed_trades_snap = list(BOT_STATE.get("all_trades", []))
+    _seed_ids = [t["order_id"] for t in _seed_trades_snap if t.get("order_id")]
+    with _KNOWN_FILL_IDS_LOCK:
+        for _oid in _seed_ids:
+            _known_fill_ids.add(_oid)
+        _seeded_count = len(_known_fill_ids)
+    print(f"[SYNC] Seeded {_seeded_count} known fill IDs")
 
     # Initialize known settled positions on startup — MUST paginate all pages
     # to prevent re-processing old settlements after 200+ trades
@@ -21449,15 +21535,41 @@ def config():
     if auth_err:
         return auth_err
     data = request.get_json(force=True)
-    allowed = {"enabled", "max_bet_usd", "max_daily_usd", "min_balance_usd", "min_deviation",
-                "min_platforms", "min_volume", "min_cash_reserve_pct", "max_open_positions",
-                "scan_interval_seconds"}
+    # Type + range validation per key. Previously `BOT_CONFIG[key] = data[key]`
+    # accepted anything — including strings, negatives, or zero — which would
+    # silently disable a safety gate (e.g. max_daily_usd=-100 bypasses the
+    # budget check, scan_interval_seconds="abc" crashes the scheduler).
+    _numeric_positive = {
+        "max_bet_usd", "max_daily_usd", "min_balance_usd", "scan_interval_seconds",
+        "max_open_positions", "min_platforms", "min_volume",
+    }
+    _numeric_01 = {"min_deviation", "min_cash_reserve_pct"}
+    _bool_keys = {"enabled"}
+    allowed = _numeric_positive | _numeric_01 | _bool_keys
     updated = {}
+    errors = {}
     for key in allowed:
-        if key in data:
-            BOT_CONFIG[key] = data[key]
-            updated[key] = data[key]
-    return jsonify({"updated": updated, "config": BOT_CONFIG})
+        if key not in data:
+            continue
+        v = data[key]
+        if key in _bool_keys:
+            if not isinstance(v, bool):
+                errors[key] = "must be true or false"
+                continue
+        elif key in _numeric_positive:
+            if not isinstance(v, (int, float)) or isinstance(v, bool) or v <= 0:
+                errors[key] = "must be a positive number"
+                continue
+        elif key in _numeric_01:
+            if not isinstance(v, (int, float)) or isinstance(v, bool) or not (0 <= v <= 1):
+                errors[key] = "must be a number between 0 and 1"
+                continue
+        BOT_CONFIG[key] = v
+        updated[key] = v
+    resp = {"updated": updated, "config": BOT_CONFIG}
+    if errors:
+        resp["errors"] = errors
+    return jsonify(resp)
 
 
 @app.route("/execute-trade", methods=["POST"])
