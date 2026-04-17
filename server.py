@@ -3059,11 +3059,16 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
         _PRETRADE_STATS["reasons"]["bad_price"] = _PRETRADE_STATS["reasons"].get("bad_price", 0) + 1
         return False, f"Price {price_cents}c outside valid range 1-99"
 
-    # GLOBAL MINIMUM PRICE FLOOR — sub-15c contracts are net-negative longshots
-    if price_cents < 15:
+    # GLOBAL MINIMUM PRICE FLOOR — sub-25c contracts are net-negative longshots.
+    # Raised from 15c to 25c on 2026-04-17 during model-downturn: recent losing
+    # trades cluster at low entry prices (median loss entry = 26c), and your
+    # own commit 8658be4 documented actual 7% WR vs displayed 58% — so the
+    # bot's longshot picks are losing more than they win. Lift the floor until
+    # the model proves itself again.
+    if price_cents < 25:
         _PRETRADE_STATS["blocked"] += 1
         _PRETRADE_STATS["reasons"]["below_price_floor"] = _PRETRADE_STATS["reasons"].get("below_price_floor", 0) + 1
-        return False, f"Price {price_cents}c below 15c minimum floor"
+        return False, f"Price {price_cents}c below 25c minimum floor"
 
     # GLOBAL MAXIMUM PRICE CEILING — data shows 61-80c is the most profitable range
     # (73.2% WR, +$139 across 224 bets). Cap at 80c; above that payoff is too thin.
@@ -3159,9 +3164,11 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
 
     # 6. EDGE CHECK: if we have edge, verify it's meaningful (> fee drag + slippage)
     if edge is not None:
-        # Real cost of a trade: 7% fee on wins + 2-3c slippage + model error
-        # This means we need ~5% edge just to break even
-        min_edge = 0.05
+        # Real cost of a trade: 7% fee on wins + 2-3c slippage + model error.
+        # Break-even is ~5%, but during model downturn we require an extra safety
+        # margin. Raised from 5% to 8% on 2026-04-17 — cuts trade volume but
+        # each surviving signal has more buffer against model error.
+        min_edge = 0.08
         if edge < min_edge:
             _PRETRADE_STATS["blocked"] += 1
             _PRETRADE_STATS["reasons"]["insufficient_edge"] = _PRETRADE_STATS["reasons"].get("insufficient_edge", 0) + 1
@@ -8055,9 +8062,13 @@ def enhanced_auto_exit():
         pnl_pct = pos.get("pnl_pct")
         ticker = pos["ticker"]
 
-        # ZOMBIE CLEANUP: sell positions settling 60+ days out that are underwater.
-        # These tie up capital that could earn returns on live sports bets.
-        # Only sell if current price > 1c (there's a bid) and position is losing.
+        # ZOMBIE CLEANUP: free capital stuck in stale far-out positions.
+        # A position that settles 60+ days from now and sits at ≤5c is a dead
+        # longshot — the overwhelming majority resolve worthless. Lock in the
+        # few cents we can recoup now via a resting GTC sell at the current bid
+        # (resting because these markets are illiquid and IOC usually won't
+        # fill at 1c). Also still fires the original "underwater" branch for
+        # positions that had entry > current.
         _close_time = pos.get("close_time") or ""
         if _close_time:
             try:
@@ -8065,26 +8076,26 @@ def enhanced_auto_exit():
                 _days_to_settle = (_zt - now).total_seconds() / 86400
                 _cur = pos.get("current_price") or 0
                 _entry = pos.get("entry_price") or _cur
-                if _days_to_settle > 60 and _cur < _entry and _cur >= 2:
-                    # This is a zombie — sell at market to free capital
+                _is_underwater = (_cur < _entry and _cur >= 2)
+                _is_dead_longshot = (_cur is not None and 1 <= _cur <= 5)
+                if _days_to_settle > 60 and (_is_underwater or _is_dead_longshot):
                     _zombie_side = pos.get("side", "yes")
                     _zombie_count = pos.get("count", 0)
-                    _sell_price = max(1, _cur - 1)
+                    # Sell at current bid. For 1c positions we can't bump down;
+                    # for higher ones we match market. GTC so it waits for a
+                    # buyer instead of dying as an un-fillable IOC.
+                    _sell_price = max(1, _cur)
                     try:
-                        _zr = sell_kalshi_position(ticker, _zombie_side, _sell_price, _zombie_count)
-                        _zfilled = 0
-                        try:
-                            _zfilled = int(float(str(_zr.get("order", {}).get("filled_count_fp") or 0)))
-                        except Exception:
-                            pass
-                        if _zfilled > 0:
-                            _zpnl = (_sell_price - _entry) * _zfilled / 100
+                        _zr = sell_kalshi_position(ticker, _zombie_side, _sell_price, _zombie_count, resting=True)
+                        if isinstance(_zr, dict) and not _zr.get("error"):
+                            with _RESTING_SELLS_LOCK:
+                                _resting_sells.add(ticker)
                             _log_activity(
-                                f"🧟 ZOMBIE EXIT: {ticker} SOLD {_zfilled}x @ {_sell_price}c "
-                                f"(entry {_entry}c, settles in {_days_to_settle:.0f}d) P&L=${_zpnl:.2f} — freed capital",
+                                f"🧟 ZOMBIE SELL PLACED: {ticker} {_zombie_count}x @ {_sell_price}c GTC "
+                                f"(entry {_entry}c, cur {_cur}c, settles in {_days_to_settle:.0f}d) — waiting for buyer",
                                 "info"
                             )
-                            exits.append({"ticker": ticker, "action": "zombie_exit", "filled": _zfilled, "pnl_usd": _zpnl})
+                            exits.append({"ticker": ticker, "action": "zombie_exit", "resting": True, "price": _sell_price, "count": _zombie_count})
                     except Exception:
                         pass
                     continue
