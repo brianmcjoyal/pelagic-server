@@ -9359,6 +9359,20 @@ def _paper_trade_update():
             _pt_snapshot = list(_PAPER_TRADES)
         for pt in _pt_snapshot:
             if pt.get("result") is not None:
+                # Already settled. Best-effort one-time CLV backfill for trades
+                # that settled before the CLV capture fallback existed — otherwise
+                # the whole paper dashboard says "-- trades" on every CLV metric.
+                _close = pt.get("closing_price")
+                _entry = pt.get("entry_price", 0)
+                if _close is not None and _entry:
+                    if pt.get("clv_5min") is None:
+                        pt["clv_5min"] = _close - _entry
+                    if pt.get("clv_15min") is None:
+                        pt["clv_15min"] = _close - _entry
+                    if pt.get("clv_30min") is None:
+                        pt["clv_30min"] = _close - _entry
+                    if pt.get("clv_final") is None:
+                        pt["clv_final"] = _close - _entry
                 continue  # already settled
 
             ticker = pt["ticker"]
@@ -9369,9 +9383,22 @@ def _paper_trade_update():
 
             m = market_map.get(ticker)
             if not m:
-                # Market not in active cache — likely settled. Check Kalshi API.
-                if ticker in _known_settled:
-                    # We know it settled — look up the result
+                # Market not in active scan cache. This is common — the scanner only
+                # caches the ~80 event batch it most recently iterated, so a live
+                # MLB market can be missing for 5-30 seconds between scan cycles.
+                # Strategy:
+                #  1. If the market is known-settled → query Kalshi, settle paper trade
+                #  2. Otherwise → fetch the single market directly so CLV captures.
+                #     Without this fallback, price_5min/clv_5min stay None FOREVER
+                #     because by the time the scan cycles back around, elapsed is
+                #     already past 5 minutes.
+                _should_fetch_direct = (
+                    ticker in _known_settled
+                    or (elapsed >= 300 and pt.get("price_5min") is None)
+                    or (elapsed >= 900 and pt.get("price_15min") is None)
+                    or (elapsed >= 1800 and pt.get("price_30min") is None)
+                )
+                if _should_fetch_direct:
                     try:
                         _pm_h = signed_headers("GET", f"/markets/{ticker}")
                         _pm_r = requests.get(
@@ -9382,7 +9409,7 @@ def _paper_trade_update():
                             _pm_mkt = _pm_r.json().get("market", {})
                             _pm_result = _pm_mkt.get("result", "")
                             if _pm_result:
-                                # result is "yes" or "no" — did OUR side win?
+                                # Settled — record result and settle paper trade
                                 won = (_pm_result == side)
                                 pt["result"] = "win" if won else "loss"
                                 pt["closing_price"] = 97 if won else 3
@@ -9391,19 +9418,37 @@ def _paper_trade_update():
                                     pt["pnl_cents"] = round((100 - entry_price) * 0.93, 1)
                                 else:
                                     pt["pnl_cents"] = -entry_price
+                                # Best-effort CLV backfill: if we never captured
+                                # milestone CLV, use closing_price so the trade
+                                # isn't entirely absent from the CLV metric.
+                                if pt.get("clv_5min") is None and elapsed >= 300:
+                                    pt["clv_5min"] = pt["closing_price"] - entry_price
+                                    pt["price_5min"] = pt["closing_price"]
                                 print(f"[PAPER] Settled {ticker}: {'WIN' if won else 'LOSS'} (result={_pm_result}, side={side})")
+                                continue
+                            # Still live — extract current price and let CLV logic below handle it
+                            m = _pm_mkt
                     except Exception as _pme:
                         print(f"[PAPER] Market lookup error for {ticker}: {_pme}")
-                elif elapsed > 86400:
-                    pt["result"] = "expired"
-                continue
+                if not m:
+                    if elapsed > 86400:
+                        pt["result"] = "expired"
+                    continue
 
-            # Get current price for our side
+            # Get current price for our side. Supports both:
+            #  (a) scan-cache markets (normalized: yes_ask_cents)
+            #  (b) direct-API fallback (raw Kalshi: yes_ask_dollars/yes_ask)
             try:
                 if side == "yes":
-                    _cur = m.get("yes_ask_cents") or m.get("yes_ask") or m.get("yes_price")
+                    _cur = (m.get("yes_ask_cents")
+                            or m.get("yes_ask_dollars")
+                            or m.get("yes_ask")
+                            or m.get("yes_price"))
                 else:
-                    _cur = m.get("no_ask_cents") or m.get("no_ask") or m.get("no_price")
+                    _cur = (m.get("no_ask_cents")
+                            or m.get("no_ask_dollars")
+                            or m.get("no_ask")
+                            or m.get("no_price"))
                 if _cur:
                     _cf = float(str(_cur))
                     current_price = int(round(_cf * 100)) if _cf < 1.5 else int(round(_cf))
