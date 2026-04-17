@@ -3989,15 +3989,65 @@ def run_bot_scan():
         with _BOT_STATE_LOCK:
             _GAME_EXPOSURE.clear()
         _log_activity("Daily reset — new trading day started")
-        # Send daily summary to Discord (using pre-reset values)
+        # Send daily summary to Discord (using pre-reset values). Enhanced on
+        # 2026-04-17 with health signals so the user can tell at a glance
+        # whether the bot needs attention without opening the dashboard.
         try:
+            # Compute yesterday's realized W/L from trade journal
+            _y_wins = _y_losses = 0
+            _y_cutoff = (datetime.datetime.now(tz=_PACIFIC) - datetime.timedelta(hours=36)).isoformat()
+            try:
+                with _TRADE_JOURNAL_LOCK:
+                    for _jt in _TRADE_JOURNAL:
+                        _stime = _jt.get("settlement_time") or ""
+                        if _stime >= _y_cutoff:
+                            if _jt.get("result") == "win":
+                                _y_wins += 1
+                            elif _jt.get("result") == "loss":
+                                _y_losses += 1
+            except Exception:
+                pass
+            _y_total = _y_wins + _y_losses
+            _y_wr_str = f"{_y_wins / _y_total * 100:.0f}% ({_y_wins}W/{_y_losses}L)" if _y_total else "no settlements"
+
+            # Collect health signals
+            _health_flags = []
+            try:
+                _dd = _drawdown_level()
+                if _dd >= 2:
+                    _health_flags.append("🛑 DRAWDOWN HALT (lvl 2)")
+                elif _dd >= 1:
+                    _health_flags.append("⚠️ DRAWDOWN TIGHT (lvl 1)")
+            except Exception:
+                pass
+            try:
+                with _WATCHDOG_ALERTS_LOCK:
+                    _n_alerts = len(_WATCHDOG_ALERTS)
+                if _n_alerts > 0:
+                    _health_flags.append(f"⚠️ {_n_alerts} watchdog alerts active")
+            except Exception:
+                pass
+            try:
+                _paused_strats = list(_STRATEGY_PAUSE.keys())
+                if _paused_strats:
+                    _health_flags.append(f"⏸️ paused: {', '.join(_paused_strats)}")
+            except Exception:
+                pass
+            if not BOT_CONFIG.get("enabled"):
+                _health_flags.append("🔴 AUTO-TRADE OFF")
+
+            _status_line = "✅ all clear" if not _health_flags else " | ".join(_health_flags)
+            _header_color = 0x00dc5a if not _health_flags else 0xffb400
+
             _send_discord(
-                f"📊 **Daily Summary**\n"
-                f"Sniper: {_yesterday_sn_trades} trades (${_yesterday_sn_spent:.2f})\n"
-                f"MoonShark: {_yesterday_ms_trades} trades (${_yesterday_ms_spent:.2f})\n"
-                f"CloseGame: {_yesterday_cg_trades} trades (${_yesterday_cg_spent:.2f})\n"
-                f"Total P&L: ${_yesterday_pnl:+.2f}",
-                0x7a7aff
+                f"📊 **Daily Summary** — yesterday\n"
+                f"Status: {_status_line}\n"
+                f"W/L: {_y_wr_str}\n"
+                f"P&L: ${_yesterday_pnl:+.2f}\n"
+                f"Trades: Sniper {_yesterday_sn_trades} (${_yesterday_sn_spent:.2f}) · "
+                f"MoonShark {_yesterday_ms_trades} (${_yesterday_ms_spent:.2f}) · "
+                f"CloseGame {_yesterday_cg_trades} (${_yesterday_cg_spent:.2f})",
+                _header_color
             )
         except Exception:
             pass
