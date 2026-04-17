@@ -3715,9 +3715,42 @@ def check_position_prices():
                     entry_price = int(round(_total_cost / _total_count))
                 else:
                     entry_price = _entry_buys[0].get("price_cents")
-            # If we have no buy history we cannot infer cost basis reliably.
-            # (The old market_exposure/count fallback was using *current* market
-            # value, which made every position look exactly flat — misleading.)
+            # Fallbacks when all_trades has no matching buy — this is common
+            # after state wipes on deploy, because all_trades is capped at 500
+            # and rebuild-from-Kalshi doesn't always repopulate buy records
+            # for every position. Without a fallback, the dashboard shows
+            # $0.00 unrealized P&L for every unmatched position (the bug
+            # surfaced on 2026-04-17). We try two reliable fallbacks:
+            if entry_price is None and abs_count > 0:
+                # Fallback 1: Kalshi's own average_price field when present
+                _avg_raw = None
+                if side == "yes":
+                    _avg_raw = pos.get("average_yes_price_dollars") or pos.get("average_yes_price")
+                else:
+                    _avg_raw = pos.get("average_no_price_dollars") or pos.get("average_no_price")
+                if _avg_raw:
+                    try:
+                        _av = float(str(_avg_raw))
+                        entry_price = int(round(_av * 100)) if _av < 1.5 else int(round(_av))
+                    except Exception:
+                        pass
+                # Fallback 2: total_traded_cents / count — accurate IFF no
+                # sells have happened (realized_pnl_cents == 0), because then
+                # total_traded equals total buy value. If realized_pnl != 0,
+                # sells have muddied the total and we leave entry=None rather
+                # than lie. This is strictly better than the old
+                # market_exposure/count fallback (which used CURRENT price
+                # and always produced 0% pnl).
+                if entry_price is None:
+                    _realized = pos.get("realized_pnl_cents")
+                    if _realized in (None, 0):
+                        _total_traded = _parse_kalshi_dollars(
+                            pos.get("total_traded_dollars") or pos.get("total_traded")
+                        )
+                        if _total_traded <= 0:
+                            _total_traded = pos.get("total_traded_cents") or 0
+                        if _total_traded > 0:
+                            entry_price = int(round(_total_traded / abs_count))
 
             current_price = current_yes_price if side == "yes" else current_no_price
             unrealized_pnl = None
