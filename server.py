@@ -9625,6 +9625,8 @@ def _paper_trade_stats():
         "clv_15min_avg": avg_clv_15,
         "clv_30min_avg": avg_clv_30,
         "clv_5min_count": len(clv_5),
+        "clv_15min_count": len(clv_15),
+        "clv_30min_count": len(clv_30),
         "verdict": verdict,
         "by_strategy": by_strategy,
         "trades": _pts[-50:],  # last 50 for display
