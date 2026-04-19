@@ -27282,7 +27282,7 @@ async function loadShadowFade() {
     var overallTxt, overallColor, overallBg;
     if (profitable > 0) { overallTxt = profitable + ' STRATEGY' + (profitable>1?'IES':'Y') + ' SHOULD BE FLIPPED'; overallColor = '#00dc5a'; overallBg = '#0a1a10'; }
     else if (marginal > 0) { overallTxt = marginal + ' marginal — keep watching'; overallColor = '#ffb400'; overallBg = '#1a1408'; }
-    else if (noise > 0 && waiting === 0) { overallTxt = 'all noise — flipping wouldn\'t help'; overallColor = '#888'; overallBg = '#141414'; }
+    else if (noise > 0 && waiting === 0) { overallTxt = 'all noise — flipping would not help'; overallColor = '#888'; overallBg = '#141414'; }
     else { overallTxt = 'collecting data…'; overallColor = '#888'; overallBg = '#1a1a1a'; }
     overall.textContent = overallTxt;
     overall.style.color = overallColor;
