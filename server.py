@@ -12895,15 +12895,20 @@ def _background_loop():
                     "total_invested_usd": _total_invested2,
                     "total_unrealized_usd": _total_unrealized,
                     "daily_pnl_usd": _daily_pnl,
-                    # Use /settled cache as single source of truth for W/L/P&L
-                    # This ensures header and Performance tab always match
-                    "wins": _SETTLED_CACHE["data"]["wins"] if _SETTLED_CACHE.get("data") else _d1_wins,
-                    "losses": _SETTLED_CACHE["data"]["losses"] if _SETTLED_CACHE.get("data") else _d1_losses,
+                    # JOURNAL-TRUTH PRIMARY: every consumer (dashboard header,
+                    # Performance card, Brain insights) gets the bot's own log
+                    # by default. _SETTLED_CACHE is kept exposed as
+                    # *_all_time so old code paths still work, but the truth
+                    # is the journal — it doesn't include zeroed/duplicate
+                    # Kalshi positions that inflated the old number by 30+ pp.
+                    "wins": _d1_wins if (_d1_wins + _d1_losses) > 0 else (_SETTLED_CACHE["data"]["wins"] if _SETTLED_CACHE.get("data") else 0),
+                    "losses": _d1_losses if (_d1_wins + _d1_losses) > 0 else (_SETTLED_CACHE["data"]["losses"] if _SETTLED_CACHE.get("data") else 0),
                     "wins_all_time": _wins2,
                     "losses_all_time": _losses2,
                     "breakeven": 0,
-                    "win_rate": round(_SETTLED_CACHE["data"]["wins"] / max(1, _SETTLED_CACHE["data"]["wins"] + _SETTLED_CACHE["data"]["losses"]) * 100, 1) if _SETTLED_CACHE.get("data") else _d1_wr,
+                    "win_rate": _d1_wr if (_d1_wins + _d1_losses) > 0 else (round(_SETTLED_CACHE["data"]["wins"] / max(1, _SETTLED_CACHE["data"]["wins"] + _SETTLED_CACHE["data"]["losses"]) * 100, 1) if _SETTLED_CACHE.get("data") else 0),
                     "win_rate_all_time": _wr2,
+                    "wr_source": "journal" if (_d1_wins + _d1_losses) > 0 else "hwm_cache",
                     "win_rate_7d": _7d_wr,
                     # REAL settled-only numbers from trade journal — no inflation
                     "settled_only_wins": _journal_wins,
