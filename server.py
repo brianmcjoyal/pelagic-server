@@ -23288,6 +23288,18 @@ a:hover { color: #7da5f5; }
     </div>
   </div>
 
+  <!-- Shadow-Fade Comparison -->
+  <div class="section" style="margin-bottom:16px;padding:16px;border:1px solid #2a1f3a">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <div style="color:#a78bfa;font-size:14px;font-weight:700">🎩 Shadow-Fade — Would Reversing the Bot Make Money?</div>
+      <div id="shadow-fade-overall-verdict" style="font-size:11px;font-weight:700;padding:3px 8px;border-radius:4px;background:#1a1a1a;color:#888">collecting data…</div>
+    </div>
+    <div style="color:#666;font-size:11px;margin-bottom:10px">Every paper trade auto-logs a reversed twin. After ~30 settled fades per strategy, this card tells you if flipping that strategy would be profitable.</div>
+    <div id="shadow-fade-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px">
+      <div style="color:#555;font-size:12px;text-align:center;padding:20px">No fade trades settled yet</div>
+    </div>
+  </div>
+
   <!-- Recent Paper Trades -->
   <div class="section" style="padding:16px">
     <div style="color:#ccc;font-size:14px;font-weight:700;margin-bottom:10px">Recent Paper Trades</div>
@@ -27197,9 +27209,69 @@ async function loadInsights() {
 
 // --- Paper Trading Tab ---
 var _paperLoadedAt = 0;
+async function loadShadowFade() {
+  try {
+    var d = await fetch(API + '/shadow-fade-stats').then(function(r){ return r.json(); });
+    var grid = document.getElementById('shadow-fade-grid');
+    var overall = document.getElementById('shadow-fade-overall-verdict');
+    var rows = d.strategies || [];
+    if (!rows.length || !rows.some(function(r){ return r.fade && r.fade.n > 0; })) {
+      grid.innerHTML = '<div style="color:#555;font-size:12px;text-align:center;padding:20px">No fade trades settled yet — check back after ~30 settled fades per strategy.</div>';
+      overall.textContent = 'collecting data…';
+      overall.style.background = '#1a1a1a'; overall.style.color = '#888';
+      return;
+    }
+    var profitable = 0, marginal = 0, noise = 0, waiting = 0;
+    var html = '';
+    rows.forEach(function(r){
+      var real = r.real || {};
+      var fade = r.fade || {};
+      var verdict = r.verdict || 'NEEDS_MORE_DATA';
+      var color = '#888', bg = '#141414', label = verdict;
+      if (verdict === 'FADE_PROFITABLE') { color = '#00dc5a'; bg = '#0a1a10'; label = 'FLIP IT'; profitable++; }
+      else if (verdict === 'FADE_BETTER_BUT_MARGINAL') { color = '#ffb400'; bg = '#1a1408'; label = 'MARGINAL'; marginal++; }
+      else if (verdict === 'NOISE') { color = '#888'; bg = '#141414'; label = 'NOISE'; noise++; }
+      else { label = 'NEED MORE'; waiting++; }
+      var realWr = (real.wr !== null && real.wr !== undefined) ? real.wr.toFixed(0) + '%' : '—';
+      var fadeWr = (fade.wr !== null && fade.wr !== undefined) ? fade.wr.toFixed(0) + '%' : '—';
+      var realPnl = (real.pnl_usd >= 0 ? '+$' : '-$') + Math.abs(real.pnl_usd || 0).toFixed(2);
+      var fadePnl = (fade.pnl_usd >= 0 ? '+$' : '-$') + Math.abs(fade.pnl_usd || 0).toFixed(2);
+      html += '<div style="background:' + bg + ';border:1px solid #2a2a2a;border-radius:8px;padding:10px 12px">';
+      html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">';
+      html += '<div style="color:#eee;font-size:13px;font-weight:700">' + r.strategy + '</div>';
+      html += '<div style="color:' + color + ';font-size:10px;font-weight:800;letter-spacing:0.5px">' + label + '</div>';
+      html += '</div>';
+      html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:11px">';
+      html += '<div style="background:#0a0a0a;padding:6px 8px;border-radius:4px">';
+      html += '<div style="color:#555;font-size:9px;text-transform:uppercase">REAL</div>';
+      html += '<div style="color:#ddd;font-size:14px;font-weight:700">' + realWr + '</div>';
+      html += '<div style="color:#666;font-size:9px">' + (real.wins||0) + 'W/' + (real.losses||0) + 'L · ' + realPnl + '</div>';
+      html += '</div>';
+      html += '<div style="background:#0a0a0a;padding:6px 8px;border-radius:4px">';
+      html += '<div style="color:#a78bfa;font-size:9px;text-transform:uppercase">FADE</div>';
+      html += '<div style="color:' + color + ';font-size:14px;font-weight:700">' + fadeWr + '</div>';
+      html += '<div style="color:#666;font-size:9px">' + (fade.wins||0) + 'W/' + (fade.losses||0) + 'L · ' + fadePnl + '</div>';
+      html += '</div></div></div>';
+    });
+    grid.innerHTML = html;
+    var overallTxt, overallColor, overallBg;
+    if (profitable > 0) { overallTxt = profitable + ' STRATEGY' + (profitable>1?'IES':'Y') + ' SHOULD BE FLIPPED'; overallColor = '#00dc5a'; overallBg = '#0a1a10'; }
+    else if (marginal > 0) { overallTxt = marginal + ' marginal — keep watching'; overallColor = '#ffb400'; overallBg = '#1a1408'; }
+    else if (noise > 0 && waiting === 0) { overallTxt = 'all noise — flipping wouldn\'t help'; overallColor = '#888'; overallBg = '#141414'; }
+    else { overallTxt = 'collecting data…'; overallColor = '#888'; overallBg = '#1a1a1a'; }
+    overall.textContent = overallTxt;
+    overall.style.color = overallColor;
+    overall.style.background = overallBg;
+  } catch(e) {
+    var grid = document.getElementById('shadow-fade-grid');
+    if (grid) grid.innerHTML = '<div style="color:#ff5000;font-size:11px">Error: ' + e.message + '</div>';
+  }
+}
+
 async function loadPaperTrades(force) {
   if (!force && Date.now() - _paperLoadedAt < 5000) return;
   _paperLoadedAt = Date.now();
+  loadShadowFade();
   try {
     var data = await fetch(API + '/paper-trades').then(function(r){ return r.json(); });
     // Update verdict
