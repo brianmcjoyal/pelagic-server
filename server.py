@@ -9791,11 +9791,111 @@ def _log_paper_trade(ticker, title, side, price, win_prob, edge, ev_cents, strat
             _PAPER_TRADES[:] = _PAPER_TRADES[-_PAPER_TRADES_MAX:]
     _PAPER_COOLDOWN[_cooldown_key] = now_ts
     print(f"[PAPER] {strategy} {side.upper()} {ticker} @ {price}c | prob={win_prob:.0%} edge={edge:.0%} EV={ev_cents:.1f}c | {game_state}")
+
+    # SHADOW-FADE TWIN — log the reversed bet so we can measure whether fading
+    # the model would be profitable. Pure passive logging; never placed live.
+    # If the journal's 10% WR is real model anti-edge, the fade twin should
+    # show ~80%+ WR after enough samples. Disable via BOT_CONFIG if unwanted.
+    if (BOT_CONFIG.get("shadow_fade_enabled", True)
+            and not strategy.startswith("shadow_fade_")):
+        try:
+            _opp_side = "no" if side == "yes" else "yes"
+            _opp_price = max(1, min(99, 100 - int(price)))
+            _opp_prob = max(0.0, min(1.0, 1.0 - float(win_prob or 0)))
+            _opp_strategy = f"shadow_fade_{strategy}"
+            _opp_cooldown_key = f"{ticker}_{_opp_strategy}"
+            if not (_opp_cooldown_key in _PAPER_COOLDOWN
+                    and now_ts - _PAPER_COOLDOWN[_opp_cooldown_key] < 600):
+                _opp_paper = {
+                    "ticker": ticker,
+                    "title": (title or "")[:60],
+                    "side": _opp_side,
+                    "sport": sport,
+                    "strategy": _opp_strategy,
+                    "entry_price": _opp_price,
+                    "espn_prob": round(_opp_prob, 3),
+                    "kalshi_implied": round(_opp_price / 100.0, 3),
+                    "edge": round(_opp_prob - (_opp_price / 100.0), 3),
+                    "ev_cents": 0,
+                    "game_state": game_state,
+                    "entry_time": now.isoformat(),
+                    "entry_ts": now_ts,
+                    "price_5min": None, "price_15min": None, "price_30min": None,
+                    "clv_5min": None, "clv_15min": None, "clv_30min": None,
+                    "closing_price": None, "clv_final": None,
+                    "result": None, "pnl_cents": None,
+                }
+                with _PAPER_TRADES_LOCK:
+                    _PAPER_TRADES.append(_opp_paper)
+                    if len(_PAPER_TRADES) > _PAPER_TRADES_MAX:
+                        _PAPER_TRADES[:] = _PAPER_TRADES[-_PAPER_TRADES_MAX:]
+                _PAPER_COOLDOWN[_opp_cooldown_key] = now_ts
+        except Exception:
+            pass
+
     # Persist immediately so paper trades survive deploys/restarts
     try:
         _save_state()
     except Exception:
         pass
+
+
+@app.route("/shadow-fade-stats")
+def shadow_fade_stats():
+    """Compare shadow_fade_<strategy> WR vs the original strategy WR.
+
+    Verdict: FADE_PROFITABLE means the model is genuinely anti-correlated
+    and reversing every signal would be positive-EV. NEEDS_MORE_DATA when
+    sample size is too small to draw conclusions.
+    """
+    with _PAPER_TRADES_LOCK:
+        trades = list(_PAPER_TRADES)
+    by_strategy = {}
+    for t in trades:
+        s = t.get("strategy", "unknown")
+        if t.get("result") not in ("win", "loss"):
+            continue
+        d = by_strategy.setdefault(s, {"w": 0, "l": 0, "pnl": 0.0})
+        d["w" if t["result"] == "win" else "l"] += 1
+        d["pnl"] += float(t.get("pnl_cents") or 0) / 100.0
+
+    pairs = []
+    for s, d in by_strategy.items():
+        if s.startswith("shadow_fade_"):
+            continue
+        fade = by_strategy.get(f"shadow_fade_{s}")
+        n = d["w"] + d["l"]
+        wr = round(d["w"] / n * 100, 1) if n else None
+        out = {
+            "strategy": s,
+            "real": {"wins": d["w"], "losses": d["l"], "n": n, "wr": wr,
+                     "pnl_usd": round(d["pnl"], 2)},
+        }
+        if fade:
+            fn = fade["w"] + fade["l"]
+            fwr = round(fade["w"] / fn * 100, 1) if fn else None
+            out["fade"] = {"wins": fade["w"], "losses": fade["l"], "n": fn,
+                           "wr": fwr, "pnl_usd": round(fade["pnl"], 2)}
+            if fn >= 30 and fwr is not None and wr is not None:
+                if fwr - wr >= 20:
+                    out["verdict"] = "FADE_PROFITABLE"
+                elif abs(fwr - wr) < 10:
+                    out["verdict"] = "NOISE"
+                else:
+                    out["verdict"] = "FADE_BETTER_BUT_MARGINAL"
+            else:
+                out["verdict"] = "NEEDS_MORE_DATA"
+        pairs.append(out)
+    pairs.sort(key=lambda x: -(x.get("real", {}).get("n") or 0))
+    return jsonify({
+        "strategies": pairs,
+        "explanation": (
+            "Compares each strategy's real paper-trade WR against the WR of "
+            "its automatically-logged reversed twin. After ~30 settled fade "
+            "trades per strategy, FADE_PROFITABLE means flipping that "
+            "strategy's signals would beat keeping them as-is."
+        ),
+    })
 
 
 def _paper_trade_stats():
