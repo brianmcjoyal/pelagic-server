@@ -26053,13 +26053,14 @@ async function loadSettled() {
 async function loadPerformance() {
   try {
     // Fetch chart data + all KPI data in parallel
-    var [_ph, settledData, analyticsData, tradesData, insightsData, portfolioData] = await Promise.all([
+    var [_ph, settledData, analyticsData, tradesData, insightsData, portfolioData, wrTruth] = await Promise.all([
       loadPerfHistory(),
       fetch(API + '/settled').then(r => r.json()),
       fetch(API + '/analytics').then(r => r.json()),
       fetch(API + '/trades').then(r => r.json()),
       fetch(API + '/insights').then(r => r.json()).catch(function() { return {insights:[]}; }),
-      fetch(API + '/portfolio-summary').then(r => r.json()).catch(function() { return {}; })
+      fetch(API + '/portfolio-summary').then(r => r.json()).catch(function() { return {}; }),
+      fetch(API + '/wr-truth').then(r => r.json()).catch(function() { return null; })
     ]);
 
     var allSettled = settledData.settled || [];
@@ -26119,6 +26120,21 @@ async function loadPerformance() {
     losses = settledData.losses || losses;
     var total = wins + losses;
     var winRate = total > 0 ? (wins / total * 100) : (settledData.win_rate || 0);
+
+    // /wr-truth override: when journal disagrees with HWM cache by >15pp,
+    // the cache is padded with zeroed/duplicate Kalshi positions. Trust the
+    // journal — it's the bot's own immutable log of what actually happened.
+    var _wrSource = 'cache';
+    if (wrTruth && wrTruth.verdict === 'TRUST_JOURNAL' && wrTruth.journal && wrTruth.journal.all_time) {
+      var _jat = wrTruth.journal.all_time;
+      if (_jat.n > 0) {
+        wins = _jat.wins;
+        losses = _jat.losses;
+        total = _jat.n;
+        winRate = _jat.wr;
+        _wrSource = 'journal-truth';
+      }
+    }
     var roi = totalWagered > 0 ? (totalPnl / totalWagered * 100) : 0;
     var avgWin = winPnls.length > 0 ? winPnls.reduce(function(a,b){return a+b;},0) / winPnls.length : 0;
     var avgLoss = lossPnls.length > 0 ? Math.abs(lossPnls.reduce(function(a,b){return a+b;},0) / lossPnls.length) : 0;
@@ -26174,7 +26190,11 @@ async function loadPerformance() {
     var sameDayWRColor = sameDayWR >= 50 ? '#00dc5a' : sameDayWR >= 30 ? '#ffb400' : '#ff5000';
 
     khtml += kpi('Total P&L', (portfolioPnl >= 0 ? '+$' : '-$') + Math.abs(portfolioPnl).toFixed(2), portfolioPnlColor, 'portfolio vs $' + DAY1_STARTING_BALANCE.toFixed(0) + ' start');
-    khtml += kpi('All-Time W/L', total > 0 ? wins + 'W / ' + losses + 'L' : '--', total > 0 ? wrColor : '#888', total > 0 ? winRate.toFixed(1) + '% win rate (' + total + ' trades)' : 'no settled trades yet');
+    var _wlSub = total > 0
+      ? winRate.toFixed(1) + '% win rate (' + total + ' trades' + (_wrSource === 'journal-truth' ? ' · journal' : '') + ')'
+      : 'no settled trades yet';
+    var _wlLabel = _wrSource === 'journal-truth' ? 'All-Time W/L (truth)' : 'All-Time W/L';
+    khtml += kpi(_wlLabel, total > 0 ? wins + 'W / ' + losses + 'L' : '--', total > 0 ? wrColor : '#888', _wlSub);
     khtml += kpi('Same-Day W/L', sameDayTotal > 0 ? sameDayWins + 'W / ' + sameDayLosses + 'L' : '--', sameDayTotal > 0 ? sameDayWRColor : '#888', sameDayTotal > 0 ? sameDayWR.toFixed(1) + '% win rate (' + sameDayTotal + ' trades)' : 'bets placed & settled same day');
     khtml += kpi('Daily P&L', (_dailyPl >= 0 ? '+$' : '-$') + Math.abs(_dailyPl).toFixed(2), _dailyPl >= 0 ? '#00dc5a' : '#ff5000', 'since midnight PT');
     khtml += kpi('Expectancy', total > 0 ? ((expectancy >= 0 ? '+$' : '-$') + Math.abs(expectancy).toFixed(2)) : '--', total > 0 ? expColor : '#888', total > 0 ? 'per trade' : '');
