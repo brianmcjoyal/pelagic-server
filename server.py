@@ -17145,6 +17145,126 @@ def portfolio_summary():
     })
 
 
+@app.route("/healthcheck-deep")
+def healthcheck_deep():
+    """Deep health check — returns 200 only if every critical subsystem is OK.
+
+    Powers the dashboard's red banner. Each check returns severity:
+      critical = banner shows red, this is a real problem
+      warn     = banner shows orange, watch but not urgent
+      ok       = no banner contribution
+
+    Suitable for external uptime monitors (UptimeRobot, BetterStack) — point
+    them at this endpoint, not /health, to detect silent failures.
+    """
+    issues = []
+    now = datetime.datetime.now(tz=_PACIFIC)
+
+    # 1. Bot enabled but no bets in 4h+ = silent failure
+    try:
+        if BOT_CONFIG.get("enabled") and BOT_STATE.get("auto_trade", False):
+            recent_bets = _all_trades_today() if "_all_trades_today" in globals() else []
+            recent_ts = [t.get("timestamp") or "" for t in recent_bets]
+            latest = max(recent_ts) if recent_ts else ""
+            silence_hours = None
+            if latest:
+                try:
+                    last_dt = datetime.datetime.fromisoformat(latest.replace("Z", "+00:00"))
+                    silence_hours = (datetime.datetime.now(tz=datetime.timezone.utc) - last_dt).total_seconds() / 3600
+                except Exception:
+                    silence_hours = None
+            else:
+                silence_hours = 99
+            silence_threshold = float(BOT_CONFIG.get("silence_alert_hours", 4))
+            if silence_hours is not None and silence_hours > silence_threshold:
+                issues.append({
+                    "severity": "critical",
+                    "code": "bot_silent",
+                    "message": f"Bot enabled but no bets placed in {silence_hours:.1f}h (threshold {silence_threshold:.0f}h)",
+                })
+    except Exception as e:
+        issues.append({"severity": "warn", "code": "silence_check_error", "message": str(e)[:100]})
+
+    # 2. Scheduler running
+    try:
+        if not scheduler.running:
+            issues.append({"severity": "critical", "code": "scheduler_dead", "message": "APScheduler not running"})
+    except Exception:
+        issues.append({"severity": "critical", "code": "scheduler_unknown", "message": "Cannot inspect scheduler state"})
+
+    # 3. Kalshi auth
+    try:
+        bal_test = _get_cached_balance()
+        if bal_test is None or bal_test < 0:
+            issues.append({"severity": "critical", "code": "kalshi_auth", "message": "Cannot read Kalshi balance"})
+    except Exception as e:
+        issues.append({"severity": "critical", "code": "kalshi_auth", "message": f"Balance fetch failed: {str(e)[:80]}"})
+
+    # 4. Settled cache freshness — should refresh within 10 min
+    try:
+        cache_age = _time.time() - _SETTLED_CACHE.get("ts", 0) if _SETTLED_CACHE.get("ts") else None
+        if cache_age is not None and cache_age > 900:
+            issues.append({
+                "severity": "warn",
+                "code": "stale_settled_cache",
+                "message": f"/settled cache last refreshed {cache_age / 60:.0f} min ago",
+            })
+    except Exception:
+        pass
+
+    # 5. Ephemeral storage warning — Railway state lost on every deploy
+    try:
+        from server import STORAGE_PATH  # type: ignore
+        storage = STORAGE_PATH
+    except Exception:
+        storage = ""
+    if storage and "/tmp" in storage:
+        issues.append({
+            "severity": "warn",
+            "code": "ephemeral_storage",
+            "message": "State on /tmp — wiped on every deploy. Add a Railway volume at /data.",
+        })
+
+    # 6. Recent unhandled errors in BOT_STATE
+    try:
+        errs = BOT_STATE.get("errors", [])[-5:]
+        if len(errs) >= 3:
+            issues.append({
+                "severity": "warn",
+                "code": "recent_errors",
+                "message": f"{len(errs)} recent errors logged in BOT_STATE — check /status",
+            })
+    except Exception:
+        pass
+
+    # 7. Drawdown halt active
+    try:
+        if _drawdown_level() >= 2:
+            issues.append({
+                "severity": "warn",
+                "code": "drawdown_halt",
+                "message": "Drawdown circuit breaker engaged — trading halted until midnight PT",
+            })
+    except Exception:
+        pass
+
+    critical = [i for i in issues if i["severity"] == "critical"]
+    warn = [i for i in issues if i["severity"] == "warn"]
+    overall = "critical" if critical else ("warn" if warn else "ok")
+    http_status = 503 if critical else 200
+    return jsonify({
+        "status": overall,
+        "checked_at": now.isoformat(),
+        "critical_count": len(critical),
+        "warn_count": len(warn),
+        "issues": issues,
+        "summary": (
+            f"{len(critical)} critical, {len(warn)} warning"
+            if (critical or warn) else "all systems nominal"
+        ),
+    }), http_status
+
+
 @app.route("/zombie-positions")
 def zombie_positions():
     """List positions stuck >30 days out with worthless prices.
@@ -22628,6 +22748,11 @@ a:hover { color: #7da5f5; }
 </head>
 <body>
 <div id="bet-tooltip"></div>
+<!-- Health banner — only shows when /healthcheck-deep flags an issue -->
+<div id="health-banner" style="display:none;position:sticky;top:0;z-index:9999;background:#7f1d1d;color:#fff;padding:10px 16px;font-size:13px;font-weight:600;border-bottom:2px solid #ef4444;text-align:center;letter-spacing:0.3px">
+  <span id="health-banner-text">Loading health status...</span>
+  <a href="/healthcheck-deep" target="_blank" style="color:#fde68a;margin-left:12px;text-decoration:underline">details</a>
+</div>
 <!-- Ticker bar -->
 <div class="ticker-bar" id="ticker-bar">
   <div class="ticker-item"><span class="ticker-symbol">BTC</span> <span class="ticker-price" id="tk-btc">--</span> <span class="ticker-chg" id="tk-btc-chg"></span></div>
@@ -28125,6 +28250,46 @@ setTimeout(function() {
     loadAllBets(), loadMispriced(), loadTrades(), loadMoonshark()
   ]).catch(function(e){ console.warn('Init phase 2 partial fail:', e); });
 }, 3000);
+// --- Health banner: poll /healthcheck-deep, surface critical/warn issues ---
+async function loadHealthBanner() {
+  try {
+    var resp = await fetch(API + '/healthcheck-deep');
+    var d = await resp.json();
+    var banner = document.getElementById('health-banner');
+    var text = document.getElementById('health-banner-text');
+    var origTitle = window._origTitle || (window._origTitle = document.title);
+    if (!d || !d.issues || d.issues.length === 0) {
+      banner.style.display = 'none';
+      document.title = origTitle;
+      return;
+    }
+    var critical = d.issues.filter(function(i){ return i.severity === 'critical'; });
+    var warn = d.issues.filter(function(i){ return i.severity === 'warn'; });
+    if (critical.length > 0) {
+      banner.style.background = '#7f1d1d';
+      banner.style.borderBottomColor = '#ef4444';
+      var msgs = critical.map(function(i){ return i.message; }).join(' \u00b7 ');
+      text.textContent = 'CRITICAL: ' + msgs;
+      document.title = '[!] ' + origTitle;
+      banner.style.display = 'block';
+    } else if (warn.length > 0) {
+      banner.style.background = '#78350f';
+      banner.style.borderBottomColor = '#f59e0b';
+      var wmsgs = warn.map(function(i){ return i.message; }).join(' \u00b7 ');
+      text.textContent = 'WARNING: ' + wmsgs;
+      document.title = '[!] ' + origTitle;
+      banner.style.display = 'block';
+    } else {
+      banner.style.display = 'none';
+      document.title = origTitle;
+    }
+  } catch(e) {
+    // Don't show banner errors — would compete with the issue itself
+  }
+}
+loadHealthBanner();
+setInterval(loadHealthBanner, 30000);
+
 // Auto-refresh intervals — tiered by data freshness needs
 // FAST (10s): live status, activity feed, today's bets — changes frequently
 setInterval(() => { loadStatus(); loadActivity(); loadBetsFeed(); loadPortfolio(); }, 10000);
