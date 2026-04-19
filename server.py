@@ -16169,37 +16169,37 @@ def insights_endpoint():
         if len(settled) < 3:
             insights.append({
                 "title": "Scanner Active",
-                "detail": f"Monitoring {markets_scanned} markets across 4 platforms. Found {mispriced_count} mispriced opportunities on last scan.",
+                "detail": f"Looking at {markets_scanned} markets across 4 betting sites right now. Spotted {mispriced_count} possibly underpriced bets on the last sweep.",
                 "trend": "neutral",
-                "action": "Scanning every 60 seconds for arbitrage edges.",
+                "action": "Re-checking every minute for new opportunities.",
             })
             insights.append({
                 "title": "MoonShark Armed",
-                "detail": f"Watching for underdog contracts under 30\u00a2 in close live games. {len(moonshark_trades)} moonshot bets placed today (${moonshark_spent:.2f} spent).",
+                "detail": f"Hunting cheap longshot bets (under 30\u00a2) in close live games. So far today: {len(moonshark_trades)} placed, ${moonshark_spent:.2f} spent.",
                 "trend": "neutral",
-                "action": "Will fire when a live underdog has strong momentum signals.",
+                "action": "Will only fire when a live underdog looks like it's about to come back.",
             })
             insights.append({
                 "title": "Waiting for Results",
-                "detail": f"{len(_journal_snap)} total trades placed, {len(pending)} still pending settlement. Need settled trades to generate performance insights.",
+                "detail": f"{len(_journal_snap)} bets placed total, {len(pending)} still waiting on game results. Need finished bets before we can spot patterns.",
                 "trend": "neutral",
-                "action": "Insights will sharpen as more trades settle and patterns emerge.",
+                "action": "Insights get sharper as more bets settle.",
             })
             pct_used = round(daily_spent / max(0.01, max_daily) * 100, 1)
             insights.append({
                 "title": "Daily Budget",
-                "detail": f"${daily_spent:.2f} of ${max_daily:.2f} budget used today ({pct_used}%). Smart sizing adjusts bets based on bankroll.",
+                "detail": f"Spent ${daily_spent:.2f} of today's ${max_daily:.2f} max ({pct_used}%). Bet sizes auto-adjust to your bankroll.",
                 "trend": "positive" if pct_used < 80 else "negative",
-                "action": "Budget resets at midnight UTC each day.",
+                "action": "Budget refills at midnight UTC.",
             })
             with _CATEGORY_STATS_LOCK:
                 _cat_insight_items = list(_CATEGORY_STATS.items())
             cat_count = len([c for c, s in _cat_insight_items if (s.get("wins", 0) + s.get("losses", 0)) > 0])
             insights.append({
                 "title": "Category Learning",
-                "detail": f"Tracking performance across {cat_count} sport categories. Auto-learning adjusts bet sizes as win/loss data accumulates.",
+                "detail": f"Watching how we do across {cat_count} sports. The bot learns which sports it wins on and bets bigger there.",
                 "trend": "neutral",
-                "action": "Categories with 70%+ win rate get 1.5x bet sizing boost.",
+                "action": "Sports we win 70%+ of the time get 50% bigger bets.",
             })
             return jsonify({"insights": insights[:5], "generated_at": generated_at})
 
@@ -16230,9 +16230,9 @@ def insights_endpoint():
             mult = _category_multiplier("", bname)
             candidates.append({
                 "title": f"{bname.upper()} is Your Best Sport",
-                "detail": f"{bdata['win_rate']}% win rate across {bdata['total']} trades with ${bdata['pnl']:.2f} P&L. Leading all categories.",
+                "detail": f"You've won {bdata['win_rate']}% of {bname.upper()} bets ({bdata['total']} so far) and made ${bdata['pnl']:.2f}. This is your most profitable sport right now.",
                 "trend": "positive",
-                "action": f"Category multiplier set to {mult}x for {bname.upper()} bet sizing.",
+                "action": f"Bot is now betting {mult}x bigger on {bname.upper()} games to lean into the winning streak.",
                 "priority": abs(bdata["pnl"]) + 10,
             })
             if len(sports_with_data) > 1 and worst_sport[0] != best_sport[0]:
@@ -16240,9 +16240,9 @@ def insights_endpoint():
                 wmult = _category_multiplier("", wname)
                 candidates.append({
                     "title": f"{wname.upper()} Needs Improvement",
-                    "detail": f"{wdata['win_rate']}% win rate with ${wdata['pnl']:.2f} P&L across {wdata['total']} trades.",
+                    "detail": f"Only winning {wdata['win_rate']}% on {wname.upper()} bets ({wdata['total']} so far) — currently down ${abs(wdata['pnl']):.2f}.",
                     "trend": "negative" if wdata["pnl"] < 0 else "neutral",
-                    "action": f"Category multiplier reduced to {wmult}x to limit exposure.",
+                    "action": f"Bot has shrunk {wname.upper()} bets to {wmult}x normal size to cut losses while it figures things out.",
                     "priority": abs(wdata["pnl"]) + 5,
                 })
 
@@ -16274,10 +16274,10 @@ def insights_endpoint():
             best_price = max(valid_prices.items(), key=lambda x: x[1]["win_rate"])
             pname, pdata = best_price
             candidates.append({
-                "title": f"{pname}\u00a2 is the Sweet Spot",
-                "detail": f"{pdata['win_rate']}% win rate in the {pname}\u00a2 range ({pdata['total']} trades, ${pdata['pnl']:.2f} P&L).",
+                "title": f"{pname}\u00a2 Bets Are Hitting",
+                "detail": f"When the bot buys at {pname}\u00a2 per share, it wins {pdata['win_rate']}% of the time ({pdata['total']} bets, ${pdata['pnl']:.2f} so far). This price range is the sweet spot.",
                 "trend": "positive" if pdata["pnl"] > 0 else "neutral",
-                "action": "Smart sizing already weights these higher-confidence ranges.",
+                "action": "Bot already knows to bet bigger when it spots a deal in this price range.",
                 "priority": pdata["win_rate"] / 10 + 5,
             })
 
@@ -16312,10 +16312,10 @@ def insights_endpoint():
             best_time = max(valid_times.items(), key=lambda x: x[1]["win_rate"])
             tname, tdata = best_time
             candidates.append({
-                "title": f"{tname} Sessions Win Most",
-                "detail": f"{tdata['win_rate']}% win rate during {tname.lower()} hours ({tdata['total']} trades, ${tdata['pnl']:.2f} P&L).",
+                "title": f"{tname} is Your Best Time of Day",
+                "detail": f"Bets placed in the {tname.lower()} win {tdata['win_rate']}% of the time ({tdata['total']} bets, ${tdata['pnl']:.2f} so far). That's when the markets are most generous.",
                 "trend": "positive" if tdata["pnl"] > 0 else "neutral",
-                "action": "Scanner runs 24/7 but edges cluster when more markets are active.",
+                "action": "Bot watches 24/7, but most good opportunities show up when more games are live.",
                 "priority": tdata["win_rate"] / 10 + 3,
             })
 
@@ -16327,18 +16327,18 @@ def insights_endpoint():
         if len(moon_trades) > 0:
             if moon_wins > 0:
                 candidates.append({
-                    "title": f"MoonShark Hit {moon_wins}x",
-                    "detail": f"{moon_wins} moonshot wins from {len(moon_settled)} settled bets. Total MoonShark P&L: ${moon_pnl:.2f}.",
+                    "title": f"MoonShark Hit {moon_wins} Longshots",
+                    "detail": f"{moon_wins} cheap underdog bets cashed in out of {len(moon_settled)} settled. Net: ${moon_pnl:.2f}.",
                     "trend": "positive",
-                    "action": f"Longshots paying off. {len(moon_trades) - len(moon_settled)} still pending.",
+                    "action": f"Longshot strategy is working. {len(moon_trades) - len(moon_settled)} more underdog bets still in play.",
                     "priority": 15 if moon_wins > 0 else 5,
                 })
             else:
                 candidates.append({
                     "title": "MoonShark Hunting",
-                    "detail": f"{len(moon_trades)} moonshot bets placed, {len(moon_settled)} settled, 0 hits yet. P&L: ${moon_pnl:.2f}.",
+                    "detail": f"Placed {len(moon_trades)} cheap underdog bets so far, {len(moon_settled)} have settled, none have hit yet. Down ${abs(moon_pnl):.2f}.",
                     "trend": "negative" if moon_pnl < -5 else "neutral",
-                    "action": f"{len(moon_trades) - len(moon_settled)} pending \u2014 one big hit can flip MoonShark green.",
+                    "action": f"{len(moon_trades) - len(moon_settled)} still in play — one big hit (longshots pay 3-5x) can flip this green.",
                     "priority": 4,
                 })
 
@@ -16355,18 +16355,18 @@ def insights_endpoint():
             if streak_count >= 2:
                 if streak_type == "win":
                     candidates.append({
-                        "title": f"{streak_count}-Trade Win Streak",
-                        "detail": f"Last {streak_count} settled trades were winners. Momentum is strong.",
+                        "title": f"On a {streak_count}-Bet Hot Streak",
+                        "detail": f"The last {streak_count} bets all won. Things are clicking.",
                         "trend": "positive",
-                        "action": "Riding the streak \u2014 smart sizing stays disciplined to protect gains.",
+                        "action": "Bot is sticking to its rules instead of getting greedy on bet sizes — that's how you keep streaks paying.",
                         "priority": streak_count + 8,
                     })
                 elif streak_type == "loss":
                     candidates.append({
-                        "title": f"{streak_count}-Trade Loss Streak",
-                        "detail": f"Last {streak_count} settled trades lost. Variance happens \u2014 expected in high-volume trading.",
+                        "title": f"In a {streak_count}-Bet Cold Streak",
+                        "detail": f"The last {streak_count} bets all lost. Streaks like this are normal when you bet a lot — doesn't mean anything is broken.",
                         "trend": "negative",
-                        "action": "Category multipliers auto-reduce exposure on losing categories.",
+                        "action": "Bot automatically shrinks bets on the sports it's losing on right now to protect the bankroll.",
                         "priority": streak_count + 8,
                     })
 
@@ -16374,10 +16374,10 @@ def insights_endpoint():
         pct_used = round(daily_spent / max(0.01, max_daily) * 100, 1)
         trades_today_count = len(BOT_STATE.get("trades_today", []))
         candidates.append({
-            "title": f"Budget {pct_used}% Deployed",
-            "detail": f"${daily_spent:.2f} of ${max_daily:.2f} daily budget used across {trades_today_count} trades today.",
+            "title": f"Used {pct_used}% of Today's Budget",
+            "detail": f"Spent ${daily_spent:.2f} of ${max_daily:.2f} on {trades_today_count} bets today.",
             "trend": "positive" if 20 < pct_used < 90 else ("negative" if pct_used >= 90 else "neutral"),
-            "action": "Near-limit days mean lots of edges found. Low days mean tight markets." if pct_used > 50 else "Plenty of room for afternoon/evening markets.",
+            "action": "Hitting the limit usually means lots of good bets showed up. Low spend means slim pickings today." if pct_used > 50 else "Lots of budget left for evening games.",
             "priority": 6 if pct_used > 10 else 2,
         })
 
@@ -16387,19 +16387,19 @@ def insights_endpoint():
         overall_wr = round(total_wins / max(1, total_wins + total_losses) * 100, 1)
         total_pnl = sum(t.get("pnl_usd", 0) for t in settled)
         candidates.append({
-            "title": f"Overall: {overall_wr}% Win Rate",
-            "detail": f"{total_wins}W / {total_losses}L with ${total_pnl:.2f} total P&L across {len(settled)} settled trades.",
+            "title": f"Winning {overall_wr}% of Bets Overall",
+            "detail": f"{total_wins} wins, {total_losses} losses, {('up $' if total_pnl >= 0 else 'down $') + str(abs(round(total_pnl, 2)))} across {len(settled)} finished bets.",
             "trend": "positive" if overall_wr >= 55 else ("negative" if overall_wr < 45 else "neutral"),
-            "action": "Edge holds above 50%. Category learning tunes sizing to amplify winners.",
+            "action": "Above 50% means we're beating the house. Bot is leaning into the sports we're winning on most.",
             "priority": 7,
         })
 
         # 8. Matching quality / opportunity count
         candidates.append({
-            "title": f"{mispriced_count} Live Opportunities",
-            "detail": f"Scanner found {mispriced_count} mispriced contracts across {markets_scanned} markets on last sweep.",
+            "title": f"Spotted {mispriced_count} Underpriced Bets",
+            "detail": f"Out of {markets_scanned} markets checked, {mispriced_count} look mispriced compared to the average of all 4 betting sites.",
             "trend": "positive" if mispriced_count > 5 else ("neutral" if mispriced_count > 0 else "negative"),
-            "action": "Cross-platform matching surfaces edges invisible to single-exchange traders.",
+            "action": "Comparing prices across sites finds deals that single-site bettors miss.",
             "priority": 3 if mispriced_count > 0 else 1,
         })
 
@@ -16416,10 +16416,10 @@ def insights_endpoint():
                 # $1M progress
                 progress_pct = round(bal / 10000, 2)
                 candidates.append({
-                    "title": f"${bal:.0f} Cash → $1M Goal",
-                    "detail": f"Cash available: ${bal:.2f}. Realized P&L so far: ${total_pnl_all:+.2f} across {len(settled)} settled trades.",
+                    "title": f"${bal:.0f} in the Bank → $1M Goal",
+                    "detail": f"Cash on hand: ${bal:.2f}. Locked-in profit so far: {('+$' if total_pnl_all >= 0 else '-$') + str(abs(round(total_pnl_all, 2)))} from {len(settled)} finished bets.",
                     "trend": "positive" if total_pnl_all > 0 else ("negative" if total_pnl_all < -10 else "neutral"),
-                    "action": "Compound gains by reinvesting profits. Every winning trade gets us closer.",
+                    "action": "Profits stay in the account so they can compound — every win pushes the bankroll a bit higher.",
                     "priority": 8,
                 })
         except Exception:
@@ -16430,10 +16430,10 @@ def insights_endpoint():
         if pending_count > 0:
             pending_cost = sum(t.get("cost_usd", 0) for t in pending)
             candidates.append({
-                "title": f"{pending_count} Bets Awaiting Results",
-                "detail": f"${pending_cost:.2f} in {pending_count} unsettled positions. Results incoming as markets close.",
+                "title": f"{pending_count} Bets Still in Play",
+                "detail": f"${pending_cost:.2f} riding on {pending_count} bets that haven't finished yet. Results come in as games end.",
                 "trend": "neutral",
-                "action": "Most positions settle within 1-7 days. Check the Positions tab for live P&L.",
+                "action": "Most bets settle within a week. Check the Positions tab to see how each one's doing right now.",
                 "priority": 5,
             })
 
