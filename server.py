@@ -279,6 +279,31 @@ def _drawdown_min_conviction():
         return 6   # only high-conviction trades
     return 0       # no extra restriction
 
+def _uncle_claude_daily_stop():
+    """Dynamic circuit breaker: halt trading if today's loss > 2x expected
+    variance (2 * |expectancy| * trades_today), with a $20 floor so we don't
+    trip on the first few bets. Complements the fixed-dollar drawdown gate
+    by adapting to trade volume — small-volume days stop sooner.
+
+    Returns (should_stop: bool, reason: Optional[str]).
+    """
+    today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+    with _DRAWDOWN_LOCK:
+        if _DRAWDOWN_TODAY.get("date") != today:
+            return False, None
+        pnl = _DRAWDOWN_TODAY.get("realized_pnl", 0.0)
+    if pnl >= 0:
+        return False, None
+    try:
+        n = _total_bets_today()
+    except Exception:
+        n = 0
+    expectancy = abs(BOT_CONFIG.get("expectancy_usd", 0.40))
+    threshold = max(20.0, 2.0 * expectancy * max(n, 1))
+    if abs(pnl) > threshold:
+        return True, f"Uncle Claude stop: -${abs(pnl):.0f} loss > ${threshold:.0f} (2× ${expectancy:.2f} expectancy × {n} bets)"
+    return False, None
+
 # ---------------------------------------------------------------------------
 # COMEBACK PROBABILITY LOOKUP — historical comeback rates by sport/period/margin
 # ---------------------------------------------------------------------------
@@ -3059,16 +3084,16 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
         _PRETRADE_STATS["reasons"]["bad_price"] = _PRETRADE_STATS["reasons"].get("bad_price", 0) + 1
         return False, f"Price {price_cents}c outside valid range 1-99"
 
-    # GLOBAL MINIMUM PRICE FLOOR — sub-25c contracts are net-negative longshots.
-    # Raised from 15c to 25c on 2026-04-17 during model-downturn: recent losing
-    # trades cluster at low entry prices (median loss entry = 26c), and your
-    # own commit 8658be4 documented actual 7% WR vs displayed 58% — so the
-    # bot's longshot picks are losing more than they win. Lift the floor until
-    # the model proves itself again.
-    if price_cents < 25:
+    # GLOBAL MINIMUM PRICE FLOOR — sub-30c contracts have the worst payoff
+    # asymmetry: a loss costs the full stake while a win pays the smaller
+    # remaining cents. Raised 25c → 30c on 2026-04-18 (Uncle Claude review):
+    # measured payoff ratio 0.83 (avg_loss $4.56 > avg_win $3.79) is dragged
+    # down by the longshot tail — cutting it lifts profit factor.
+    _price_floor = int(BOT_CONFIG.get("min_price_cents", 30))
+    if price_cents < _price_floor:
         _PRETRADE_STATS["blocked"] += 1
         _PRETRADE_STATS["reasons"]["below_price_floor"] = _PRETRADE_STATS["reasons"].get("below_price_floor", 0) + 1
-        return False, f"Price {price_cents}c below 25c minimum floor"
+        return False, f"Price {price_cents}c below {_price_floor}c minimum floor"
 
     # GLOBAL MAXIMUM PRICE CEILING — data shows 61-80c is the most profitable range
     # (73.2% WR, +$139 across 224 bets). Cap at 80c; above that payoff is too thin.
@@ -3108,12 +3133,37 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
         _PRETRADE_STATS["reasons"]["drawdown_low_conv"] = _PRETRADE_STATS["reasons"].get("drawdown_low_conv", 0) + 1
         return False, f"Drawdown level {_dd_level}: conviction {conviction} < required {_dd_min_conv}"
 
+    # 2C. UNCLE CLAUDE STOP — dynamic, expectancy-scaled daily loss cap
+    _uc_stop, _uc_reason = _uncle_claude_daily_stop()
+    if _uc_stop:
+        _PRETRADE_STATS["blocked"] += 1
+        _PRETRADE_STATS["reasons"]["uncle_claude_stop"] = _PRETRADE_STATS["reasons"].get("uncle_claude_stop", 0) + 1
+        return False, _uc_reason
+
     # 3. MAX BET: no single trade bigger than config allows
     max_bet = BOT_CONFIG.get("max_bet_usd", 25.0)
     if cost_usd > max_bet * 1.5:  # 50% buffer for price bumps
         _PRETRADE_STATS["blocked"] += 1
         _PRETRADE_STATS["reasons"]["max_bet_exceeded"] = _PRETRADE_STATS["reasons"].get("max_bet_exceeded", 0) + 1
         return False, f"Bet ${cost_usd:.2f} exceeds max ${max_bet:.0f}"
+
+    # 3B. HALF-KELLY CAP — never risk more than kelly_fraction of CURRENT bankroll
+    # on a single bet. With measured payoff 0.83 and WR 59.4%, full Kelly = 10.5%;
+    # half-Kelly = ~5%. Scales with bankroll automatically — no need to retune as
+    # bankroll grows or shrinks. Skip arb/hedge (locked-in profit, not at risk).
+    if strategy not in ("arb", "hedge"):
+        try:
+            _bk = _get_cached_balance() or 0.0
+            _kelly_frac = float(BOT_CONFIG.get("kelly_fraction", 0.05))
+            _kelly_cap = _bk * _kelly_frac
+            # Floor at $5 so tiny bankrolls can still place minimum bets
+            _kelly_cap = max(5.0, _kelly_cap)
+            if cost_usd > _kelly_cap:
+                _PRETRADE_STATS["blocked"] += 1
+                _PRETRADE_STATS["reasons"]["kelly_cap"] = _PRETRADE_STATS["reasons"].get("kelly_cap", 0) + 1
+                return False, f"Kelly cap: ${cost_usd:.2f} > ${_kelly_cap:.2f} ({_kelly_frac:.0%} of ${_bk:.0f} bankroll)"
+        except Exception:
+            pass  # bankroll lookup failure handled by check #7 below
 
     # 4. CATEGORY BLOCK: blocked categories must never slip through
     title = ""
@@ -3166,9 +3216,10 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
     if edge is not None:
         # Real cost of a trade: 7% fee on wins + 2-3c slippage + model error.
         # Break-even is ~5%, but during model downturn we require an extra safety
-        # margin. Raised from 5% to 8% on 2026-04-17 — cuts trade volume but
-        # each surviving signal has more buffer against model error.
-        min_edge = 0.08
+        # margin. Raised 8% → 10% on 2026-04-18 (Uncle Claude review): profit
+        # factor 1.21 is amateur-tier; fewer/better bets at higher edge should
+        # push PF toward 1.5+. Tunable via BOT_CONFIG.min_edge.
+        min_edge = float(BOT_CONFIG.get("min_edge", 0.10))
         if edge < min_edge:
             _PRETRADE_STATS["blocked"] += 1
             _PRETRADE_STATS["reasons"]["insufficient_edge"] = _PRETRADE_STATS["reasons"].get("insufficient_edge", 0) + 1
@@ -3213,6 +3264,29 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
                     _PRETRADE_STATS["blocked"] += 1
                     _PRETRADE_STATS["reasons"]["clv_negative"] = _PRETRADE_STATS["reasons"].get("clv_negative", 0) + 1
                     return False, f"Strategy '{strategy}' has negative CLV ({_avg_clv:.1f}c avg over {_clv_data['sample_size']} trades) — paused until CLV improves"
+        except Exception:
+            pass
+
+    # 9B. SPORT-LOSS CIRCUIT — if this sport has 5+ losses in the last 24h,
+    # the model is systematically wrong here right now. Block the sport for
+    # 24h instead of feeding the loss streak. Tunable via BOT_CONFIG; skip
+    # arb/hedge (locked profit, not betting on outcomes).
+    if strategy not in ("arb", "hedge"):
+        try:
+            _sport_block_n = int(BOT_CONFIG.get("sport_loss_block_threshold", 5))
+            _this_sport = _sport_from_ticker(ticker) or "unknown"
+            _24h_iso = (datetime.datetime.now(tz=_PACIFIC) - datetime.timedelta(hours=24)).isoformat()
+            with _TRADE_JOURNAL_LOCK:
+                _recent_losses = sum(
+                    1 for _t in _TRADE_JOURNAL
+                    if _t.get("result") == "loss"
+                    and (_t.get("settlement_time") or "") >= _24h_iso
+                    and (_t.get("sport_type") or _sport_from_ticker(_t.get("ticker", "")) or "unknown") == _this_sport
+                )
+            if _recent_losses >= _sport_block_n and _this_sport != "unknown":
+                _PRETRADE_STATS["blocked"] += 1
+                _PRETRADE_STATS["reasons"]["sport_loss_streak"] = _PRETRADE_STATS["reasons"].get("sport_loss_streak", 0) + 1
+                return False, f"Sport '{_this_sport}' on cooldown: {_recent_losses} losses in 24h (>= {_sport_block_n})"
         except Exception:
             pass
 
@@ -4295,14 +4369,37 @@ def _snap_game_exposure():
 # ---------------------------------------------------------------------------
 DAILY_BET_FLOOR = 3  # minimum bets placed per day — 5 was too aggressive, caused spray-betting
 
+def _today_str_pt():
+    return datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+
+
+def _all_trades_today():
+    """Bets placed today, sourced from persisted all_trades (survives restarts).
+
+    Per-strategy *_trades_today lists live in RAM only — a Railway redeploy
+    or process restart wipes them, making the dashboard's 'Trades Today'
+    counter lie until the next midnight reset. all_trades is persisted to
+    disk via _save_state, so filtering it by today's date is the only
+    source-of-truth that survives restarts.
+    """
+    today = _today_str_pt()
+    out = []
+    for t in BOT_STATE.get("all_trades", []) or []:
+        ts = (t.get("timestamp") or "")[:10]
+        if ts == today and (t.get("action") or "buy") != "sell":
+            out.append(t)
+    return out
+
+
 def _total_daily_spent():
     """Sum daily spending across all strategy buckets. Used for global budget enforcement.
 
-    NOTE: We use ONLY the per-strategy counters — NOT daily_spent_usd.
-    daily_spent_usd is a legacy global counter that gets set by _hydrate_from_kalshi
-    to ALL today's spending. Adding it to per-strategy spends would double-count.
+    Returns max(per-strategy buckets, persisted all_trades cost). The max()
+    handles two cases: (a) normal operation — buckets and all_trades agree;
+    (b) post-restart — buckets are 0 because RAM was wiped, but all_trades
+    was rehydrated from disk, so it carries the real spend.
     """
-    return (
+    bucket_sum = (
         BOT_STATE.get("snipe_daily_spent", 0)
         + BOT_STATE.get("moonshark_daily_spent", 0)
         + BOT_STATE.get("closegame_daily_spent", 0)
@@ -4311,15 +4408,18 @@ def _total_daily_spent():
         + BOT_STATE.get("goalie_daily_spent", 0)
         + BOT_STATE.get("misc_daily_spent", 0)
     )
+    persisted_sum = sum(float(t.get("cost_usd", 0) or 0) for t in _all_trades_today())
+    return max(bucket_sum, persisted_sum)
 
 
 def _total_bets_today():
     """Count every bet placed today across every strategy.
-    NOTE: We use ONLY per-strategy lists — NOT trades_today.
-    trades_today is a catch-all that overlaps with per-strategy lists,
-    causing double-counting (same pattern as the daily_spent_usd bug).
+
+    Returns max(per-strategy lists, persisted all_trades count) so the count
+    survives a process restart (RAM-only buckets get wiped but all_trades is
+    persisted to disk by _save_state).
     """
-    return (
+    bucket_count = (
         len(BOT_STATE.get("snipe_trades_today", []))
         + len(BOT_STATE.get("moonshark_trades_today", []))
         + len(BOT_STATE.get("closegame_trades_today", []))
@@ -4328,6 +4428,8 @@ def _total_bets_today():
         + len(BOT_STATE.get("swing_trades_today", []))
         + len(BOT_STATE.get("goalie_trades_today", []))
     )
+    persisted_count = len(_all_trades_today())
+    return max(bucket_count, persisted_count)
 
 
 def _quota_shortfall():
@@ -14744,6 +14846,26 @@ def settled_positions():
 
             _game_title = _title_cache.get(_fticker, _fticker)
             _fcat = classify_market_category(_game_title, _fticker)
+            # Derive settle_time from latest fill timestamp (last sell on settlement);
+            # backfill entry_time from earliest buy fill if journal didn't supply one.
+            # Needed so the Same-Day W/L card has data to compare against trade_date.
+            _stage2_settle = ""
+            try:
+                _fill_times = [(_f.get("created_time") or "") for _f in (_flist or []) if _f.get("created_time")]
+                if _fill_times:
+                    _stage2_settle = max(_fill_times)
+                    if not _entry_time:
+                        _buy_times = [(_f.get("created_time") or "") for _f in _flist if _f.get("action") == "buy" and _f.get("created_time")]
+                        _entry_time = min(_buy_times) if _buy_times else min(_fill_times)
+            except Exception:
+                pass
+            # Fall back to legacy_<sport> when no journal/all_trades record
+            # supplied a strategy. Buckets historical untracked trades by sport
+            # so they're at least partitionable instead of one giant "unknown".
+            if _trade_strategy == "unknown":
+                _sport_bucket = _sport_from_ticker(_fticker)
+                if _sport_bucket:
+                    _trade_strategy = f"legacy_{_sport_bucket}"
             settled.append({
                 "ticker": _fticker,
                 "title": _game_title,
@@ -14757,7 +14879,7 @@ def settled_positions():
                 "count": _total_count,
                 "entry_cents": _avg_entry,
                 "trade_date": _ftrade_date,
-                "settle_time": "",
+                "settle_time": _stage2_settle,
                 "edge_reasons": _edge_reasons,
                 "espn_edge": round(_espn_edge, 4) if _espn_edge else None,
                 "conviction": _conviction,
@@ -14954,6 +15076,14 @@ def settled_positions():
                 if not _zp_edge:
                     _zp_edge.append(f"Entry at {_zp_entry_cents}c (reconstructed)")
 
+                _stage3_settle = pos.get("settlement_time") or pos.get("last_updated") or ""
+                # Same legacy_<sport> fallback as Stage 2 — partition the
+                # untracked historical trades by sport instead of leaving them
+                # all under one giant "unknown" bucket.
+                if _zp_strategy == "unknown":
+                    _zp_sport_bucket = _sport_from_ticker(ticker)
+                    if _zp_sport_bucket:
+                        _zp_strategy = f"legacy_{_zp_sport_bucket}"
                 settled.append({
                     "ticker": ticker,
                     "title": _zp_title,
@@ -14967,7 +15097,7 @@ def settled_positions():
                     "count": _zp_count,
                     "entry_cents": _zp_entry_cents,
                     "trade_date": _zp_trade_date or "",
-                    "settle_time": "",
+                    "settle_time": _stage3_settle,
                     "edge_reasons": _zp_edge,
                     "espn_edge": round(_zp_espn, 4) if _zp_espn else None,
                     "conviction": _zp_conv,
@@ -16907,6 +17037,197 @@ def portfolio_summary():
         "open_positions": [], "open_count": 0, "total_invested_usd": 0,
         "total_unrealized_usd": 0, "wins": 0, "losses": 0, "breakeven": 0,
         "win_rate": 0, "win_rate_7d": 0, "total_realized_usd": 0, "settled_history": [],
+    })
+
+
+@app.route("/zombie-positions")
+def zombie_positions():
+    """List positions stuck >30 days out with worthless prices.
+
+    The bot's in-loop cleanup only fires at >60 days, so anything in the
+    30-60 day band sits there forever. This endpoint surfaces them so the
+    user can manually trigger /sell-zombies.
+    """
+    try:
+        positions = check_position_prices() or []
+    except Exception as e:
+        return jsonify({"error": f"Position fetch failed: {e}"}), 500
+    now = datetime.datetime.now(datetime.timezone.utc)
+    zombies = []
+    for p in positions:
+        ct = p.get("close_time") or ""
+        if not ct:
+            continue
+        try:
+            close_dt = datetime.datetime.fromisoformat(ct.replace("Z", "+00:00"))
+            days_out = (close_dt - now).total_seconds() / 86400
+        except Exception:
+            continue
+        cur = p.get("current_price")
+        entry = p.get("entry_price")
+        # Same heuristic as the in-loop cleanup, lower day threshold
+        if days_out > 30 and cur is not None and (cur <= 5 or (entry and cur < entry * 0.3)):
+            zombies.append({
+                "ticker": p.get("ticker"),
+                "title": (p.get("title") or "")[:60],
+                "side": p.get("side"),
+                "count": p.get("count"),
+                "entry_price": entry,
+                "current_price": cur,
+                "days_to_settle": round(days_out, 1),
+                "tied_up_usd": round((cur or 0) * (p.get("count") or 0) / 100.0, 2),
+            })
+    zombies.sort(key=lambda z: -z["days_to_settle"])
+    return jsonify({
+        "count": len(zombies),
+        "total_capital_tied_up_usd": round(sum(z["tied_up_usd"] for z in zombies), 2),
+        "positions": zombies,
+    })
+
+
+@app.route("/sell-zombies", methods=["POST"])
+def sell_zombies():
+    """Place GTC resting sells for every zombie surfaced by /zombie-positions.
+
+    Auth-gated. Returns the list of sell attempts and any errors so the user
+    can audit what happened.
+    """
+    auth_err = _require_auth()
+    if auth_err:
+        return auth_err
+    try:
+        zomb = zombie_positions().get_json() or {}
+    except Exception as e:
+        return jsonify({"error": f"Zombie scan failed: {e}"}), 500
+    results = []
+    for z in zomb.get("positions", []):
+        ticker = z["ticker"]
+        side = z["side"]
+        count = z["count"]
+        sell_price = max(1, int(z["current_price"] or 1))
+        with _RESTING_SELLS_LOCK:
+            if ticker in _resting_sells:
+                results.append({"ticker": ticker, "skipped": "resting sell already exists"})
+                continue
+        r = sell_kalshi_position(ticker, side, sell_price, count, resting=True)
+        if isinstance(r, dict) and not r.get("error"):
+            with _RESTING_SELLS_LOCK:
+                _resting_sells.add(ticker)
+            results.append({"ticker": ticker, "sell_price_cents": sell_price, "ok": True})
+        else:
+            results.append({"ticker": ticker, "error": (r or {}).get("error", "unknown")})
+    return jsonify({"attempted": len(results), "results": results})
+
+
+@app.route("/wr-truth")
+def wr_truth():
+    """Side-by-side win rate from EVERY source so the dashboard can't lie.
+
+    Compares the trade journal (bot's own immutable log) against the /settled
+    HWM cache (built from Kalshi's positions API, which can include zeroed/
+    duplicate/pre-Day-1 records). Big gaps mean the dashboard is showing a
+    stale or padded number — trust the journal column.
+    """
+    now_pt = datetime.datetime.now(tz=_PACIFIC)
+    cut_24h = now_pt - datetime.timedelta(hours=24)
+    cut_48h = now_pt - datetime.timedelta(hours=48)
+    cut_7d  = now_pt - datetime.timedelta(days=7)
+
+    with _TRADE_JOURNAL_LOCK:
+        journal = list(_TRADE_JOURNAL)
+
+    def _wr(items):
+        w = sum(1 for t in items if t.get("result") == "win")
+        l = sum(1 for t in items if t.get("result") == "loss")
+        n = w + l
+        return {"wins": w, "losses": l, "n": n, "wr": round(w / n * 100, 1) if n else None}
+
+    def _journal_window(cutoff_iso):
+        return [t for t in journal
+                if (t.get("settlement_time") or "") >= cutoff_iso
+                and t.get("result") in ("win", "loss")]
+
+    journal_all  = [t for t in journal if t.get("result") in ("win", "loss")]
+    journal_24h  = _journal_window(cut_24h.isoformat())
+    journal_48h  = _journal_window(cut_48h.isoformat())
+    journal_7d   = _journal_window(cut_7d.isoformat())
+
+    settled = (_SETTLED_CACHE.get("data") or {}).get("settled", []) or []
+    hwm_all_w = sum(1 for s in settled if s.get("won") is True)
+    hwm_all_l = sum(1 for s in settled if s.get("won") is False)
+    hwm_total = hwm_all_w + hwm_all_l
+    hwm_wr = round(hwm_all_w / hwm_total * 100, 1) if hwm_total else None
+
+    journal_all_stats = _wr(journal_all)
+    divergence_pct = None
+    if hwm_wr is not None and journal_all_stats["wr"] is not None:
+        divergence_pct = round(hwm_wr - journal_all_stats["wr"], 1)
+
+    return jsonify({
+        "journal": {
+            "all_time": journal_all_stats,
+            "last_7d":  _wr(journal_7d),
+            "last_48h": _wr(journal_48h),
+            "last_24h": _wr(journal_24h),
+        },
+        "hwm_settled_cache": {
+            "all_time": {"wins": hwm_all_w, "losses": hwm_all_l, "n": hwm_total, "wr": hwm_wr},
+        },
+        "divergence_pct_points": divergence_pct,
+        "verdict": (
+            "TRUST_JOURNAL" if (divergence_pct is not None and abs(divergence_pct) > 15)
+            else "AGREES" if divergence_pct is not None
+            else "INSUFFICIENT_DATA"
+        ),
+        "explanation": (
+            "Journal = bot's own log of placed trades and outcomes (immutable). "
+            "HWM = built from Kalshi positions API; can include zeroed, duplicate, "
+            "or pre-Day-1 records that inflate the win count. If divergence > 15pp, "
+            "the dashboard's all-time number is misleading — trust the journal."
+        ),
+    })
+
+
+@app.route("/pnl-reconciliation")
+def pnl_reconciliation():
+    """Reconcile portfolio P&L against settled trade P&L to expose the gap.
+
+    Identity should hold:
+        portfolio_pnl ≈ settled_pnl + unrealized_pnl + pre_day1_pnl - fees
+    Anything left in `unaccounted_usd` is either pre-Day-1 trades that drained
+    cash before the cutoff, untracked fees, or stale/zeroed Kalshi data.
+    """
+    starting_balance = float(BOT_CONFIG.get("day1_starting_balance", 500.0))
+    pf = _PORTFOLIO_CACHE.get("data") or {}
+    portfolio_value = float(pf.get("portfolio_value_usd", 0) or 0)
+    cash_balance = float(pf.get("balance_usd", 0) or 0)
+    positions_value = float(pf.get("positions_value_usd", 0) or 0)
+    unrealized = float(pf.get("total_unrealized_usd", 0) or 0)
+    portfolio_pnl = portfolio_value - starting_balance
+
+    settled_pnl = 0.0
+    settled_count = 0
+    if _SETTLED_CACHE.get("data"):
+        for s in _SETTLED_CACHE["data"].get("settled", []) or []:
+            settled_pnl += float(s.get("pnl_usd", 0) or 0)
+            settled_count += 1
+
+    unaccounted = portfolio_pnl - settled_pnl - unrealized
+    return jsonify({
+        "starting_balance_usd": round(starting_balance, 2),
+        "portfolio_value_usd": round(portfolio_value, 2),
+        "cash_balance_usd": round(cash_balance, 2),
+        "positions_value_usd": round(positions_value, 2),
+        "portfolio_pnl_usd": round(portfolio_pnl, 2),
+        "settled_pnl_usd": round(settled_pnl, 2),
+        "settled_trade_count": settled_count,
+        "unrealized_pnl_usd": round(unrealized, 2),
+        "unaccounted_usd": round(unaccounted, 2),
+        "explanation": (
+            "unaccounted = portfolio_pnl - settled_pnl - unrealized. "
+            "Negative = pre-Day-1 trades drained cash before the 2026-03-31 cutoff; "
+            "near-zero = clean reconciliation; positive = stale/duplicate settled records."
+        ),
     })
 
 
@@ -21638,7 +21959,8 @@ def execute_trade():
     daily_max = BOT_CONFIG.get("max_daily_usd", 125)
     if daily_spent + cost_usd > daily_max:
         return jsonify({"error": f"Would exceed daily limit (${daily_spent:.2f} + ${cost_usd:.2f} > ${daily_max:.2f})"}), 400
-    result = place_kalshi_order(ticker, side, pc, count=count, strategy="manual_execute")
+    _exec_strategy = data.get("strategy") or "manual_execute"
+    result = place_kalshi_order(ticker, side, pc, count=count, strategy=_exec_strategy)
     trade_record = {
         "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "ticker": ticker,
@@ -21654,6 +21976,7 @@ def execute_trade():
         "result": result,
         "success": "error" not in result,
         "manual": True,
+        "strategy": _exec_strategy,
     }
     BOT_STATE["all_trades"].append(trade_record)
     BOT_STATE["trades_today"].append(trade_record)
@@ -21679,6 +22002,7 @@ def sell_position():
     if not all([ticker, side, price_cents]):
         return jsonify({"error": "Missing ticker, side, or price_cents"}), 400
     result = sell_kalshi_position(ticker, side, int(price_cents), int(count))
+    _sell_strategy = data.get("strategy") or "manual_sell"
     trade_record = {
         "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "ticker": ticker,
@@ -21688,6 +22012,7 @@ def sell_position():
         "count": int(count),
         "result": result,
         "success": "error" not in result,
+        "strategy": _sell_strategy,
     }
     BOT_STATE["all_trades"].append(trade_record)
     _save_state()
