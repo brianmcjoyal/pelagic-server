@@ -17161,8 +17161,15 @@ def healthcheck_deep():
     now = datetime.datetime.now(tz=_PACIFIC)
 
     # 1. Bot enabled but no bets in 4h+ = silent failure
+    # Suppress when drawdown breaker is intentionally halting trading — that's
+    # not silence, that's the safety net working as designed.
     try:
-        if BOT_CONFIG.get("enabled") and BOT_STATE.get("auto_trade", False):
+        _halt_active = False
+        try:
+            _halt_active = _drawdown_level() >= 2
+        except Exception:
+            pass
+        if BOT_CONFIG.get("enabled") and BOT_STATE.get("auto_trade", False) and not _halt_active:
             recent_bets = _all_trades_today() if "_all_trades_today" in globals() else []
             recent_ts = [t.get("timestamp") or "" for t in recent_bets]
             latest = max(recent_ts) if recent_ts else ""
