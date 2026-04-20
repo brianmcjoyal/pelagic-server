@@ -9748,6 +9748,66 @@ def _paper_trade_update():
         print(f"[PAPER] Update error: {e}")
 
 
+_GAME_TICKER_LEAGUE_MAP = {
+    "KXMLBGAME": "mlb", "KXNBAGAME": "nba",
+    "KXNHLGAME": "nhl", "KXNFLGAME": "nfl",
+}
+
+
+def _parse_game_ticker(tk):
+    """Extract (league, away_abbrev, home_abbrev) from a Kalshi game ticker.
+    Format: KX<LEAGUE>GAME-<DATE><TIME><AWAY><HOME>-<MARKET>.
+    Returns (None, None, None) for non-game tickers (EPL soccer, etc).
+    """
+    if not tk:
+        return None, None, None
+    up = tk.upper()
+    league = None
+    for pfx, lg in _GAME_TICKER_LEAGUE_MAP.items():
+        if up.startswith(pfx):
+            league = lg
+            break
+    if not league:
+        return None, None, None
+    try:
+        after = up.split("-")[1]
+        m = re.search(r"([A-Z]{2,4})([A-Z]{2,4})$", after)
+        if m:
+            return league, m.group(1), m.group(2)
+    except Exception:
+        pass
+    return league, None, None
+
+
+def _vegas_snapshot_for_ticker(ticker, side):
+    """Look up sportsbook consensus for our bet's side at entry time.
+
+    Returns dict with vegas_prob_our_side, vegas_gap_pp (vs kalshi implied),
+    and vegas_verdict (AGREES/BETTER/WORSE). Fills with None when data
+    unavailable (ODDS_API not configured, non-game ticker, team unmatched).
+    The vegas_* fields persist on the paper-trade record so that once the
+    trade settles, we can bucket WR by entry-time Vegas verdict — the
+    dataset that proves or kills the phantom-edge theory.
+    """
+    result = {"vegas_prob_our_side": None, "vegas_gap_pp": None, "vegas_verdict": None}
+    if not ODDS_API_KEY:
+        return result
+    try:
+        league, away, home = _parse_game_ticker(ticker)
+        if not league or not (away or home):
+            return result
+        our_team = home if side == "yes" else away
+        if not our_team:
+            return result
+        vp = _get_consensus_odds(our_team, league.upper())
+        if vp is None:
+            return result
+        result["vegas_prob_our_side"] = round(float(vp), 3)
+    except Exception:
+        return result
+    return result
+
+
 def _log_paper_trade(ticker, title, side, price, win_prob, edge, ev_cents, strategy, game_state="", sport=""):
     """Log a paper trade from ANY strategy. Shared by all paper trade functions.
     Called when a strategy finds a signal that passes EV/edge checks."""
@@ -9759,6 +9819,21 @@ def _log_paper_trade(ticker, title, side, price, win_prob, edge, ev_cents, strat
     if _cooldown_key in _PAPER_COOLDOWN and now_ts - _PAPER_COOLDOWN[_cooldown_key] < 600:
         return
 
+    # Capture Vegas consensus at entry time — persists with the trade so we
+    # can retro-bucket WR by vegas_verdict once the trade settles. This is
+    # the dataset that answers: does the bot win more on bets Vegas liked?
+    _vegas = _vegas_snapshot_for_ticker(ticker, side) if strategy and not strategy.startswith("shadow_fade_") else {"vegas_prob_our_side": None, "vegas_gap_pp": None, "vegas_verdict": None}
+    _kalshi_implied = round(price / 100.0, 3)
+    if _vegas["vegas_prob_our_side"] is not None:
+        _gap_pp = round((_vegas["vegas_prob_our_side"] - _kalshi_implied) * 100, 1)
+        _vegas["vegas_gap_pp"] = _gap_pp
+        if abs(_gap_pp) < 5:
+            _vegas["vegas_verdict"] = "AGREES"
+        elif _gap_pp > 0:
+            _vegas["vegas_verdict"] = "BETTER"
+        else:
+            _vegas["vegas_verdict"] = "WORSE"
+
     paper = {
         "ticker": ticker,
         "title": (title or "")[:60],
@@ -9767,7 +9842,10 @@ def _log_paper_trade(ticker, title, side, price, win_prob, edge, ev_cents, strat
         "strategy": strategy,
         "entry_price": price,
         "espn_prob": round(win_prob, 3) if win_prob else 0,
-        "kalshi_implied": round(price / 100.0, 3),
+        "kalshi_implied": _kalshi_implied,
+        "vegas_prob_our_side": _vegas["vegas_prob_our_side"],
+        "vegas_gap_pp": _vegas["vegas_gap_pp"],
+        "vegas_verdict": _vegas["vegas_verdict"],
         "edge": round(edge, 3) if edge else 0,
         "ev_cents": round(ev_cents, 2) if ev_cents else 0,
         "game_state": game_state,
@@ -17142,6 +17220,72 @@ def portfolio_summary():
         "open_positions": [], "open_count": 0, "total_invested_usd": 0,
         "total_unrealized_usd": 0, "wins": 0, "losses": 0, "breakeven": 0,
         "win_rate": 0, "win_rate_7d": 0, "total_realized_usd": 0, "settled_history": [],
+    })
+
+
+@app.route("/vegas-truth")
+def vegas_truth():
+    """Bucket settled paper trades by Vegas verdict AT ENTRY TIME.
+
+    This is the experiment that answers: does the bot actually win more on
+    the trades Vegas agreed with? Needs paper trades logged AFTER the
+    vegas_verdict capture started — the data gap closes as new bets settle.
+
+    If BETTER-verdict trades have materially higher WR than WORSE ones, the
+    ESPN-vs-Vegas divergence IS the phantom-edge problem, and the right
+    move is to require Vegas agreement before firing.
+    """
+    with _PAPER_TRADES_LOCK:
+        trades = list(_PAPER_TRADES)
+
+    settled = [t for t in trades if t.get("result") in ("win", "loss") and t.get("vegas_verdict")]
+    pending = [t for t in trades if t.get("result") is None and t.get("vegas_verdict")]
+
+    buckets = {"BETTER": [], "AGREES": [], "WORSE": []}
+    for t in settled:
+        v = t.get("vegas_verdict")
+        if v in buckets:
+            buckets[v].append(t)
+
+    def _bucket_stats(rows):
+        w = sum(1 for t in rows if t["result"] == "win")
+        l = sum(1 for t in rows if t["result"] == "loss")
+        n = w + l
+        pnl = sum(float(t.get("pnl_cents") or 0) for t in rows) / 100.0
+        return {
+            "wins": w, "losses": l, "n": n,
+            "wr": round(w / n * 100, 1) if n else None,
+            "avg_gap_pp": round(sum(float(t.get("vegas_gap_pp") or 0) for t in rows) / n, 1) if n else None,
+            "pnl_usd": round(pnl, 2),
+        }
+
+    out = {k: _bucket_stats(v) for k, v in buckets.items()}
+
+    verdict = "NEEDS_MORE_DATA"
+    if all(out[k]["n"] >= 20 for k in ("BETTER", "WORSE")):
+        wr_better = out["BETTER"]["wr"] or 0
+        wr_worse = out["WORSE"]["wr"] or 0
+        if wr_better - wr_worse >= 15:
+            verdict = "PHANTOM_EDGE_CONFIRMED"  # Vegas agreement matters a lot
+        elif wr_better - wr_worse <= -5:
+            verdict = "VEGAS_INVERTED"          # Vegas was wrong; fade them
+        else:
+            verdict = "VEGAS_NEUTRAL"           # no material difference
+
+    return jsonify({
+        "buckets": out,
+        "pending_by_verdict": {
+            "BETTER": sum(1 for t in pending if t.get("vegas_verdict") == "BETTER"),
+            "AGREES": sum(1 for t in pending if t.get("vegas_verdict") == "AGREES"),
+            "WORSE":  sum(1 for t in pending if t.get("vegas_verdict") == "WORSE"),
+        },
+        "verdict": verdict,
+        "explanation": (
+            "BETTER = Vegas priced our side HIGHER than Kalshi did at entry (real edge). "
+            "WORSE = Vegas priced our side LOWER (we overpaid — phantom edge suspect). "
+            "AGREES = within 5pp. If BETTER.wr >> WORSE.wr after 20+ settled in each "
+            "bucket → require Vegas agreement as a pretrade gate."
+        ),
     })
 
 
