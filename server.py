@@ -17145,6 +17145,144 @@ def portfolio_summary():
     })
 
 
+@app.route("/edge-decomposition")
+def edge_decomposition():
+    """Per-position breakdown of Kalshi price vs Vegas sportsbook consensus.
+
+    Exposes the disagreement between what the bot paid (Kalshi) and what
+    real money (Vegas) thinks the true probability is. Sustained gaps are
+    the source of the 'phantom edge' problem — the bot thinks it has edge
+    because ESPN disagrees with Kalshi, but Vegas sides with Kalshi.
+
+    Query params:
+      ?ticker=X — decompose one specific ticker (default: all open positions)
+    """
+    if not ODDS_API_KEY:
+        return jsonify({"error": "ODDS_API_KEY not configured — Vegas comparison unavailable"}), 503
+
+    _TICKER_LEAGUE_MAP = {
+        "KXMLBGAME": "mlb", "KXNBAGAME": "nba",
+        "KXNHLGAME": "nhl", "KXNFLGAME": "nfl",
+    }
+
+    def _parse_ticker(tk):
+        """Extract (league, away_abbrev, home_abbrev) from a Kalshi game ticker.
+        Format: KX<LEAGUE>GAME-<DATE><TIME><AWAY><HOME>-<MARKET>."""
+        if not tk:
+            return None, None, None
+        up = tk.upper()
+        league = None
+        for pfx, lg in _TICKER_LEAGUE_MAP.items():
+            if up.startswith(pfx):
+                league = lg
+                break
+        if not league:
+            return None, None, None
+        # After the first dash, strip digits and date chars — the trailing
+        # alpha run before the next dash is away+home concatenated.
+        try:
+            after = up.split("-")[1]
+            m = re.search(r"([A-Z]{2,4})([A-Z]{2,4})$", after)
+            if m:
+                return league, m.group(1), m.group(2)
+        except Exception:
+            pass
+        return league, None, None
+
+    single_ticker = request.args.get("ticker", "").strip()
+    if single_ticker:
+        positions = [{"ticker": single_ticker, "title": "", "side": "yes", "count": 1,
+                      "entry_price": 0, "current_price": 0}]
+    else:
+        try:
+            positions = check_position_prices() or []
+        except Exception as e:
+            return jsonify({"error": f"Could not fetch positions: {e}"}), 500
+
+    results = []
+    agrees = vegas_worse = vegas_better = unknown = 0
+
+    for p in positions:
+        ticker = p.get("ticker", "")
+        league, away, home = _parse_ticker(ticker)
+        if not league:
+            unknown += 1
+            continue
+
+        side = p.get("side", "yes")
+        entry = p.get("entry_price")
+        cur = p.get("current_price")
+        # What side did we take? For Kalshi GAME markets, YES = home team wins
+        # (or the specific outcome in the market title — approximate).
+        our_team = home if side == "yes" else away
+        opp_team = away if side == "yes" else home
+        vegas_prob_our_team = None
+        vegas_prob_opp_team = None
+        try:
+            if our_team:
+                vegas_prob_our_team = _get_consensus_odds(our_team, league.upper())
+            if opp_team:
+                vegas_prob_opp_team = _get_consensus_odds(opp_team, league.upper())
+        except Exception:
+            pass
+
+        kalshi_implied = (entry or cur or 0) / 100.0
+
+        gap_pp = None
+        verdict = "UNKNOWN"
+        if vegas_prob_our_team is not None and kalshi_implied > 0:
+            gap_pp = round((vegas_prob_our_team - kalshi_implied) * 100, 1)
+            if abs(gap_pp) < 5:
+                verdict = "AGREES"
+                agrees += 1
+            elif gap_pp > 0:
+                verdict = "VEGAS_BETTER"  # Vegas thinks our side is more likely than Kalshi prices
+                vegas_better += 1
+            else:
+                verdict = "VEGAS_WORSE"   # Vegas thinks our side is less likely — we may be paying too much
+                vegas_worse += 1
+        else:
+            unknown += 1
+
+        results.append({
+            "ticker": ticker,
+            "title": (p.get("title") or "")[:70],
+            "league": league,
+            "our_side": side,
+            "our_team_abbrev": our_team,
+            "opp_team_abbrev": opp_team,
+            "kalshi_entry_cents": entry,
+            "kalshi_current_cents": cur,
+            "kalshi_implied_prob": round(kalshi_implied, 3) if kalshi_implied else None,
+            "vegas_prob_our_side": (round(vegas_prob_our_team, 3)
+                                     if vegas_prob_our_team is not None else None),
+            "vegas_prob_opp_side": (round(vegas_prob_opp_team, 3)
+                                     if vegas_prob_opp_team is not None else None),
+            "gap_pct_points": gap_pp,
+            "verdict": verdict,
+        })
+
+    results.sort(key=lambda r: abs(r.get("gap_pct_points") or 0), reverse=True)
+    return jsonify({
+        "summary": {
+            "positions_analyzed": len(results),
+            "agrees": agrees,
+            "vegas_thinks_we_got_edge": vegas_better,
+            "vegas_thinks_we_overpaid": vegas_worse,
+            "no_vegas_data": unknown,
+        },
+        "positions": results,
+        "explanation": (
+            "Per-position gap between what Kalshi priced and what Vegas consensus "
+            "implies. AGREES (gap < 5pp) means both sources match. VEGAS_BETTER "
+            "means Vegas thinks your side is more likely than the price suggests "
+            "(real edge). VEGAS_WORSE means Vegas thinks you overpaid — those are "
+            "the bleeders. Sustained VEGAS_WORSE verdicts imply the ESPN-driven "
+            "entry model is disagreeing with real money."
+        ),
+    })
+
+
 @app.route("/healthcheck-deep")
 def healthcheck_deep():
     """Deep health check — returns 200 only if every critical subsystem is OK.
