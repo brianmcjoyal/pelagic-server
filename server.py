@@ -24213,8 +24213,10 @@ async function loadPortfolio() {
     var rEl = document.getElementById('pf-realized');
     if (rEl) { rEl.textContent = (rPnl >= 0 ? '+$' : '-$') + Math.abs(rPnl).toFixed(2); rEl.style.color = rPnl >= 0 ? '#00dc5a' : '#ff5000'; }
 
-    // Use /settled endpoint for accurate win rate (same source as scorecard)
-    // Use AbortController for 15s timeout — /settled can be slow after deploy
+    // Win rate comes from /portfolio-summary's journal-primary fields —
+    // DO NOT override with /settled, which is the polluted HWM cache that
+    // inflates WR to ~59% vs the journal's 11% truth. Only use /settled
+    // for the total_pnl_usd figure (cleaner Day-1+ total) and nothing else.
     var wr = data.win_rate || 0;
     var w = data.wins || 0, l = data.losses || 0;
     try {
@@ -24222,12 +24224,6 @@ async function loadPortfolio() {
       var _to = setTimeout(function(){ _ac.abort(); }, 15000);
       var settledData = await fetch(API + '/settled', {signal: _ac.signal}).then(function(r){return r.json();});
       clearTimeout(_to);
-      if (settledData && settledData.win_rate !== undefined) {
-        wr = settledData.win_rate || 0;
-        w = settledData.wins || 0;
-        l = settledData.losses || 0;
-      }
-      // Use settled P&L for Day 1+ total (more accurate than portfolio-summary journal)
       if (settledData && settledData.total_pnl_usd !== undefined) {
         totalPl = settledData.total_pnl_usd || 0;
       }
