@@ -17223,6 +17223,102 @@ def portfolio_summary():
     })
 
 
+@app.route("/edge-truth")
+def edge_truth():
+    """Test whether the bot's high-edge bets actually perform better.
+
+    Hypothesis: the model is MOST wrong when it's MOST confident — i.e.,
+    high claimed-edge bets have lower WR than low-edge bets. This is the
+    'phantom edge' pattern. If confirmed, the right fix is to lower the
+    edge gate (take MORE low-edge bets) or overhaul the edge calculation.
+
+    Buckets journal settlements by the `edge` recorded at entry time.
+    """
+    with _TRADE_JOURNAL_LOCK:
+        journal = list(_TRADE_JOURNAL)
+
+    def _edge_of(t):
+        for k in ("edge", "espn_edge", "edge_at_entry"):
+            v = t.get(k)
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+                if 0 < fv <= 1:
+                    return fv
+                if 1 < fv <= 100:
+                    return fv / 100.0
+            except Exception:
+                pass
+        return None
+
+    settled = [t for t in journal if t.get("result") in ("win", "loss")]
+    buckets = {
+        "ultra_high (>=20%)": [],
+        "high (10-20%)": [],
+        "med (5-10%)": [],
+        "low (<5%)": [],
+        "unknown": [],
+    }
+    for t in settled:
+        e = _edge_of(t)
+        if e is None:
+            buckets["unknown"].append(t)
+        elif e >= 0.20:
+            buckets["ultra_high (>=20%)"].append(t)
+        elif e >= 0.10:
+            buckets["high (10-20%)"].append(t)
+        elif e >= 0.05:
+            buckets["med (5-10%)"].append(t)
+        else:
+            buckets["low (<5%)"].append(t)
+
+    out = {}
+    for k, bucket in buckets.items():
+        w = sum(1 for t in bucket if t["result"] == "win")
+        l = sum(1 for t in bucket if t["result"] == "loss")
+        n = w + l
+        pnl = sum(float(t.get("pnl_usd") or 0) for t in bucket)
+        avg_edge = (sum(_edge_of(t) or 0 for t in bucket) / n) if n else 0
+        out[k] = {
+            "wins": w, "losses": l, "n": n,
+            "wr": round(w / n * 100, 1) if n else None,
+            "avg_edge_pct": round(avg_edge * 100, 1) if n else None,
+            "pnl_usd": round(pnl, 2),
+            "expectancy_per_trade": round(pnl / n, 2) if n else None,
+        }
+
+    # Verdict
+    hi_wr = (out["high (10-20%)"].get("wr") or 0) + (out["ultra_high (>=20%)"].get("wr") or 0)
+    hi_n = out["high (10-20%)"]["n"] + out["ultra_high (>=20%)"]["n"]
+    hi_wr = hi_wr / 2 if out["high (10-20%)"].get("wr") and out["ultra_high (>=20%)"].get("wr") else (out["high (10-20%)"].get("wr") or out["ultra_high (>=20%)"].get("wr") or 0)
+    lo_wr = out["low (<5%)"].get("wr") or 0
+    lo_n = out["low (<5%)"]["n"]
+
+    verdict = "NEEDS_MORE_DATA"
+    if hi_n >= 10 and lo_n >= 10:
+        if hi_wr < lo_wr - 5:
+            verdict = "PHANTOM_EDGE_CONFIRMED"  # High-edge is WORSE — model is anti-calibrated
+        elif hi_wr > lo_wr + 10:
+            verdict = "EDGE_CALIBRATED"         # High-edge wins more — model is fine, raise the gate
+        else:
+            verdict = "EDGE_FLAT"               # No relationship — edge signal is noise
+
+    return jsonify({
+        "buckets": out,
+        "verdict": verdict,
+        "high_edge_wr": round(hi_wr, 1) if hi_n else None,
+        "low_edge_wr": round(lo_wr, 1) if lo_n else None,
+        "explanation": (
+            "If high-edge buckets have LOWER WR than low-edge, the model is "
+            "anti-calibrated — the more confident, the more wrong. Fix options: "
+            "(1) invert edge direction, (2) replace ESPN with Vegas, (3) lower "
+            "the gate to fire more low-edge bets. If high-edge wins more, the "
+            "calculation is right — just raise the gate higher."
+        ),
+    })
+
+
 @app.route("/vegas-truth")
 def vegas_truth():
     """Bucket settled paper trades by Vegas verdict AT ENTRY TIME.
@@ -20182,7 +20278,13 @@ def volatility_view():
 
 @app.route("/trades")
 def trades():
-    # Build settlement lookup from trade journal AND Kalshi positions
+    # JOURNAL-ONLY settlement lookup. The previous code also pulled outcomes
+    # from Kalshi's positions API `realized_pnl` field, which is polluted by
+    # zeroed/duplicate/reconstructed positions — that's what inflated the
+    # "all_trades" WR to 48% while the true journal WR is 10.9% (confirmed
+    # by the Mar 20 record showing +$18,454 P&L on a $500 bankroll — impossible).
+    # Outcomes not in the journal remain None (honestly unknown) rather than
+    # fabricated from Kalshi's stale cache.
     with _TRADE_JOURNAL_LOCK:
         _journal_snap = list(_TRADE_JOURNAL)
     settle_map = {}
@@ -20192,28 +20294,6 @@ def trades():
                 "result": jt["result"],
                 "pnl_usd": jt.get("pnl_usd", 0),
             }
-    # Also check Kalshi positions for realized P&L (more reliable after restarts)
-    try:
-        for _status in ["settled", "unsettled"]:
-            _ph = signed_headers("GET", "/portfolio/positions")
-            if _ph:
-                _pr = requests.get(
-                    KALSHI_BASE_URL + KALSHI_API_PREFIX + "/portfolio/positions",
-                    headers=_ph, params={"limit": 200, "settlement_status": _status},
-                    timeout=8,
-                )
-                if _pr.ok:
-                    for _pp in _pr.json().get("market_positions", []):
-                        _ptk = _pp.get("ticker", "")
-                        _ppnl = _parse_kalshi_dollars(_pp.get("realized_pnl_dollars") or _pp.get("realized_pnl"))
-                        _ppnl_usd = _ppnl / 100
-                        if _ptk and abs(_ppnl_usd) > 0.005 and _ptk not in settle_map:
-                            settle_map[_ptk] = {
-                                "result": "win" if _ppnl_usd > 0 else "loss",
-                                "pnl_usd": round(_ppnl_usd, 2),
-                            }
-    except Exception:
-        pass
     # Build buy/sell P&L from fills: group by ticker, match buys with sells
     _fill_pnl = {}
     _buys = {}
