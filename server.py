@@ -17800,12 +17800,23 @@ def wr_truth():
     if hwm_wr is not None and journal_all_stats["wr"] is not None:
         divergence_pct = round(hwm_wr - journal_all_stats["wr"], 1)
 
+    # Same-day wins: bets placed AND settled on the same PT calendar date.
+    # Powers the dashboard's Same-Day W/L card so it stops reading the
+    # polluted HWM cache.
+    same_day = []
+    for t in journal_all:
+        e = (t.get("entry_time") or "")[:10]
+        s = (t.get("settlement_time") or "")[:10]
+        if e and s and e == s:
+            same_day.append(t)
+
     return jsonify({
         "journal": {
             "all_time": journal_all_stats,
             "last_7d":  _wr(journal_7d),
             "last_48h": _wr(journal_48h),
             "last_24h": _wr(journal_24h),
+            "same_day": _wr(same_day),
         },
         "hwm_settled_cache": {
             "all_time": {"wins": hwm_all_w, "losses": hwm_all_l, "n": hwm_total, "wr": hwm_wr},
@@ -26710,7 +26721,18 @@ async function loadPerformance() {
 
     var khtml = '';
     // Row 1: Core trading metrics
-    // Same-day stats
+    // Same-day stats — prefer journal-truth when wrTruth flags TRUST_JOURNAL.
+    // HWM cache same-day counts are inflated by the same zeroed/reconstructed
+    // positions that pumped the all-time card; the /wr-truth journal object
+    // now publishes same_day too so both cards stay consistent.
+    var _sdSource = 'cache';
+    if (wrTruth && wrTruth.verdict === 'TRUST_JOURNAL'
+        && wrTruth.journal && wrTruth.journal.same_day
+        && wrTruth.journal.same_day.n !== undefined) {
+      sameDayWins = wrTruth.journal.same_day.wins || 0;
+      sameDayLosses = wrTruth.journal.same_day.losses || 0;
+      _sdSource = 'journal-truth';
+    }
     var sameDayTotal = sameDayWins + sameDayLosses;
     var sameDayWR = sameDayTotal > 0 ? (sameDayWins / sameDayTotal * 100) : 0;
     var sameDayWRColor = sameDayWR >= 50 ? '#00dc5a' : sameDayWR >= 30 ? '#ffb400' : '#ff5000';
@@ -26721,7 +26743,11 @@ async function loadPerformance() {
       : 'no settled trades yet';
     var _wlLabel = _wrSource === 'journal-truth' ? 'All-Time W/L (truth)' : 'All-Time W/L';
     khtml += kpi(_wlLabel, total > 0 ? wins + 'W / ' + losses + 'L' : '--', total > 0 ? wrColor : '#888', _wlSub);
-    khtml += kpi('Same-Day W/L', sameDayTotal > 0 ? sameDayWins + 'W / ' + sameDayLosses + 'L' : '--', sameDayTotal > 0 ? sameDayWRColor : '#888', sameDayTotal > 0 ? sameDayWR.toFixed(1) + '% win rate (' + sameDayTotal + ' trades)' : 'bets placed & settled same day');
+    var _sdLabel = _sdSource === 'journal-truth' ? 'Same-Day W/L (truth)' : 'Same-Day W/L';
+    var _sdSub = sameDayTotal > 0
+      ? sameDayWR.toFixed(1) + '% win rate (' + sameDayTotal + ' trades' + (_sdSource === 'journal-truth' ? ' · journal' : '') + ')'
+      : 'bets placed & settled same day';
+    khtml += kpi(_sdLabel, sameDayTotal > 0 ? sameDayWins + 'W / ' + sameDayLosses + 'L' : '--', sameDayTotal > 0 ? sameDayWRColor : '#888', _sdSub);
     khtml += kpi('Daily P&L', (_dailyPl >= 0 ? '+$' : '-$') + Math.abs(_dailyPl).toFixed(2), _dailyPl >= 0 ? '#00dc5a' : '#ff5000', 'since midnight PT');
     khtml += kpi('Expectancy', total > 0 ? ((expectancy >= 0 ? '+$' : '-$') + Math.abs(expectancy).toFixed(2)) : '--', total > 0 ? expColor : '#888', total > 0 ? 'per trade' : '');
 
