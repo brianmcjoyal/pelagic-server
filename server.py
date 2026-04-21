@@ -11531,9 +11531,34 @@ def _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, stra
     }
 
 
-def _journal_trade(ticker, title, side, price_cents, count, cost_usd, strategy, is_live=False, close_time=None, game_info=None, espn_edge_data=None, orderbook_data=None, conviction=0, conviction_reasons=None):
-    """Add a trade to the journal with full enrichment."""
+def _journal_trade(ticker, title, side, price_cents, count, cost_usd, strategy,
+                   is_live=False, close_time=None, game_info=None,
+                   espn_edge_data=None, orderbook_data=None,
+                   conviction=0, conviction_reasons=None,
+                   edge=None, win_prob=None):
+    """Add a trade to the journal with full enrichment.
+
+    The `edge` and `win_prob` kwargs are the new explicit entry-time
+    signal capture — they guarantee /edge-truth can bucket even when the
+    caller doesn't supply an espn_edge_data dict (e.g. manual trades).
+    Stored as top-level edge_at_entry / win_prob_at_entry fields.
+    """
     rec = _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, strategy, is_live, close_time=close_time, game_info=game_info, espn_edge_data=espn_edge_data, orderbook_data=orderbook_data, conviction=conviction, conviction_reasons=conviction_reasons)
+    # Force-capture entry-time signal — falls back to values nested in
+    # espn_edge_data if explicit kwargs weren't passed. Stored even when
+    # None so the field always exists (makes /edge-truth analysis honest).
+    if edge is None and isinstance(espn_edge_data, dict):
+        edge = espn_edge_data.get("espn_edge") or espn_edge_data.get("edge")
+    if win_prob is None and isinstance(espn_edge_data, dict):
+        win_prob = espn_edge_data.get("espn_implied") or espn_edge_data.get("win_prob")
+    try:
+        rec["edge_at_entry"] = float(edge) if edge is not None else None
+    except Exception:
+        rec["edge_at_entry"] = None
+    try:
+        rec["win_prob_at_entry"] = float(win_prob) if win_prob is not None else None
+    except Exception:
+        rec["win_prob_at_entry"] = None
     with _TRADE_JOURNAL_LOCK:
         _TRADE_JOURNAL.append(rec)
     return rec
@@ -17238,7 +17263,9 @@ def edge_truth():
         journal = list(_TRADE_JOURNAL)
 
     def _edge_of(t):
-        for k in ("edge", "espn_edge", "edge_at_entry"):
+        # edge_at_entry is the new explicit capture (post 2026-04-21); falls
+        # back to legacy nested fields so older journal entries still bucket.
+        for k in ("edge_at_entry", "edge", "espn_edge"):
             v = t.get(k)
             if v is None:
                 continue
