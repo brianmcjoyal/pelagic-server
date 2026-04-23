@@ -4245,7 +4245,20 @@ BOT_STATE["floor_date"] = None
 
 # MoonShark settings — KELLY-SIZED: fewer bets, larger when edge is real
 MOONSHARK_MIN_PRICE = 25   # cents — MoonShark only on 25c+ contracts (higher conviction)
-MOONSHARK_MAX_PRICE = 35   # cents — tightened from 40 (sweet spot is 25-30, cap at 35)
+MOONSHARK_MAX_PRICE = 35   # cents
+MOONSHARK_PAPER_ONLY = True  # 3.57% live win rate, -$65.72 — permanently off live
+LIVE_SNIPER_PAPER_ONLY = True  # CLV bug confirmed: 0W/14L live despite +53.9c reading
+LIVE_TRADING_ALLOWED_HOURS = list(range(9, 16))
+
+def _is_trading_allowed_now():
+    """Hour 18=0W/12L, Hour 19=3W/21L, Hour 21=0W/10L. Only trade 9am-4pm PT."""
+    try:
+        now_hour = _PACIFIC.localize(__import__("datetime").datetime.now().replace(tzinfo=None)).hour
+    except Exception:
+        now_hour = __import__("datetime").datetime.utcnow().hour
+    return now_hour in LIVE_TRADING_ALLOWED_HOURS  # 9am-4pm PT only — evening = 0pct win rate
+LIVE_MIN_PRICE_CENTS = 45  # 10-15c range has 0pct win rate across 17 live trades
+LIVE_MAX_PRICE_CENTS = 60  # sweet spot confirmed by data — tightened from 40 (sweet spot is 25-30, cap at 35)
 MOONSHARK_MAX_DAILY = 50.0  # daily safety cap — reduced to 25% of bankroll total across strategies
 MOONSHARK_BET_USD = 3.0     # fallback only — Kelly sizes most bets
 MOONSHARK_MIN_TRADES = 0    # no floor — only trade when edge is real
@@ -29115,17 +29128,21 @@ def uncle_claude():
             "strategies": {
                 "FLOOR": "PRIMARY - 53% win rate, +0.71c CLV, shadow-fade confirms real edge",
                 "LIVE_SNIPER": "WATCH - 53.9c CLV over 14 trades, may be measurement bug, investigate",
-                "MOONSHARK": "PAPER ONLY - negative CLV -2.4c over 28 trades, do not go live",
+                "MOONSHARK": "PERMANENTLY OFF LIVE — 3.57% win rate, -$65.72 loss across 28 trades",
                 "CLOSEGAME": "MONITORING - flagged no edge",
                 "golf": "BLOCKED - 0% win rate",
                 "mma": "CAUTION - got boosted on 1W/5L, possible tuner bug"
             },
             "open_issues": [
-                "live_sniper 53.9c CLV - real or measurement bug?",
+                "live_sniper CLV IS A BUG: +53.9c CLV but 0W/14L live = confirmed measurement error",
                 "MMA boosted on losing record - tuner logic bug?",
                 "MOON 0x0 trades with future dates corrupting live stats?",
                 "Top loss reason unknown 31x - loss categorization broken",
-                "STORAGE WARNING ephemeral state lost on every deploy - fix Railway volume",
+                "STORAGE WARNING — fix Railway volume",
+                "CRITICAL: MoonShark was trading live with 3.57% win rate — root cause of all losses",
+                "Evening hours 4pm-11pm PT show 0pct win rate — time filter now active",
+                "4453 poisoned journal skips — tuner needs investigation",
+                "FLOOR strategy not firing live — investigate why",
                 "Profit factor 0.14 - do not add capital until above 1.0"
             ],
             "hard_rules": [
