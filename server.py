@@ -29083,3 +29083,26 @@ async function loadNewsIdeas(forceRefresh) {
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
+
+@app.route("/claude-brief")
+def claude_brief():
+    from datetime import datetime
+    try:
+        j = BOT_STATE.get("journal", [])
+        wins = [t for t in j if t.get("pnl",0) > 0]
+        losses = [t for t in j if t.get("pnl",0) < 0]
+        p = BOT_STATE.get("paper_trades", [])
+        pw = [t for t in p if t.get("result")=="win"]
+        port = BOT_STATE.get("portfolio_value", 0)
+        return jsonify({
+            "generated": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "uncle_claude": "Mountain man economist. Straight talk. No flattery.",
+            "portfolio": {"total": port, "pnl_vs_500": round(port-500,2), "roi_pct": round((port-500)/500*100,2)},
+            "live": {"wins": len(wins), "losses": len(losses), "win_rate": round(len(wins)/len(j)*100,1) if j else 0},
+            "paper": {"trades": len(p), "win_rate": round(len(pw)/len(p)*100,1) if p else 0, "pnl": round(sum(t.get("pnl",0) for t in p),2)},
+            "brain": {"version": BOT_STATE.get("learning_version","?"), "insights": BOT_STATE.get("latest_insights",[])[:5]},
+            "moonshark": "PAPER ONLY — CLV -2.4c",
+            "open_questions": ["Is live_sniper 53.9c CLV real or bug?","Why did MMA 1W/5L get BOOSTED?","Are 0x0 MOON trades corrupting live stats?","What drove LEGACY_SOCCER wins?"]
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
