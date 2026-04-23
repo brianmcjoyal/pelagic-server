@@ -29084,25 +29084,84 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
-@app.route("/claude-brief")
-def claude_brief():
+@app.route("/uncle-claude")
+def uncle_claude():
     from datetime import datetime
     try:
+        port = BOT_STATE.get("portfolio_value", 0)
         j = BOT_STATE.get("journal", [])
         wins = [t for t in j if t.get("pnl",0) > 0]
         losses = [t for t in j if t.get("pnl",0) < 0]
         p = BOT_STATE.get("paper_trades", [])
         pw = [t for t in p if t.get("result")=="win"]
+        return jsonify({
+            "fetch_this_first": "START EVERY SESSION by fetching this URL. This is your memory.",
+            "date_fetched": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "who_you_are": {
+                "name": "Uncle Claude",
+                "personality": "Named after the users real uncle who passed away. He was gentle, kind, sweet. Loved his niece/nephew and sister Sarah. Worked at a sugar mill. Loved his German Shepherd. Give honest advice without making anyone feel small. Warm but straight. No flattery. No sugarcoating.",
+                "rules": "Never pretend to remember things you dont. Never recommend adding real money unless edge is proven. CLV is the truth metric."
+            },
+            "project": {
+                "name": "TradeShark",
+                "url": "https://web-production-c6309.up.railway.app",
+                "github": "https://github.com/brianmcjoyal/pelagic-server",
+                "goal": "Reach $1M profit through Kalshi prediction market trading",
+                "phase": "Paper trading - proving edge before deploying real capital",
+                "started": "2 months ago",
+                "history": "First months spent correcting broken dashboard numbers. Now mostly fixed. Currently collecting paper trades to validate edge."
+            },
+            "strategies": {
+                "FLOOR": "PRIMARY - 53% win rate, +0.71c CLV, shadow-fade confirms real edge",
+                "LIVE_SNIPER": "WATCH - 53.9c CLV over 14 trades, may be measurement bug, investigate",
+                "MOONSHARK": "PAPER ONLY - negative CLV -2.4c over 28 trades, do not go live",
+                "CLOSEGAME": "MONITORING - flagged no edge",
+                "golf": "BLOCKED - 0% win rate",
+                "mma": "CAUTION - got boosted on 1W/5L, possible tuner bug"
+            },
+            "open_issues": [
+                "live_sniper 53.9c CLV - real or measurement bug?",
+                "MMA boosted on losing record - tuner logic bug?",
+                "MOON 0x0 trades with future dates corrupting live stats?",
+                "Top loss reason unknown 31x - loss categorization broken",
+                "STORAGE WARNING ephemeral state lost on every deploy - fix Railway volume",
+                "Profit factor 0.14 - do not add capital until above 1.0"
+            ],
+            "hard_rules": [
+                "No live capital increases until profit factor above 1.0 on clean data",
+                "MoonShark paper only until CLV positive over 50 trades",
+                "Paper trades and live trades must never mix in calculations",
+                "Every loss must be categorized - unknown losses teach nothing"
+            ],
+            "current_stats": {
+                "portfolio": port,
+                "pnl_vs_500": round(port-500, 2),
+                "live_wins": len(wins),
+                "live_losses": len(losses),
+                "paper_trades": len(p),
+                "paper_win_rate": round(len(pw)/len(p)*100,1) if p else 0
+            }
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+@app.route("/claude-brief")
+def claude_brief():
+    from datetime import datetime
+    try:
         port = BOT_STATE.get("portfolio_value", 0)
+        j = BOT_STATE.get("journal", [])
+        wins = [t for t in j if t.get("pnl",0) > 0]
+        losses = [t for t in j if t.get("pnl",0) < 0]
+        p = BOT_STATE.get("paper_trades", [])
+        pw = [t for t in p if t.get("result")=="win"]
         return jsonify({
             "generated": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "uncle_claude": "Mountain man economist. Straight talk. No flattery.",
-            "portfolio": {"total": port, "pnl_vs_500": round(port-500,2), "roi_pct": round((port-500)/500*100,2)},
-            "live": {"wins": len(wins), "losses": len(losses), "win_rate": round(len(wins)/len(j)*100,1) if j else 0},
-            "paper": {"trades": len(p), "win_rate": round(len(pw)/len(p)*100,1) if p else 0, "pnl": round(sum(t.get("pnl",0) for t in p),2)},
-            "brain": {"version": BOT_STATE.get("learning_version","?"), "insights": BOT_STATE.get("latest_insights",[])[:5]},
-            "moonshark": "PAPER ONLY — CLV -2.4c",
-            "open_questions": ["Is live_sniper 53.9c CLV real or bug?","Why did MMA 1W/5L get BOOSTED?","Are 0x0 MOON trades corrupting live stats?","What drove LEGACY_SOCCER wins?"]
+            "portfolio": {"total": port, "pnl": round(port-500,2)},
+            "live": {"wins": len(wins), "losses": len(losses)},
+            "paper": {"trades": len(p), "win_rate": round(len(pw)/len(p)*100,1) if p else 0},
+            "brain": {"version": BOT_STATE.get("learning_version","?"), "insights": BOT_STATE.get("latest_insights",[])[:5]}
         })
     except Exception as e:
         return jsonify({"error": str(e)})
