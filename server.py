@@ -22803,6 +22803,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans
 .ticker-symbol { color: #666; font-weight: 600; font-size: 11px; letter-spacing: 0.5px; }
 .ticker-price { color: #ccc; font-weight: 600; font-variant-numeric: tabular-nums; }
 .ticker-chg { font-size: 11px; font-weight: 600; }
+.ticker-chg::after { content: " 24h"; font-size: 9px; opacity: 0.45; font-weight: 400; }
 .ticker-chg.up { color: #00dc5a; }
 .ticker-chg.down { color: #ff5000; }
 /* Portfolio breakdown */
