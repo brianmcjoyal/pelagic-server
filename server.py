@@ -71,8 +71,9 @@ BOT_VERSION_DATE = "2026-03-15"
 # ---------------------------------------------------------------------------
 BOT_CONFIG = {
     "enabled": True,  # default ON — safety floor will auto-disable if needed
-    "max_bet_usd": 25.0,          # max $25 per single trade — let Kelly size up on high-edge bets
-    "max_daily_usd": 125.0,        # max $125/day — 25% of $500 bankroll across all strategies
+    "max_bet_usd": 5.0,           # REDUCED — $5 max until live win rate proven
+    "max_daily_usd": 25.0,         # REDUCED — max $25/day
+    "max_daily_trades": 3,         # max 3 live trades/day
     "min_balance_usd": 50.0,      # SAFETY FLOOR: stop all trading if cash below $50
     "min_cash_reserve_pct": 0.05, # keep 5% of portfolio in cash — legacy positions skew ratio
     "max_open_positions": 150,    # no hard cap — quality is controlled by conviction + edge gates, not position count
@@ -81,7 +82,7 @@ BOT_CONFIG = {
     "min_volume": 50,             # include smaller markets
     "scan_interval_seconds": 45,  # faster scanning during game hours
     "max_category_exposure": 3,   # max 3 positions per category — diversified
-    "blocked_categories": ["weather", "golf", "politics", "economics", "nfl", "other", "tech", "mma", "ufc", "entertainment", "crypto", "finance"],  # block everything without live-game ESPN edge
+    "blocked_categories": ["weather", "golf", "politics", "economics", "nfl", "other", "tech", "mma", "ufc", "entertainment", "crypto", "finance", "nba", "nhl"],  # block everything without live-game ESPN edge
     "blocked_keywords": ["title holder", "title on dec", "prime minister", "next president", "ipo first", "gas price", "billboard", "netflix", "spotify", "golf", "pga", "lpga", "masters", "election", "congress", "senate", "governor", "ufc", "mma", "bellator", "champion", "mvp", "award", "oscar", "grammy", "emmy", "win the", "series winner", "conference winner", "division winner", "playoff", "super bowl", "world series winner", "stanley cup winner", "finals winner"],  # block long-dated + non-game markets
     "moonshark_enabled": True,  # MoonShark longshot sniper toggle
     "sport_exposure_cap_pct": 0.40, # max 40% of daily budget on any single sport (NBA correlation, MLB night, etc.)
@@ -461,7 +462,7 @@ _LEARNING_STATE = {
         "min_edge_sniper": 0.03,    # 3% ESPN edge minimum — never bet on razor-thin margins
         "min_edge_moonshark": 0.05,
         "min_edge_closegame": 0.03,
-        "min_edge_floor": 0.02,
+        "min_edge_floor": 0.05,  # 5% min edge
         "min_edge_swing": 0.06,
         "min_edge_goalie": 0.05,
         "last_tune": None,
@@ -1728,7 +1729,7 @@ def _rebuild_journal_from_kalshi():
                         "min_edge_sniper": 0.04,
                         "min_edge_moonshark": 0.06,
                         "min_edge_closegame": 0.04,
-                        "min_edge_floor": 0.02,
+                        "min_edge_floor": 0.05,  # 5% min edge
                         "min_edge_swing": 0.06,
                         "min_edge_goalie": 0.05,
                         "sport_strategy_penalties": {},
@@ -4259,7 +4260,9 @@ def _is_trading_allowed_now():
         now_hour = __import__("datetime").datetime.utcnow().hour
     return now_hour in LIVE_TRADING_ALLOWED_HOURS  # 9am-4pm PT only — evening = 0pct win rate
 LIVE_MIN_PRICE_CENTS = 45  # 10-15c range has 0pct win rate across 17 live trades
-LIVE_MAX_PRICE_CENTS = 60  # sweet spot confirmed by data — tightened from 40 (sweet spot is 25-30, cap at 35)
+LIVE_MAX_PRICE_CENTS = 60
+REQUIRE_LIVE_GAME_CONFIRM = True
+LIVE_MAX_HOURS_TO_CLOSE = 12.0  # same-day games only  # sweet spot confirmed by data — tightened from 40 (sweet spot is 25-30, cap at 35)
 MOONSHARK_MAX_DAILY = 50.0  # daily safety cap — reduced to 25% of bankroll total across strategies
 MOONSHARK_BET_USD = 3.0     # fallback only — Kelly sizes most bets
 MOONSHARK_MIN_TRADES = 0    # no floor — only trade when edge is real
