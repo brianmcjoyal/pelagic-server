@@ -1704,6 +1704,7 @@ def _rebuild_journal_from_kalshi():
                 "clv_entry_price": entry_cents,
                 "clv_closing_price": _rebuild_closing,
                 "loss_category": _rebuild_loss_cat,
+                "market_type": "sports_game" if any(x in (ticker or "") for x in ["KXNBA","KXNHL","KXMLB","KXNFL","KXMLS","KXEPL","KXUFC"]) else "other",
             }
             with _TRADE_JOURNAL_LOCK:
                 _TRADE_JOURNAL.append(journal_entry)
@@ -10436,7 +10437,7 @@ def _learning_engine():
     # Find best/worst categories
     for cat, stats in sorted(cat_weights.items(), key=lambda x: x[1]["win_rate"], reverse=True):
         if stats["confidence"] >= 0.5:
-            if stats["win_rate"] >= 0.15:
+            if stats["win_rate"] >= 0.40 and stats["sample_size"] >= 10:  # raised from 0.15 — 15% is losing money
                 insights.append(f"✅ {cat}: {stats['win_rate']:.0%} win rate ({stats['wins']}W/{stats['losses']}L) → BOOSTED")
             elif stats["win_rate"] == 0 and stats["sample_size"] >= 5:
                 insights.append(f"🚫 {cat}: 0% win rate on {stats['sample_size']} trades → BLOCKED")
@@ -10868,13 +10869,16 @@ def _auto_tune_thresholds():
             _hwm_total = _hwm_wins + _hwm_losses
             _hwm_wr = (_hwm_wins / _hwm_total) if _hwm_total else None
             # Poisoned: >20 settled in 7d, journal WR < 20%, HWM WR > 40%
-            _is_poisoned = (
-                _j_wr is not None and _hwm_wr is not None
-                and _j_total >= 20
-                and _j_wr < 0.20
-                and _hwm_wr > 0.40
-                and (_hwm_wr - _j_wr) > 0.25
-            )
+            _last_pt_str = adaptive.get("last_poison_time")
+            _pcool = True
+            if _last_pt_str:
+                try:
+                    _lpt = datetime.datetime.fromisoformat(_last_pt_str.replace("Z",""))
+                    _pcool = (datetime.datetime.utcnow() - _lpt).total_seconds()/3600 >= 6.0
+                except Exception: pass
+            _is_poisoned = (_pcool and _j_wr is not None and _hwm_wr is not None
+                and _j_total >= 20 and _j_wr < 0.20
+                and _hwm_wr > 0.40 and (_hwm_wr - _j_wr) > 0.25)
             if _is_poisoned:
                 print(f"[AUTO-TUNE] POISONED JOURNAL detected: 7d WR={_j_wr:.1%} ({_j_wins}W/{_j_losses}L) "
                       f"vs HWM WR={_hwm_wr:.1%} ({_hwm_wins}W/{_hwm_losses}L) — skipping tune, resetting adaptive")
@@ -10891,6 +10895,7 @@ def _auto_tune_thresholds():
                 adaptive["last_tune"] = datetime.datetime.utcnow().isoformat() + "Z"
                 adaptive["last_win_rate_7d"] = round(_j_wr, 4)
                 adaptive["poisoned_journal_skips"] = adaptive.get("poisoned_journal_skips", 0) + 1
+                adaptive["last_poison_time"] = datetime.datetime.utcnow().isoformat() + "Z"
                 return
         except Exception as _pge:
             print(f"[AUTO-TUNE] Poison check error (non-fatal): {_pge}")
@@ -29102,11 +29107,13 @@ if __name__ == "__main__":
 def uncle_claude():
     from datetime import datetime
     try:
-        port = BOT_STATE.get("portfolio_value", 0)
-        j = BOT_STATE.get("journal", [])
+        pf = _PORTFOLIO_CACHE.get("data") or {}
+        port = float(pf.get("portfolio_value_usd", 0) or 0)
+        cash = float(pf.get("balance_usd", 0) or 0)
+        j = list(_TRADE_JOURNAL)
         wins = [t for t in j if t.get("pnl",0) > 0]
         losses = [t for t in j if t.get("pnl",0) < 0]
-        p = BOT_STATE.get("paper_trades", [])
+        p = list(_PAPER_TRADES) if isinstance(_PAPER_TRADES, list) else []
         pw = [t for t in p if t.get("result")=="win"]
         return jsonify({
             "fetch_this_first": "START EVERY SESSION by fetching this URL. This is your memory.",
@@ -29143,7 +29150,9 @@ def uncle_claude():
                 "Evening hours 4pm-11pm PT show 0pct win rate — time filter now active",
                 "4453 poisoned journal skips — tuner needs investigation",
                 "FLOOR strategy not firing live — investigate why",
-                "Profit factor 0.14 - do not add capital until above 1.0"
+                "Profit factor 0.14 - do not add capital until above 1.0",
+                "NOTE: Drawdown tracks DAILY losses only (Level2=-$60/day). Portfolio all-time is +$33. Different metrics.",
+                "Drawdown resets at midnight PT automatically"
             ],
             "hard_rules": [
                 "No live capital increases until profit factor above 1.0 on clean data",
