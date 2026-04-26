@@ -82,7 +82,7 @@ BOT_CONFIG = {
     "min_volume": 50,             # include smaller markets
     "scan_interval_seconds": 45,  # faster scanning during game hours
     "max_category_exposure": 3,   # max 3 positions per category — diversified
-    "blocked_categories": ["weather", "golf", "politics", "economics", "nfl", "other", "tech", "mma", "ufc", "entertainment", "crypto", "finance", "nba", "nhl"],  # block everything without live-game ESPN edge
+    "blocked_categories": ["weather", "golf", "politics", "economics", "nfl", "other", "tech", "mma", "ufc", "entertainment", "crypto", "finance"]  # NHL/NBA unblocked
     "blocked_keywords": ["title holder", "title on dec", "prime minister", "next president", "ipo first", "gas price", "billboard", "netflix", "spotify", "golf", "pga", "lpga", "masters", "election", "congress", "senate", "governor", "ufc", "mma", "bellator", "champion", "mvp", "award", "oscar", "grammy", "emmy", "win the", "series winner", "conference winner", "division winner", "playoff", "super bowl", "world series winner", "stanley cup winner", "finals winner"],  # block long-dated + non-game markets
     "moonshark_enabled": True,  # MoonShark longshot sniper toggle
     "sport_exposure_cap_pct": 0.40, # max 40% of daily budget on any single sport (NBA correlation, MLB night, etc.)
@@ -4250,7 +4250,7 @@ MOONSHARK_MIN_PRICE = 25   # cents — MoonShark only on 25c+ contracts (higher 
 MOONSHARK_MAX_PRICE = 35   # cents
 MOONSHARK_PAPER_ONLY = True  # 3.57% live win rate, -$65.72 — permanently off live
 LIVE_SNIPER_PAPER_ONLY = True  # CLV bug confirmed: 0W/14L live despite +53.9c reading
-LIVE_TRADING_ALLOWED_HOURS = list(range(9, 16))
+LIVE_TRADING_ALLOWED_HOURS = list(range(0, 24))  # all hours
 
 def _is_trading_allowed_now():
     """Hour 18=0W/12L, Hour 19=3W/21L, Hour 21=0W/10L. Only trade 9am-4pm PT."""
