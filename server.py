@@ -77,7 +77,7 @@ BOT_CONFIG = {
     "min_balance_usd": 50.0,      # SAFETY FLOOR: stop all trading if cash below $50
     "min_cash_reserve_pct": 0.05, # keep 5% of portfolio in cash — legacy positions skew ratio
     "max_open_positions": 150,    # no hard cap — quality is controlled by conviction + edge gates, not position count
-    "min_deviation": 0.08,        # 8% mispricing — catch more edges
+    "min_deviation": 0.04,  # lowered from 0.08 to find more candidates        # 8% mispricing — catch more edges
     "min_platforms": 1,           # single platform OK — MoonShark is our main strategy
     "min_volume": 50,             # include smaller markets
     "scan_interval_seconds": 45,  # faster scanning during game hours
