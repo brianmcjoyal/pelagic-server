@@ -82,7 +82,7 @@ BOT_CONFIG = {
     "min_volume": 50,             # include smaller markets
     "scan_interval_seconds": 45,  # faster scanning during game hours
     "max_category_exposure": 3,   # max 3 positions per category — diversified
-    "blocked_categories": ["weather", "golf", "politics", "economics", "nfl", "other", "tech", "mma", "ufc", "entertainment", "crypto", "finance", "nba", "nhl"],  # block everything without live-game ESPN edge
+    "blocked_categories": ["weather", "golf", "politics", "economics", "nfl", "other", "tech", "mma", "ufc", "entertainment", "crypto", "finance"],  # block everything without live-game ESPN edge
     "blocked_keywords": ["title holder", "title on dec", "prime minister", "next president", "ipo first", "gas price", "billboard", "netflix", "spotify", "golf", "pga", "lpga", "masters", "election", "congress", "senate", "governor", "ufc", "mma", "bellator", "champion", "mvp", "award", "oscar", "grammy", "emmy", "win the", "series winner", "conference winner", "division winner", "playoff", "super bowl", "world series winner", "stanley cup winner", "finals winner"],  # block long-dated + non-game markets
     "moonshark_enabled": True,  # MoonShark longshot sniper toggle
     "sport_exposure_cap_pct": 0.40, # max 40% of daily budget on any single sport (NBA correlation, MLB night, etc.)
