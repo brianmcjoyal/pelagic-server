@@ -70,7 +70,7 @@ BOT_VERSION_DATE = "2026-03-15"
 # Bot configuration and state
 # ---------------------------------------------------------------------------
 BOT_CONFIG = {
-    "enabled": True,  # default ON — safety floor will auto-disable if needed
+    "enabled": False,  # MANUALLY PAUSED — re-enable via /config API once ESPN matching bug is fixed
     "max_bet_usd": 5.0,           # REDUCED — $5 max until live win rate proven
     "max_daily_usd": 25.0,         # REDUCED — max $25/day
     "max_daily_trades": 3,         # max 3 live trades/day
@@ -790,7 +790,7 @@ def _load_state():
         # The old kill switch would leave the bot offline for hours/days with no
         # way to re-enable without the API secret. Better to start fresh each
         # deploy and let the circuit breaker do its job intraday.
-        BOT_CONFIG["enabled"] = True
+        # BOT_CONFIG["enabled"] = True  # PAUSED — do not auto-enable
         BOT_STATE["auto_trade"] = True
         print(f"[STATE] ✅ Bot ENABLED on startup (drawdown breaker provides intraday protection)")
 
@@ -816,8 +816,8 @@ def _load_state():
 
     # FINAL FORCE ENABLE — no matter what happened above, bot starts enabled.
     # Drawdown circuit breaker provides all needed risk protection.
-    BOT_CONFIG["enabled"] = True
-    BOT_STATE["auto_trade"] = True
+    # BOT_CONFIG["enabled"] = True  # PAUSED — do not auto-enable
+    # BOT_STATE["auto_trade"] = True  # PAUSED — do not auto-enable
     print(f"[STATE] ✅ FINAL: bot_enabled={BOT_CONFIG['enabled']}")
 
 def _hydrate_from_kalshi():
@@ -10297,7 +10297,7 @@ def _watchdog_check():
         _today_str_re = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
         _last_disable_date = BOT_STATE.get("_auto_disable_date")
         if not BOT_CONFIG.get("enabled") and _last_disable_date and _last_disable_date != _today_str_re:
-            BOT_CONFIG["enabled"] = True
+            # BOT_CONFIG["enabled"] = True  # PAUSED — do not auto-enable
             BOT_STATE["auto_trade"] = True
             BOT_STATE.pop("_auto_disable_date", None)
             alerts.append(f"✅ AUTO-RE-ENABLED: new trading day — bot restarted after previous auto-pause")
