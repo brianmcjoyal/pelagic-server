@@ -4809,6 +4809,10 @@ def live_game_snipe():
                 # Close time check — skip for series-scanned markets (Kalshi sets
                 # close_time to series end, not individual game time)
                 close_time_str = mkt.get("close_time", "")
+                # SAME-DAY ONLY: skip markets closing after today (Pacific)
+                if "series_ticker" not in source_params and close_time_str and not _is_same_day_market(close_time_str):
+                    _ms_reasons["not_today"] = _ms_reasons.get("not_today", 0) + 1
+                    continue
                 if "series_ticker" not in source_params:
                     if close_time_str:
                         try:
@@ -4962,6 +4966,32 @@ def live_game_snipe():
                     conviction -= 1
                     _log_activity(
                         f"SNIPE ESPN CHECK: {ticker} — ESPN win prob unavailable, conviction reduced to {conviction}",
+                        "info"
+                    )
+
+                # VEGAS CONSENSUS — PRIMARY EDGE SIGNAL (ticker-based, no ESPN matching needed)
+                # Uses The Odds API directly from ticker; bypasses broken ESPN game ID matching.
+                _vegas_prob, _vegas_edge, _vegas_league = _get_vegas_edge(ticker, title, implied_prob_snipe, side)
+                if _vegas_prob is not None:
+                    _log_activity(
+                        f"SNIPE VEGAS: {ticker} — Vegas={_vegas_prob:.1%} (side={side}) vs Kalshi={implied_prob_snipe:.0%} edge={_vegas_edge:+.1%}",
+                        "info"
+                    )
+                    if _vegas_edge < -0.05:
+                        _log_activity(
+                            f"SNIPE SKIP: {ticker} — Vegas overpriced by {abs(_vegas_edge):.1%}",
+                            "info"
+                        )
+                        _ms_reasons["vegas_overpriced"] = _ms_reasons.get("vegas_overpriced", 0) + 1
+                        continue
+                    if _vegas_edge >= 0.05:
+                        conviction += 3
+                        _snipe_our_prob = _vegas_prob  # Vegas becomes primary signal
+                    elif _vegas_edge >= 0.02:
+                        conviction += 1
+                else:
+                    _log_activity(
+                        f"SNIPE VEGAS: {ticker} — Vegas unavailable, relying on ESPN/sportsbook signal",
                         "info"
                     )
 
@@ -5226,6 +5256,7 @@ def live_game_snipe():
                             "conviction": conviction,
                             "win_probability": round(_snipe_our_prob, 4) if _snipe_our_prob else None,
                             "espn_edge": round(_snipe_our_prob - implied_prob_snipe, 4) if _snipe_our_prob else None,
+                            "vegas_gap_pp": round(_vegas_edge * 100, 1) if _vegas_prob is not None else None,
                             "order_id": _snipe_order_id,
                         })
                         # Track in trade journal for pattern analysis (pass orderbook if available)
@@ -19475,6 +19506,66 @@ def _get_consensus_odds(team_abbrev, league):
             return round(consensus, 4)
 
     return None
+
+
+def _get_vegas_edge(ticker, title, kalshi_implied_prob, side="yes"):
+    """Get edge vs Vegas consensus for a Kalshi game market.
+
+    Returns (vegas_prob, edge, league) or (None, None, None) if unavailable.
+
+    ticker format: KXNBAGAME-26APR28BOSNY-BOS  (team abbrev after last dash)
+    side: "yes" means we are betting on the team after the last dash
+    """
+    try:
+        parts = ticker.upper().split("-")
+        if len(parts) < 3:
+            return None, None, None
+
+        series = parts[0]  # e.g. KXMLBGAME
+        our_team = parts[-1]  # e.g. BOS
+
+        league = None
+        if "MLBGAME" in series:
+            league = "mlb"
+        elif "MLSGAME" in series:
+            league = "mls"
+        elif "NBAGAME" in series:
+            league = "nba"
+        elif "NHLGAME" in series:
+            league = "nhl"
+        elif "NCAAMBGAME" in series or "NCAAWBGAME" in series:
+            league = "ncaab"
+        elif "KBLGAME" in series:
+            league = "kbo"
+        elif "EPLGAME" in series:
+            league = "epl"
+        else:
+            return None, None, None
+
+        vegas_prob = _get_consensus_odds(our_team, league.upper())
+        if vegas_prob is None:
+            return None, None, league
+
+        if side == "no":
+            vegas_prob = 1.0 - vegas_prob
+
+        edge = vegas_prob - kalshi_implied_prob
+        return vegas_prob, edge, league
+    except Exception:
+        return None, None, None
+
+
+def _is_same_day_market(close_time_str):
+    """Return True if this market closes today (Pacific time)."""
+    try:
+        today_pt = datetime.datetime.now(tz=_PACIFIC).date()
+        if not close_time_str:
+            return False
+        ct = datetime.datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
+        ct_pt = ct.astimezone(_PACIFIC).date()
+        return ct_pt == today_pt
+    except Exception:
+        return False
 
 
 def _parse_clock_to_seconds(clock_str, sport="nba"):
