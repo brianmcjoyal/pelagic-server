@@ -9909,6 +9909,7 @@ def _log_paper_trade(ticker, title, side, price, win_prob, edge, ev_cents, strat
         "clv_final": None,
         "result": None,
         "pnl_cents": None,
+        "signal_version": "v2_vegas",
     }
 
     with _PAPER_TRADES_LOCK:
@@ -22879,6 +22880,77 @@ def paper_trades_api():
         return jsonify({"error": str(e), "total": 0})
 
 
+@app.route("/paper-trades-v2")
+def paper_trades_v2_api():
+    """Return paper trading stats for v2_vegas signal only (post-Vegas-primary deploy)."""
+    try:
+        with _PAPER_TRADES_LOCK:
+            v2_trades = [t for t in _PAPER_TRADES if t.get("signal_version") == "v2_vegas"]
+
+        settled = [t for t in v2_trades if t.get("result") in ("win", "loss")]
+        pending = [t for t in v2_trades if not t.get("result") or t.get("result") not in ("win", "loss", "expired")]
+        wins = [t for t in settled if t.get("result") == "win"]
+        losses = [t for t in settled if t.get("result") == "loss"]
+        win_rate = round(len(wins) / len(settled) * 100, 1) if settled else 0
+        total_pnl = sum(t.get("pnl_cents", 0) or 0 for t in settled)
+
+        clv5 = [t["clv_5min"] for t in v2_trades if t.get("clv_5min") is not None]
+        clv15 = [t["clv_15min"] for t in v2_trades if t.get("clv_15min") is not None]
+        clv5_avg = round(sum(clv5) / len(clv5), 2) if clv5 else None
+        clv15_avg = round(sum(clv15) / len(clv15), 2) if clv15 else None
+
+        by_strategy = {}
+        for t in v2_trades:
+            s = t.get("strategy", "unknown")
+            if s not in by_strategy:
+                by_strategy[s] = {"total": 0, "wins": 0, "losses": 0, "pending": 0, "pnl_cents": 0, "win_rate": 0}
+            by_strategy[s]["total"] += 1
+            r = t.get("result")
+            if r == "win":
+                by_strategy[s]["wins"] += 1
+                by_strategy[s]["pnl_cents"] += t.get("pnl_cents", 0) or 0
+            elif r == "loss":
+                by_strategy[s]["losses"] += 1
+                by_strategy[s]["pnl_cents"] += t.get("pnl_cents", 0) or 0
+            else:
+                by_strategy[s]["pending"] += 1
+        for s in by_strategy:
+            n = by_strategy[s]["wins"] + by_strategy[s]["losses"]
+            by_strategy[s]["win_rate"] = round(by_strategy[s]["wins"] / n * 100, 1) if n > 0 else 0
+
+        def _wr(lst):
+            w = sum(1 for t in lst if t.get("result") == "win")
+            return round(w / len(lst) * 100, 1) if lst else None
+
+        vegas_better = [t for t in settled if t.get("vegas_verdict") == "BETTER"]
+        vegas_worse  = [t for t in settled if t.get("vegas_verdict") == "WORSE"]
+        vegas_agrees = [t for t in settled if t.get("vegas_verdict") == "AGREES"]
+
+        return jsonify({
+            "signal_version": "v2_vegas",
+            "total": len(v2_trades),
+            "settled": len(settled),
+            "pending": len(pending),
+            "wins": len(wins),
+            "losses": len(losses),
+            "win_rate": win_rate,
+            "total_pnl_cents": round(total_pnl, 1),
+            "clv_5min_avg": clv5_avg,
+            "clv_5min_count": len(clv5),
+            "clv_15min_avg": clv15_avg,
+            "clv_15min_count": len(clv15),
+            "by_strategy": by_strategy,
+            "vegas_accuracy": {
+                "better_wr": _wr(vegas_better), "better_n": len(vegas_better),
+                "worse_wr":  _wr(vegas_worse),  "worse_n":  len(vegas_worse),
+                "agrees_wr": _wr(vegas_agrees),  "agrees_n": len(vegas_agrees),
+            },
+            "trades": list(reversed(v2_trades[-200:])),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "total": 0})
+
+
 @app.route("/")
 def dashboard():
     return DASHBOARD_HTML
@@ -23410,6 +23482,7 @@ a:hover { color: #7da5f5; }
   <button class="tab" onclick="switchTab('brain')" style="color:#00d4ff">&#129504; Brain</button>
   <button class="tab" onclick="switchTab('trends')" style="color:#e040fb">Trends</button>
   <button class="tab" onclick="switchTab('paper')" style="color:#00dc5a">&#128196; Paper <span id="paper-tab-count" style="background:#1a1a2e;color:#00d4ff;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:2px"></span></button>
+  <button class="tab" onclick="switchTab('paper2')" style="color:#00d4ff">&#9889; Edge Paper <span id="paper2-tab-count" style="background:#1a1a2e;color:#00dc5a;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:2px"></span></button>
   <!-- MoonShark tab removed -->
 </div>
 
@@ -23959,6 +24032,27 @@ a:hover { color: #7da5f5; }
   </div>
 </div>
 
+<div class="tab-content" id="tab-paper2" style="display:none">
+  <h2 style="color:#00d4ff;margin-bottom:4px">&#9889; Edge Paper &mdash; Vegas-Primary Signal (v2)</h2>
+  <p style="color:#666;font-size:12px;margin-bottom:16px">Only bets placed after Odds API became the primary edge signal. Clean data &mdash; no ESPN-era contamination.</p>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:18px">
+    <div class="metric-card"><div class="metric-label">Total Trades</div><div class="metric-value" id="p2-total">--</div></div>
+    <div class="metric-card"><div class="metric-label">Settled</div><div class="metric-value" id="p2-settled">--</div></div>
+    <div class="metric-card"><div class="metric-label">Win Rate</div><div class="metric-value" id="p2-wr" style="color:#00dc5a">--</div></div>
+    <div class="metric-card"><div class="metric-label">P&amp;L</div><div class="metric-value" id="p2-pnl">--</div></div>
+    <div class="metric-card"><div class="metric-label">CLV 5min</div><div class="metric-value" id="p2-clv5">--</div></div>
+    <div class="metric-card"><div class="metric-label">Pending</div><div class="metric-value" id="p2-pending">--</div></div>
+  </div>
+  <h3 style="color:#00d4ff;margin:16px 0 8px">Vegas Signal Accuracy</h3>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px">
+    <div class="metric-card"><div class="metric-label">Vegas BETTER wins</div><div class="metric-value" id="p2-va-better">--</div></div>
+    <div class="metric-card"><div class="metric-label">Vegas AGREES wins</div><div class="metric-value" id="p2-va-agrees">--</div></div>
+    <div class="metric-card"><div class="metric-label">Vegas WORSE wins</div><div class="metric-value" id="p2-va-worse">--</div></div>
+  </div>
+  <button onclick="loadPaper2()" style="background:#1a1a2e;color:#00d4ff;border:1px solid #00d4ff;padding:6px 14px;border-radius:6px;cursor:pointer;margin-bottom:12px">&#8635; Refresh</button>
+  <div id="p2-trades-list" style="color:#666;font-size:13px">Loading...</div>
+</div>
+
 </div><!-- end container -->
 
 <div class="toast-container" id="toast-container"></div>
@@ -24003,6 +24097,7 @@ function switchTab(name) {
   if (name === 'trends') { loadNewsFeed(); }
   if (name === 'brain') { loadBrain(); }
   if (name === 'paper') { loadPaperTrades(); }
+  if (name === 'paper2') { loadPaper2(); }
   // Legacy support for hidden tabs
   if (name === 'activity') { loadActivity(); loadBetsFeed(); loadAllBets(); }
 }
@@ -28163,6 +28258,52 @@ async function loadPaperTrades(force) {
   } catch(e) { console.log('[PAPER] Load error:', e); }
 }
 
+function loadPaper2() {
+  fetch('/paper-trades-v2')
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) { document.getElementById('p2-trades-list').textContent = 'Error: ' + d.error; return; }
+      document.getElementById('p2-total').textContent = d.total || 0;
+      document.getElementById('p2-settled').textContent = d.settled || 0;
+      const wr = d.win_rate;
+      const wrEl = document.getElementById('p2-wr');
+      wrEl.textContent = d.settled > 0 ? wr + '%' : '--';
+      wrEl.style.color = wr >= 55 ? '#00dc5a' : wr >= 45 ? '#ffb400' : '#ff3333';
+      const pnl = (d.total_pnl_cents || 0) / 100;
+      const pnlEl = document.getElementById('p2-pnl');
+      pnlEl.textContent = '$' + pnl.toFixed(2);
+      pnlEl.style.color = pnl >= 0 ? '#00dc5a' : '#ff3333';
+      document.getElementById('p2-clv5').textContent = d.clv_5min_avg != null ? (d.clv_5min_avg > 0 ? '+' : '') + d.clv_5min_avg + 'c' : '--';
+      document.getElementById('p2-pending').textContent = d.pending || 0;
+      document.getElementById('paper2-tab-count').textContent = d.total > 0 ? d.total : '';
+      const va = d.vegas_accuracy || {};
+      document.getElementById('p2-va-better').textContent = va.better_n > 0 ? va.better_wr + '% (' + va.better_n + ')' : 'No data yet';
+      document.getElementById('p2-va-agrees').textContent = va.agrees_n > 0 ? va.agrees_wr + '% (' + va.agrees_n + ')' : 'No data yet';
+      document.getElementById('p2-va-worse').textContent = va.worse_n > 0 ? va.worse_wr + '% (' + va.worse_n + ')' : 'No data yet';
+      const trades = d.trades || [];
+      if (!trades.length) {
+        document.getElementById('p2-trades-list').innerHTML = '<p style="color:#555">No v2 trades yet - waiting for first Vegas-signal bet.</p>';
+        return;
+      }
+      let html = '<table style="width:100%;border-collapse:collapse;font-size:12px"><tr style="color:#666"><th style="text-align:left;padding:4px">Time</th><th>Market</th><th>Side</th><th>Price</th><th>Vegas</th><th>Edge</th><th>CLV5</th><th>Result</th><th>P&L</th></tr>';
+      trades.slice(0, 100).forEach(t => {
+        const result = t.result || 'pending';
+        const rc = result === 'win' ? '#00dc5a' : result === 'loss' ? '#ff3333' : '#666';
+        const clv5 = t.clv_5min != null ? (t.clv_5min > 0 ? '+' : '') + t.clv_5min + 'c' : '--';
+        const pnlVal = t.pnl_cents != null ? '$' + (t.pnl_cents / 100).toFixed(2) : '--';
+        const pnlC = (t.pnl_cents || 0) >= 0 ? '#00dc5a' : '#ff3333';
+        const vg = t.vegas_gap_pp != null ? (t.vegas_gap_pp > 0 ? '+' : '') + t.vegas_gap_pp + 'pp' : '--';
+        const vv = t.vegas_verdict || '--';
+        const vvc = vv === 'BETTER' ? '#00dc5a' : vv === 'WORSE' ? '#ff3333' : '#888';
+        const timeStr = t.entry_time ? t.entry_time.slice(5,16).replace('T',' ') : '--';
+        html += '<tr style="border-bottom:1px solid #111"><td style="padding:4px;color:#888">' + timeStr + '</td><td style="padding:4px;color:#ccc;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (t.title || t.ticker) + '</td><td style="padding:4px;color:' + (t.side==='yes'?'#00dc5a':'#ff8c00') + '">' + (t.side||'').toUpperCase() + '</td><td style="padding:4px;color:#ccc">' + t.entry_price + 'c</td><td style="padding:4px;color:' + vvc + '">' + vv + '<br><span style="color:#555;font-size:10px">' + vg + '</span></td><td style="padding:4px;color:#ccc">' + (t.edge != null ? (t.edge*100).toFixed(1)+'%' : '--') + '</td><td style="padding:4px;color:' + ((t.clv_5min||0)>=0?'#00dc5a':'#ff3333') + '">' + clv5 + '</td><td style="padding:4px;color:' + rc + '">' + result + '</td><td style="padding:4px;color:' + pnlC + '">' + pnlVal + '</td></tr>';
+      });
+      html += '</table>';
+      document.getElementById('p2-trades-list').innerHTML = html;
+    })
+    .catch(e => { document.getElementById('p2-trades-list').textContent = 'Fetch error: ' + e; });
+}
+
 // --- Trends Tab ---
 // === GLOBAL NEWS FEED ===
 async function loadNewsFeed(forceRefresh) {
@@ -28825,7 +28966,7 @@ setInterval(loadHealthBanner, 30000);
 // FAST (10s): live status, activity feed, today's bets — changes frequently
 setInterval(() => { loadStatus(); loadActivity(); loadBetsFeed(); loadPortfolio(); }, 10000);
 // MEDIUM (30s): positions, trades, closing soon — changes with market activity
-setInterval(() => { loadPositions(); loadTrades(); loadClosingSoon(); loadTopPicks(); loadTodayPicks(); checkNotifications(); loadDailyHighlights(); loadPaperTrades(); }, 30000);
+setInterval(() => { loadPositions(); loadTrades(); loadClosingSoon(); loadTopPicks(); loadTodayPicks(); checkNotifications(); loadDailyHighlights(); loadPaperTrades(); loadPaper2(); }, 30000);
 // SLOW (60s): settled stats, perf history, analytics — expensive + rarely changes
 setInterval(() => { loadSettled(); loadPerfHistory(); loadPerformance(); loadTicker(); loadSeventyFivers(); loadQuantPicks(); }, 60000);
 
