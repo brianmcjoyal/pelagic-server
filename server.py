@@ -29338,6 +29338,133 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
+
+TRACK_RECORD_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TradeShark | Live Track Record</title>
+<meta name="description" content="Real-time track record for TradeShark's AI prediction market trading bot. Every trade logged — wins and losses.">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0a0a0a; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; min-height: 100vh; }
+.header { background: #0d0d0d; border-bottom: 1px solid #1a1a1a; padding: 20px 24px; display: flex; align-items: center; justify-content: space-between; }
+.logo { font-size: 22px; font-weight: 700; color: #fff; }
+.logo span { color: #00dc5a; }
+.live-badge { background: #0d2b1a; color: #00dc5a; border: 1px solid #00dc5a; padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.live-dot { width: 7px; height: 7px; background: #00dc5a; border-radius: 50%; animation: pulse 2s infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+.container { max-width: 900px; margin: 0 auto; padding: 32px 20px; }
+.hero { text-align: center; margin-bottom: 40px; }
+.hero h1 { font-size: 32px; font-weight: 700; margin-bottom: 10px; }
+.hero h1 span { color: #00dc5a; }
+.hero p { color: #666; font-size: 15px; line-height: 1.6; max-width: 560px; margin: 0 auto; }
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 36px; }
+.stat-card { background: #111; border: 1px solid #1e1e1e; border-radius: 12px; padding: 20px 16px; text-align: center; }
+.stat-label { color: #555; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+.stat-value { font-size: 28px; font-weight: 700; color: #fff; }
+.stat-sub { color: #444; font-size: 11px; margin-top: 4px; }
+.section-title { font-size: 16px; font-weight: 600; color: #ccc; margin-bottom: 14px; border-bottom: 1px solid #1a1a1a; padding-bottom: 8px; }
+.trades-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 36px; }
+.trades-table th { text-align: left; padding: 8px 10px; color: #444; font-weight: 500; border-bottom: 1px solid #1a1a1a; }
+.trades-table td { padding: 9px 10px; border-bottom: 1px solid #111; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+.badge-win { background: #0d2b1a; color: #00dc5a; }
+.badge-loss { background: #2b0d0d; color: #ff4444; }
+.badge-better { background: #0d1f2b; color: #00d4ff; }
+.badge-agrees { background: #1a1a1a; color: #888; }
+.badge-worse { background: #2b1a0d; color: #ff8c00; }
+.methodology { background: #111; border: 1px solid #1e1e1e; border-radius: 12px; padding: 24px; margin-bottom: 36px; }
+.methodology h3 { color: #00dc5a; margin-bottom: 12px; }
+.methodology p { color: #666; font-size: 13px; line-height: 1.7; margin-bottom: 8px; }
+.footer { text-align: center; color: #333; font-size: 12px; padding: 24px; border-top: 1px solid #111; margin-top: 20px; }
+.footer a { color: #00dc5a; text-decoration: none; }
+.empty { text-align: center; color: #444; padding: 40px; font-size: 14px; }
+.warning { background: #1a1400; border: 1px solid #3a2f00; border-radius: 8px; padding: 12px 16px; color: #ffb400; font-size: 12px; margin-bottom: 24px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="logo">Trade<span>Shark</span> 🦈</div>
+  <div class="live-badge"><div class="live-dot"></div> LIVE TRACK RECORD</div>
+</div>
+<div class="container">
+  <div class="hero">
+    <h1>Every Bet. <span>No Cherry-Picking.</span></h1>
+    <p>TradeShark finds mispricings between Vegas sportsbook consensus and Kalshi prediction market prices. We post every trade — wins and losses — in real time.</p>
+  </div>
+  <div class="warning">
+    ⚠️ This is a live paper trading track record. No real money at risk yet — we're proving edge before deploying capital. All trades logged automatically with no manual selection.
+  </div>
+  <div class="stats-grid">
+    <div class="stat-card"><div class="stat-label">Total Signals</div><div class="stat-value" id="tr-total">--</div><div class="stat-sub">since v2 launch</div></div>
+    <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-value" id="tr-wr" style="color:#00dc5a">--</div><div class="stat-sub" id="tr-wl">-- settled</div></div>
+    <div class="stat-card"><div class="stat-label">Paper P&L</div><div class="stat-value" id="tr-pnl">--</div><div class="stat-sub">simulated</div></div>
+    <div class="stat-card"><div class="stat-label">CLV 5min</div><div class="stat-value" id="tr-clv">--</div><div class="stat-sub">closing line value</div></div>
+    <div class="stat-card"><div class="stat-label">Pending</div><div class="stat-value" id="tr-pending">--</div><div class="stat-sub">open positions</div></div>
+  </div>
+  <div class="section-title">Recent Settled Trades</div>
+  <div id="tr-trades"><div class="empty">Loading trades...</div></div>
+  <div class="methodology">
+    <h3>How It Works</h3>
+    <p><strong>Edge source:</strong> We compare Vegas consensus moneyline (averaged across 15+ sportsbooks via The Odds API) to the Kalshi prediction market price. When they disagree by 8%+, we take the bet.</p>
+    <p><strong>Same-day only:</strong> We only bet on games settling today. No multi-day exposure.</p>
+    <p><strong>CLV tracking:</strong> Closing Line Value measures whether the market moves in our direction after entry. Consistently positive CLV = real edge.</p>
+    <p><strong>No filters:</strong> Every signal that passes our edge threshold is logged here automatically. We cannot add or remove trades retroactively.</p>
+  </div>
+  <div id="tr-updated" style="text-align:center;color:#333;font-size:11px;margin-bottom:20px"></div>
+</div>
+<div class="footer">
+  <p>TradeShark 🦈 &mdash; Building in public. Follow the journey at <a href="https://x.com/TradeShark6408" target="_blank">@TradeShark6408</a></p>
+</div>
+<script>
+function loadTrackRecord() {
+  fetch('/track-record-data')
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) return;
+      document.getElementById('tr-total').textContent = d.total || 0;
+      const wr = d.win_rate;
+      const wrEl = document.getElementById('tr-wr');
+      wrEl.textContent = d.settled > 0 ? wr + '%' : '--';
+      wrEl.style.color = wr >= 55 ? '#00dc5a' : wr >= 45 ? '#ffb400' : '#ff4444';
+      document.getElementById('tr-wl').textContent = d.wins + 'W / ' + d.losses + 'L settled';
+      const pnl = d.total_pnl_usd || 0;
+      const pnlEl = document.getElementById('tr-pnl');
+      pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + Math.abs(pnl).toFixed(2);
+      pnlEl.style.color = pnl >= 0 ? '#00dc5a' : '#ff4444';
+      document.getElementById('tr-clv').textContent = d.clv_5min_avg != null ? (d.clv_5min_avg > 0 ? '+' : '') + d.clv_5min_avg + 'c' : '--';
+      document.getElementById('tr-pending').textContent = d.pending || 0;
+      if (d.last_updated) {
+        document.getElementById('tr-updated').textContent = 'Last updated: ' + new Date(d.last_updated).toLocaleTimeString();
+      }
+      const trades = d.recent_trades || [];
+      if (!trades.length) {
+        document.getElementById('tr-trades').innerHTML = '<div class="empty">No settled trades yet — v2 signal launched today. Check back soon.</div>';
+        return;
+      }
+      let html = '<table class="trades-table"><tr><th>Date</th><th>Market</th><th>Side</th><th>Price</th><th>Vegas Signal</th><th>CLV 5m</th><th>Result</th><th>P&L</th></tr>';
+      trades.forEach(t => {
+        const rc = t.result === 'win' ? '#00dc5a' : '#ff4444';
+        const badgeClass = t.result === 'win' ? 'badge-win' : 'badge-loss';
+        const vvClass = t.vegas_verdict === 'BETTER' ? 'badge-better' : t.vegas_verdict === 'AGREES' ? 'badge-agrees' : t.vegas_verdict === 'WORSE' ? 'badge-worse' : '';
+        const clv5 = t.clv_5min != null ? (t.clv_5min > 0 ? '+' : '') + t.clv_5min + 'c' : '--';
+        const pnl = t.pnl_cents != null ? (t.pnl_cents >= 0 ? '+' : '') + '$' + Math.abs(t.pnl_cents / 100).toFixed(2) : '--';
+        const gap = t.vegas_gap_pp != null ? ' (' + (t.vegas_gap_pp > 0 ? '+' : '') + t.vegas_gap_pp + 'pp)' : '';
+        html += '<tr><td style="color:#555">' + (t.entry_time || '--') + '</td><td style="color:#ccc;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (t.title || '--') + '</td><td style="color:' + (t.side==='yes'?'#00dc5a':'#ff8c00') + '">' + (t.side||'').toUpperCase() + '</td><td style="color:#ccc">' + (t.entry_price||'--') + 'c</td><td><span class="badge ' + vvClass + '">' + (t.vegas_verdict||'--') + '</span><span style="color:#444;font-size:11px">' + gap + '</span></td><td style="color:' + ((t.clv_5min||0)>=0?'#00dc5a':'#ff4444') + '">' + clv5 + '</td><td><span class="badge ' + badgeClass + '">' + (t.result||'--').toUpperCase() + '</span></td><td style="color:' + rc + '">' + pnl + '</td></tr>';
+      });
+      html += '</table>';
+      document.getElementById('tr-trades').innerHTML = html;
+    })
+    .catch(() => {});
+}
+loadTrackRecord();
+setInterval(loadTrackRecord, 30000);
+</script>
+</body>
+</html>"""
+
 @app.route("/uncle-claude")
 def uncle_claude():
     from datetime import datetime
@@ -29427,3 +29554,70 @@ def claude_brief():
         })
     except Exception as e:
         return jsonify({"error": str(e)})
+
+
+@app.route("/track-record-data")
+def track_record_data():
+    """Public JSON endpoint for v2 paper trade performance."""
+    try:
+        with _PAPER_TRADES_LOCK:
+            v2_trades = [t for t in _PAPER_TRADES if t.get("signal_version") == "v2_vegas"]
+
+        settled = [t for t in v2_trades if t.get("result") in ("win", "loss")]
+        wins = [t for t in settled if t.get("result") == "win"]
+        losses = [t for t in settled if t.get("result") == "loss"]
+        pending = [t for t in v2_trades if not t.get("result") or t.get("result") not in ("win", "loss", "expired")]
+
+        win_rate = round(len(wins) / len(settled) * 100, 1) if settled else 0
+        total_pnl_cents = sum(t.get("pnl_cents", 0) or 0 for t in settled)
+
+        clv5 = [t["clv_5min"] for t in v2_trades if t.get("clv_5min") is not None]
+        clv5_avg = round(sum(clv5) / len(clv5), 2) if clv5 else None
+
+        by_sport = {}
+        for t in settled:
+            sport = t.get("sport") or "unknown"
+            if sport not in by_sport:
+                by_sport[sport] = {"wins": 0, "losses": 0}
+            if t.get("result") == "win":
+                by_sport[sport]["wins"] += 1
+            else:
+                by_sport[sport]["losses"] += 1
+        for s in by_sport:
+            n = by_sport[s]["wins"] + by_sport[s]["losses"]
+            by_sport[s]["win_rate"] = round(by_sport[s]["wins"] / n * 100, 1) if n > 0 else 0
+
+        recent = []
+        for t in reversed(settled[-20:]):
+            recent.append({
+                "title": t.get("title", ""),
+                "side": t.get("side", ""),
+                "entry_price": t.get("entry_price"),
+                "vegas_verdict": t.get("vegas_verdict"),
+                "vegas_gap_pp": t.get("vegas_gap_pp"),
+                "clv_5min": t.get("clv_5min"),
+                "result": t.get("result"),
+                "pnl_cents": t.get("pnl_cents"),
+                "entry_time": t.get("entry_time", "")[:10],
+            })
+
+        return jsonify({
+            "total": len(v2_trades),
+            "settled": len(settled),
+            "pending": len(pending),
+            "wins": len(wins),
+            "losses": len(losses),
+            "win_rate": win_rate,
+            "total_pnl_usd": round(total_pnl_cents / 100, 2),
+            "clv_5min_avg": clv5_avg,
+            "by_sport": by_sport,
+            "recent_trades": recent,
+            "last_updated": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+@app.route("/track-record")
+def track_record_page():
+    return TRACK_RECORD_HTML
