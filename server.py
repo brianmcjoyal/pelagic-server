@@ -24397,9 +24397,9 @@ function fmtTimeSec(ts) {
 }
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
-  document.querySelectorAll('.tab-content').forEach(function(t) { t.classList.remove('active'); });
+  document.querySelectorAll('.tab-content').forEach(function(t) { t.classList.remove('active'); t.style.display = ''; });
   var tabEl = document.getElementById('tab-' + name);
-  if (tabEl) tabEl.classList.add('active');
+  if (tabEl) { tabEl.classList.add('active'); tabEl.style.display = 'block'; }
   var tabs = document.querySelectorAll('.tab');
   tabs.forEach(function(t) { var oc = t.getAttribute('onclick'); if (oc && oc.indexOf(name) >= 0) t.classList.add('active'); });
   // Lazy-load tab data
