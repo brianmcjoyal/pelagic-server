@@ -66,6 +66,7 @@ else:
 # Bot version — tags every trade so we can separate old vs new performance
 BOT_VERSION = "v3.0-quant"  # v1=yolo, v2=disciplined, v3=quant engine
 BOT_VERSION_DATE = "2026-03-15"
+V2_LAUNCH_DATE = "2026-04-27"  # Only count paper trades from this date onwards
 
 # Bot configuration and state
 # ---------------------------------------------------------------------------
@@ -6908,6 +6909,11 @@ def floor_quota_snipe():
             # Liquidity: still require something tradeable
             _ask_size = float(str(mkt.get("yes_ask_size_fp") or mkt.get("no_ask_size_fp") or 0))
             if _ask_size < 20:
+                continue
+
+            close_time_str = mkt.get("close_time", "") or ""
+            # SAME-DAY ONLY: skip floor bets on future games
+            if close_time_str and not _is_same_day_market(close_time_str):
                 continue
 
             # Parse prices
@@ -22885,7 +22891,11 @@ def paper_trades_v2_api():
     """Return paper trading stats for v2_vegas signal only (post-Vegas-primary deploy)."""
     try:
         with _PAPER_TRADES_LOCK:
-            v2_trades = [t for t in _PAPER_TRADES if t.get("signal_version") == "v2_vegas"]
+            v2_trades = [
+                t for t in _PAPER_TRADES
+                if t.get("signal_version") == "v2_vegas"
+                and (t.get("entry_time") or "") >= V2_LAUNCH_DATE
+            ]
 
         settled = [t for t in v2_trades if t.get("result") in ("win", "loss")]
         pending = [t for t in v2_trades if not t.get("result") or t.get("result") not in ("win", "loss", "expired")]
@@ -23384,6 +23394,10 @@ a:hover { color: #7da5f5; }
       <path d="M28 40l-4 10l6-8l5 12l4-11l6 8l-2-11" fill="url(#sharkFin)" stroke="#3d2510" stroke-width="0.3" opacity="0.85"/>
     </svg>
     <h1><span>Trade</span><span style="background:linear-gradient(135deg,#c9963a,#dab060,#8b5e28,#c9963a);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text">Shark</span></h1>
+    <div id="hdr-bot-badge" style="display:none;align-items:center;gap:5px;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:0.5px;margin-left:8px">
+      <div id="hdr-bot-dot" style="width:6px;height:6px;border-radius:50%"></div>
+      <span id="hdr-bot-label"></span>
+    </div>
     <div style="width:1px;height:28px;background:#333;margin-left:8px"></div>
     <!-- Header Stats: Daily + All-Time (inline with logo) -->
     <div style="display:flex;align-items:center;gap:16px;margin-left:4px">
@@ -23488,6 +23502,14 @@ a:hover { color: #7da5f5; }
 
 <!-- Positions Tab -->
 <div class="tab-content" id="tab-positions">
+  <!-- Bot Status Banner -->
+  <div id="bot-status-banner" style="border-radius:10px;padding:14px 18px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px">
+    <div style="display:flex;align-items:center;gap:10px">
+      <div id="bot-status-dot" style="width:10px;height:10px;border-radius:50%;flex-shrink:0"></div>
+      <span id="bot-status-text" style="font-weight:600;font-size:14px"></span>
+    </div>
+    <span id="bot-status-sub" style="color:#666;font-size:12px"></span>
+  </div>
   <!-- Live Feed + Bets Placed Today + Closing Soon -->
   <div id="dash-live-grid" style="display:grid;grid-template-columns:1fr 1.2fr 1fr;gap:12px;margin-bottom:16px;min-width:0">
     <div class="section" style="min-width:0;overflow:hidden">
@@ -24290,6 +24312,31 @@ async function loadStatus() {
     var atBtn = document.getElementById('auto-trade-btn');
     if (atBtn) atBtn.textContent = status.bot_enabled ? 'ON' : 'OFF';
     window._botEnabled = status.bot_enabled;
+    // Bot status banner + header badge
+    var bannerEl = document.getElementById('bot-status-banner');
+    var dotEl = document.getElementById('bot-status-dot');
+    var textEl = document.getElementById('bot-status-text');
+    var subEl = document.getElementById('bot-status-sub');
+    var hdrBadge = document.getElementById('hdr-bot-badge');
+    var hdrDot = document.getElementById('hdr-bot-dot');
+    var hdrLabel = document.getElementById('hdr-bot-label');
+    if (status.bot_enabled) {
+      if (bannerEl) { bannerEl.style.background = '#0d2b1a'; bannerEl.style.border = '1px solid #1a5c33'; }
+      if (dotEl) { dotEl.style.background = '#00dc5a'; dotEl.style.boxShadow = '0 0 8px #00dc5a'; dotEl.style.animation = 'pulse 2s infinite'; }
+      if (textEl) { textEl.style.color = '#00dc5a'; textEl.textContent = 'BOT ACTIVE — Scanning for edges'; }
+      if (subEl) subEl.textContent = 'Last scan: ' + (status.last_scan ? new Date(status.last_scan).toLocaleTimeString() : '--');
+      if (hdrBadge) { hdrBadge.style.display = 'flex'; hdrBadge.style.background = '#0d2b1a'; hdrBadge.style.border = '1px solid #00dc5a'; }
+      if (hdrDot) { hdrDot.style.background = '#00dc5a'; hdrDot.style.animation = 'pulse 2s infinite'; }
+      if (hdrLabel) { hdrLabel.style.color = '#00dc5a'; hdrLabel.textContent = 'LIVE'; }
+    } else {
+      if (bannerEl) { bannerEl.style.background = '#1a0808'; bannerEl.style.border = '1px solid #3a1010'; }
+      if (dotEl) { dotEl.style.background = '#ff3333'; dotEl.style.boxShadow = 'none'; dotEl.style.animation = 'none'; }
+      if (textEl) { textEl.style.color = '#ff5555'; textEl.textContent = '⏸ BOT PAUSED — Paper trading only'; }
+      if (subEl) subEl.textContent = 'Re-enable once edge is confirmed on v2 signals';
+      if (hdrBadge) { hdrBadge.style.display = 'flex'; hdrBadge.style.background = '#1a0808'; hdrBadge.style.border = '1px solid #ff3333'; }
+      if (hdrDot) { hdrDot.style.background = '#ff3333'; hdrDot.style.animation = 'none'; }
+      if (hdrLabel) { hdrLabel.style.color = '#ff5555'; hdrLabel.textContent = 'PAUSED'; }
+    }
   } catch(e) { console.error(e); }
 }
 
@@ -29587,7 +29634,11 @@ def track_record_data():
     """Public JSON endpoint for v2 paper trade performance."""
     try:
         with _PAPER_TRADES_LOCK:
-            v2_trades = [t for t in _PAPER_TRADES if t.get("signal_version") == "v2_vegas"]
+            v2_trades = [
+                t for t in _PAPER_TRADES
+                if t.get("signal_version") == "v2_vegas"
+                and (t.get("entry_time") or "") >= V2_LAUNCH_DATE
+            ]
 
         settled = [t for t in v2_trades if t.get("result") in ("win", "loss")]
         wins = [t for t in settled if t.get("result") == "win"]
@@ -29658,7 +29709,11 @@ def daily_scorecard():
         date_label = today_pt.strftime("%b %-d")
 
         with _PAPER_TRADES_LOCK:
-            v2_trades = [t for t in _PAPER_TRADES if t.get("signal_version") == "v2_vegas"]
+            v2_trades = [
+                t for t in _PAPER_TRADES
+                if t.get("signal_version") == "v2_vegas"
+                and (t.get("entry_time") or "") >= V2_LAUNCH_DATE
+            ]
 
         # Today's settled trades
         today_settled = [
