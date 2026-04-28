@@ -23158,6 +23158,32 @@ def v2_engine():
         return jsonify({"error": str(e)})
 
 
+@app.route("/paper-trades-v2-purge", methods=["POST"])
+def paper_trades_v2_purge():
+    """Remove stale pending v2 paper trades for games not happening today."""
+    try:
+        today_pt = datetime.datetime.now(tz=_PACIFIC).date()
+        removed = []
+        kept = []
+        with _PAPER_TRADES_LOCK:
+            for t in _PAPER_TRADES:
+                # Only touch v2 pending trades
+                if t.get("signal_version") != "v2_vegas" or t.get("result") in ("win", "loss", "expired"):
+                    kept.append(t)
+                    continue
+                # Check if ticker date is today
+                ticker = t.get("ticker", "")
+                if _is_same_day_ticker(ticker):
+                    kept.append(t)
+                else:
+                    removed.append(ticker)
+            _PAPER_TRADES[:] = kept
+        _log_activity(f"🧹 Purged {len(removed)} stale pending v2 paper trades for non-today games", "info")
+        return jsonify({"removed": len(removed), "removed_tickers": removed[:20], "kept": len(kept)})
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
 @app.route("/paper-trades-v2")
 def paper_trades_v2_api():
     """Return paper trading stats for v2_vegas signal only (post-Vegas-primary deploy)."""
