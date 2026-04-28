@@ -4810,8 +4810,13 @@ def live_game_snipe():
                 # Close time check — skip for series-scanned markets (Kalshi sets
                 # close_time to series end, not individual game time)
                 close_time_str = mkt.get("close_time", "")
-                # SAME-DAY ONLY: skip markets closing after today (Pacific)
-                if "series_ticker" not in source_params and close_time_str and not _is_same_day_market(close_time_str):
+                # SAME-DAY ONLY: skip markets for future games.
+                # Series-scanned markets use ticker date; others use close_time.
+                if "series_ticker" in source_params:
+                    if not _is_same_day_ticker(ticker):
+                        _ms_reasons["not_today"] = _ms_reasons.get("not_today", 0) + 1
+                        continue
+                elif close_time_str and not _is_same_day_market(close_time_str):
                     _ms_reasons["not_today"] = _ms_reasons.get("not_today", 0) + 1
                     continue
                 if "series_ticker" not in source_params:
@@ -6912,8 +6917,13 @@ def floor_quota_snipe():
                 continue
 
             close_time_str = mkt.get("close_time", "") or ""
-            # SAME-DAY ONLY: skip floor bets on future games
-            if close_time_str and not _is_same_day_market(close_time_str):
+            # SAME-DAY ONLY: skip floor bets on future games.
+            # When scanning by series_ticker, Kalshi sets close_time to series end
+            # (not game day), so we parse the date from the ticker directly.
+            if "series_ticker" in source_params:
+                if not _is_same_day_ticker(ticker):
+                    continue
+            elif close_time_str and not _is_same_day_market(close_time_str):
                 continue
 
             # Parse prices
@@ -19573,6 +19583,24 @@ def _is_same_day_market(close_time_str):
         return ct_pt == today_pt
     except Exception:
         return False
+
+
+def _is_same_day_ticker(ticker):
+    """Return True if ticker encodes today's date (Pacific time).
+    Handles series-scanned markets where close_time = end of season, not game day.
+    Ticker format: KXMLBGAME-26APR30... or KXNBAGAME-26APR28BOSNY-BOS
+    """
+    try:
+        import re as _re
+        today_pt = datetime.datetime.now(tz=_PACIFIC).date()
+        m = _re.search(r'-(\d{2})([A-Z]{3})(\d{2})', ticker.upper())
+        if not m:
+            return True  # can't parse — allow through, let close_time filter handle it
+        year_short, mon_str, day = m.group(1), m.group(2), m.group(3)
+        game_date = datetime.datetime.strptime(f'20{year_short} {mon_str} {day}', '%Y %b %d').date()
+        return game_date == today_pt
+    except Exception:
+        return True  # parse error — allow through
 
 
 def _parse_clock_to_seconds(clock_str, sport="nba"):
