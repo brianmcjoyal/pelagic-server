@@ -29414,6 +29414,14 @@ body { background: #0a0a0a; color: #e0e0e0; font-family: -apple-system, BlinkMac
     <p><strong>No filters:</strong> Every signal that passes our edge threshold is logged here automatically. We cannot add or remove trades retroactively.</p>
   </div>
   <div id="tr-updated" style="text-align:center;color:#333;font-size:11px;margin-bottom:20px"></div>
+  <div style="text-align:center;margin:32px 0">
+    <button onclick="loadScorecard()" style="background:#0d2b1a;color:#00dc5a;border:1px solid #00dc5a;padding:10px 24px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600">📋 Generate Today's X Post</button>
+    <div id="tr-scorecard" style="display:none;margin-top:16px;background:#111;border:1px solid #1e1e1e;border-radius:10px;padding:20px;text-align:left">
+      <div style="color:#666;font-size:11px;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px">Ready to copy → paste to X</div>
+      <pre id="tr-scorecard-text" style="white-space:pre-wrap;font-family:inherit;color:#e0e0e0;font-size:13px;line-height:1.6"></pre>
+      <button onclick="copyScorecard()" style="margin-top:12px;background:#1a1a2e;color:#00d4ff;border:1px solid #00d4ff;padding:6px 16px;border-radius:6px;cursor:pointer;font-size:12px">📋 Copy to clipboard</button>
+    </div>
+  </div>
 </div>
 <div class="footer">
   <p>TradeShark 🦈 &mdash; Building in public. Follow the journey at <a href="https://x.com/TradeShark6408" target="_blank">@TradeShark6408</a></p>
@@ -29461,6 +29469,24 @@ function loadTrackRecord() {
 }
 loadTrackRecord();
 setInterval(loadTrackRecord, 30000);
+function loadScorecard() {
+  fetch('/daily-scorecard')
+    .then(r => r.json())
+    .then(d => {
+      if (d.error || !d.scorecard) return;
+      document.getElementById('tr-scorecard-text').textContent = d.scorecard;
+      document.getElementById('tr-scorecard').style.display = 'block';
+    })
+    .catch(() => {});
+}
+function copyScorecard() {
+  const text = document.getElementById('tr-scorecard-text').textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = event.target;
+    btn.textContent = '✅ Copied!';
+    setTimeout(() => { btn.textContent = '📋 Copy to clipboard'; }, 2000);
+  });
+}
 </script>
 </body>
 </html>"""
@@ -29621,3 +29647,103 @@ def track_record_data():
 @app.route("/track-record")
 def track_record_page():
     return TRACK_RECORD_HTML
+
+
+@app.route("/daily-scorecard")
+def daily_scorecard():
+    """Generate a ready-to-post X/Twitter daily scorecard for v2 paper trades."""
+    try:
+        today_pt = datetime.datetime.now(tz=_PACIFIC)
+        today_str = today_pt.strftime("%Y-%m-%d")
+        date_label = today_pt.strftime("%b %-d")
+
+        with _PAPER_TRADES_LOCK:
+            v2_trades = [t for t in _PAPER_TRADES if t.get("signal_version") == "v2_vegas"]
+
+        # Today's settled trades
+        today_settled = [
+            t for t in v2_trades
+            if t.get("result") in ("win", "loss")
+            and (t.get("entry_time") or "").startswith(today_str)
+        ]
+        today_pending = [
+            t for t in v2_trades
+            if t.get("result") not in ("win", "loss", "expired")
+            and (t.get("entry_time") or "").startswith(today_str)
+        ]
+
+        wins = [t for t in today_settled if t.get("result") == "win"]
+        losses = [t for t in today_settled if t.get("result") == "loss"]
+        pnl_cents = sum(t.get("pnl_cents", 0) or 0 for t in today_settled)
+        pnl_usd = pnl_cents / 100
+
+        clv_vals = [t["clv_5min"] for t in v2_trades if t.get("clv_5min") is not None]
+        clv_avg = round(sum(clv_vals) / len(clv_vals), 1) if clv_vals else None
+
+        # Best and worst trade today
+        settled_with_pnl = [t for t in today_settled if t.get("pnl_cents") is not None]
+        best = max(settled_with_pnl, key=lambda t: t.get("pnl_cents", 0)) if settled_with_pnl else None
+        worst = min(settled_with_pnl, key=lambda t: t.get("pnl_cents", 0)) if settled_with_pnl else None
+
+        # All-time v2 stats
+        all_settled = [t for t in v2_trades if t.get("result") in ("win", "loss")]
+        all_wins = [t for t in all_settled if t.get("result") == "win"]
+        all_wr = round(len(all_wins) / len(all_settled) * 100, 1) if all_settled else 0
+        all_pnl = sum(t.get("pnl_cents", 0) or 0 for t in all_settled) / 100
+
+        # Build scorecard text
+        lines = []
+        lines.append(f"🦈 TradeShark Daily — {date_label}")
+        lines.append("")
+
+        if not today_settled and not today_pending:
+            lines.append("📊 No signals fired today.")
+            lines.append("(Games may not have started yet or no edges found)")
+        else:
+            w = len(wins)
+            l = len(losses)
+            p = len(today_pending)
+            pnl_str = (("+" if pnl_usd >= 0 else "") + f"${abs(pnl_usd):.2f}")
+            lines.append(f"📊 Today: {w}W / {l}L" + (f" ({p} pending)" if p else ""))
+            lines.append(f"💰 P&L: {pnl_str}")
+            if clv_avg is not None:
+                clv_str = ("+" if clv_avg >= 0 else "") + f"{clv_avg}¢"
+                lines.append(f"📈 CLV avg: {clv_str} ({'market agreed with us ✅' if clv_avg >= 0 else 'market pushed back ⚠️'})")
+
+            if best and best.get("pnl_cents", 0) > 0:
+                vg = f" (Vegas gap: +{best.get('vegas_gap_pp', '?')}pp)" if best.get("vegas_gap_pp") else ""
+                lines.append("")
+                lines.append(f"✅ Best bet:")
+                lines.append(f"{best.get('title', best.get('ticker', '?'))} @ {best.get('entry_price')}¢{vg}")
+
+            if worst and worst.get("pnl_cents", 0) < 0:
+                vg = f" (Vegas gap: {worst.get('vegas_gap_pp', '?')}pp)" if worst.get("vegas_gap_pp") else ""
+                lines.append("")
+                lines.append(f"❌ Toughest loss:")
+                lines.append(f"{worst.get('title', worst.get('ticker', '?'))} @ {worst.get('entry_price')}¢{vg}")
+
+        lines.append("")
+        lines.append(f"📅 All-time (v2): {len(all_wins)}W / {len(all_settled) - len(all_wins)}L ({all_wr}% WR) | P&L: {'+' if all_pnl >= 0 else ''}${abs(all_pnl):.2f}")
+        lines.append("")
+        lines.append("Full track record (every trade, no cherry-picking):")
+        lines.append("https://web-production-c6309.up.railway.app/track-record")
+        lines.append("")
+        lines.append("#Kalshi #PredictionMarkets #TradingBot 🦈")
+
+        scorecard_text = "\n".join(lines)
+
+        return jsonify({
+            "date": today_str,
+            "scorecard": scorecard_text,
+            "stats": {
+                "today_wins": len(wins),
+                "today_losses": len(losses),
+                "today_pending": len(today_pending),
+                "today_pnl_usd": round(pnl_usd, 2),
+                "clv_avg": clv_avg,
+                "alltime_win_rate": all_wr,
+                "alltime_pnl_usd": round(all_pnl, 2),
+            }
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
