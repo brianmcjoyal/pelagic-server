@@ -29414,6 +29414,260 @@ if __name__ == "__main__":
     app.run(host="0.0.0.0", port=port)
 
 
+SIGNALS_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TradeShark Signals</title>
+<meta name="description" content="Real-time prediction market signals. Vegas vs Kalshi edge detection.">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #08080a; color: #f0f0f0; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', sans-serif; min-height: 100vh; }
+
+/* Header */
+.header { padding: 20px 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #111; }
+.logo { display: flex; align-items: center; gap: 10px; }
+.logo-text { font-size: 20px; font-weight: 800; letter-spacing: -0.5px; }
+.logo-text span { color: #00dc5a; }
+.logo-badge { background: #0d2b1a; color: #00dc5a; border: 1px solid #1a5c33; padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; letter-spacing: 0.5px; display: flex; align-items: center; gap: 5px; }
+.live-dot { width: 6px; height: 6px; background: #00dc5a; border-radius: 50%; animation: pulse 2s infinite; }
+@keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.5;transform:scale(0.8)} }
+
+/* Hero stats */
+.hero { max-width: 960px; margin: 0 auto; padding: 48px 20px 32px; }
+.hero-label { color: #444; font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 16px; font-weight: 600; }
+.record-display { display: flex; align-items: baseline; gap: 16px; margin-bottom: 8px; flex-wrap: wrap; }
+.record-big { font-size: 64px; font-weight: 800; letter-spacing: -3px; line-height: 1; }
+.record-big.green { color: #00dc5a; }
+.record-big.red { color: #ff4444; }
+.record-big.gray { color: #333; }
+.record-sep { font-size: 40px; color: #222; font-weight: 300; }
+.win-rate-pill { background: #0d2b1a; color: #00dc5a; border: 1px solid #1a5c33; padding: 6px 14px; border-radius: 20px; font-size: 14px; font-weight: 700; align-self: center; }
+.hero-sub { color: #444; font-size: 13px; margin-top: 12px; }
+.hero-sub span { color: #666; }
+
+/* Stats row */
+.stats-row { max-width: 960px; margin: 0 auto; padding: 0 20px 40px; display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+.stat-box { background: #0d0d0f; border: 1px solid #161618; border-radius: 14px; padding: 18px 16px; }
+.stat-box-label { color: #444; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; font-weight: 600; }
+.stat-box-value { font-size: 22px; font-weight: 700; color: #fff; }
+.stat-box-sub { color: #333; font-size: 11px; margin-top: 4px; }
+
+/* Divider */
+.divider { max-width: 960px; margin: 0 auto 32px; padding: 0 20px; }
+.divider-line { border: none; border-top: 1px solid #111; }
+
+/* Signals section */
+.signals-section { max-width: 960px; margin: 0 auto; padding: 0 20px 48px; }
+.section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+.section-title { font-size: 13px; font-weight: 700; color: #fff; text-transform: uppercase; letter-spacing: 1px; }
+.section-sub { color: #444; font-size: 12px; }
+
+/* Signal cards */
+.signal-card { background: #0d0d0f; border: 1px solid #161618; border-radius: 16px; padding: 20px 22px; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; gap: 16px; transition: border-color 0.15s; }
+.signal-card:hover { border-color: #222; }
+.signal-card.better { border-left: 3px solid #00dc5a; }
+.signal-card.agrees { border-left: 3px solid #444; }
+.signal-left { flex: 1; min-width: 0; }
+.signal-title { font-size: 15px; font-weight: 600; color: #fff; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.signal-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.signal-tag { font-size: 11px; padding: 2px 8px; border-radius: 5px; font-weight: 600; }
+.tag-yes { background: #0d2b1a; color: #00dc5a; }
+.tag-no { background: #2b1a00; color: #ff8c00; }
+.tag-better { background: #0d2b1a; color: #00dc5a; }
+.tag-agrees { background: #1a1a1a; color: #666; }
+.tag-time { color: #333; font-size: 11px; }
+.signal-right { text-align: right; flex-shrink: 0; }
+.signal-price { font-size: 28px; font-weight: 800; color: #fff; letter-spacing: -1px; }
+.signal-price-label { color: #444; font-size: 11px; margin-bottom: 2px; }
+.signal-gap { color: #00dc5a; font-size: 12px; font-weight: 600; margin-top: 2px; }
+
+/* Empty state */
+.empty-state { text-align: center; padding: 60px 20px; }
+.empty-emoji { font-size: 48px; margin-bottom: 16px; }
+.empty-title { color: #333; font-size: 16px; font-weight: 600; margin-bottom: 8px; }
+.empty-sub { color: #2a2a2a; font-size: 13px; line-height: 1.6; }
+
+/* Streak badge */
+.streak { display: inline-flex; align-items: center; gap: 6px; background: #0d0d0f; border: 1px solid #161618; border-radius: 20px; padding: 6px 14px; font-size: 12px; font-weight: 700; }
+
+/* Footer */
+.footer { border-top: 1px solid #0f0f0f; padding: 32px 20px; text-align: center; }
+.footer p { color: #2a2a2a; font-size: 12px; line-height: 1.8; }
+.footer a { color: #444; text-decoration: none; }
+.footer a:hover { color: #00dc5a; }
+.cta-strip { background: linear-gradient(135deg, #0d2b1a 0%, #0a0a0a 100%); border: 1px solid #1a5c33; border-radius: 16px; padding: 28px 24px; text-align: center; margin: 0 20px 32px; max-width: 920px; margin-left: auto; margin-right: auto; }
+.cta-strip h3 { color: #fff; font-size: 18px; font-weight: 700; margin-bottom: 6px; }
+.cta-strip p { color: #555; font-size: 13px; margin-bottom: 16px; }
+.cta-btn { display: inline-block; background: #00dc5a; color: #000; font-weight: 800; font-size: 14px; padding: 12px 28px; border-radius: 10px; text-decoration: none; letter-spacing: 0.3px; transition: opacity 0.15s; }
+.cta-btn:hover { opacity: 0.88; }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="logo">
+    <div class="logo-text">Trade<span>Shark</span> 🦈</div>
+  </div>
+  <div style="display:flex;align-items:center;gap:12px">
+    <div class="logo-badge"><div class="live-dot"></div> LIVE SIGNALS</div>
+    <span id="sig-updated" style="color:#333;font-size:11px"></span>
+  </div>
+</div>
+
+<div class="hero">
+  <div class="hero-label">All-Time Record</div>
+  <div class="record-display">
+    <div class="record-big green" id="sig-wins">--</div>
+    <div class="record-sep">W</div>
+    <div class="record-big red" id="sig-losses">--</div>
+    <div class="record-sep">L</div>
+    <div class="win-rate-pill" id="sig-wr">--%</div>
+  </div>
+  <div class="hero-sub">
+    Paper trading since <span id="sig-launch">Apr 27, 2026</span> &bull;
+    P&amp;L: <span id="sig-pnl" style="color:#fff">--</span> &bull;
+    CLV: <span id="sig-clv" style="color:#fff">--</span>
+  </div>
+</div>
+
+<div class="stats-row">
+  <div class="stat-box">
+    <div class="stat-box-label">Total Signals</div>
+    <div class="stat-box-value" id="sig-total">--</div>
+    <div class="stat-box-sub">since launch</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat-box-label">Settled</div>
+    <div class="stat-box-value" id="sig-settled">--</div>
+    <div class="stat-box-sub">completed bets</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat-box-label">Edge Source</div>
+    <div class="stat-box-value" style="font-size:14px;color:#00dc5a">Vegas Lines</div>
+    <div class="stat-box-sub">15+ sportsbooks</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat-box-label">Current Streak</div>
+    <div class="stat-box-value" id="sig-streak">--</div>
+    <div class="stat-box-sub" id="sig-streak-type"></div>
+  </div>
+</div>
+
+<div class="divider"><hr class="divider-line"></div>
+
+<div class="signals-section">
+  <div class="section-header">
+    <div>
+      <div class="section-title">Today's Signals</div>
+      <div class="section-sub" style="margin-top:4px">Bets where Vegas disagrees with Kalshi by 8%+</div>
+    </div>
+  </div>
+  <div id="sig-cards">
+    <div class="empty-state">
+      <div class="empty-emoji">⏳</div>
+      <div class="empty-title">Loading signals...</div>
+    </div>
+  </div>
+</div>
+
+<div class="cta-strip">
+  <h3>Get Signals Before the Market Moves</h3>
+  <p>Join the waitlist — we're opening subscriptions once edge is confirmed. Free during the proof period.</p>
+  <a href="https://x.com/TradeShark6408" target="_blank" class="cta-btn">Follow @TradeShark6408 on X</a>
+</div>
+
+<div class="footer">
+  <p>
+    TradeShark 🦈 &bull; <a href="/track-record">Full Track Record</a> &bull; <a href="https://x.com/TradeShark6408" target="_blank">@TradeShark6408</a>
+  </p>
+  <p style="margin-top:8px;color:#1a1a1a">
+    Paper trading only. Not financial advice. All trades logged automatically — no manual selection.
+  </p>
+</div>
+
+<script>
+function loadSignals() {
+  fetch('/signals-data')
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) return;
+
+      // Header
+      document.getElementById('sig-updated').textContent = 'Updated ' + (d.last_updated || '--');
+
+      // Hero
+      document.getElementById('sig-wins').textContent = d.wins != null ? d.wins : '--';
+      document.getElementById('sig-losses').textContent = d.losses != null ? d.losses : '--';
+      const wr = d.win_rate;
+      const wrEl = document.getElementById('sig-wr');
+      wrEl.textContent = d.settled > 0 ? wr + '%' : '--%';
+      wrEl.style.background = wr >= 55 ? '#0d2b1a' : wr >= 45 ? '#2b2000' : '#2b0d0d';
+      wrEl.style.color = wr >= 55 ? '#00dc5a' : wr >= 45 ? '#ffb400' : '#ff4444';
+      wrEl.style.borderColor = wr >= 55 ? '#1a5c33' : wr >= 45 ? '#5c4400' : '#5c1a1a';
+
+      const pnl = d.total_pnl_usd || 0;
+      document.getElementById('sig-pnl').textContent = (pnl >= 0 ? '+' : '') + '$' + Math.abs(pnl).toFixed(2);
+      document.getElementById('sig-pnl').style.color = pnl >= 0 ? '#00dc5a' : '#ff4444';
+      document.getElementById('sig-clv').textContent = d.clv_5min_avg != null ? (d.clv_5min_avg > 0 ? '+' : '') + d.clv_5min_avg + '¢' : '--';
+      document.getElementById('sig-clv').style.color = (d.clv_5min_avg || 0) >= 0 ? '#00dc5a' : '#ff4444';
+
+      // Stats
+      document.getElementById('sig-total').textContent = d.total_signals || 0;
+      document.getElementById('sig-settled').textContent = d.settled || 0;
+
+      // Streak
+      const streak = d.streak || {};
+      if (streak.count && streak.type) {
+        document.getElementById('sig-streak').textContent = streak.count + (streak.type === 'win' ? 'W' : 'L');
+        document.getElementById('sig-streak').style.color = streak.type === 'win' ? '#00dc5a' : '#ff4444';
+        document.getElementById('sig-streak-type').textContent = streak.type === 'win' ? 'win streak 🔥' : 'loss streak';
+      } else {
+        document.getElementById('sig-streak').textContent = '--';
+        document.getElementById('sig-streak-type').textContent = 'no data yet';
+      }
+
+      // Signal cards
+      const signals = d.todays_signals || [];
+      const container = document.getElementById('sig-cards');
+      if (!signals.length) {
+        container.innerHTML = '<div class="empty-state"><div class="empty-emoji">🦈</div><div class="empty-title">No signals yet today</div><div class="empty-sub">The bot scans every 45 seconds during game hours.<br>Check back when games are live.</div></div>';
+        return;
+      }
+      let html = '';
+      signals.forEach(s => {
+        const isBetter = s.vegas_verdict === 'BETTER';
+        const sideClass = s.side === 'yes' ? 'tag-yes' : 'tag-no';
+        const sideLabel = s.side === 'yes' ? 'YES' : 'NO';
+        const gap = s.vegas_gap_pp != null ? '+' + s.vegas_gap_pp + 'pp edge' : '';
+        const verdictClass = isBetter ? 'tag-better' : 'tag-agrees';
+        const cardClass = isBetter ? 'better' : 'agrees';
+        html += '<div class="signal-card ' + cardClass + '">';
+        html += '<div class="signal-left">';
+        html += '<div class="signal-title">' + (s.title || s.ticker) + '</div>';
+        html += '<div class="signal-meta">';
+        html += '<span class="signal-tag ' + sideClass + '">' + sideLabel + '</span>';
+        html += '<span class="signal-tag ' + verdictClass + '">Vegas ' + (s.vegas_verdict || '--') + '</span>';
+        html += '<span class="tag-time">' + (s.entry_time || '') + '</span>';
+        html += '</div></div>';
+        html += '<div class="signal-right">';
+        html += '<div class="signal-price-label">Kalshi price</div>';
+        html += '<div class="signal-price">' + (s.entry_price || '--') + '¢</div>';
+        if (gap) html += '<div class="signal-gap">' + gap + '</div>';
+        html += '</div></div>';
+      });
+      container.innerHTML = html;
+    })
+    .catch(() => {});
+}
+
+loadSignals();
+setInterval(loadSignals, 30000);
+</script>
+</body>
+</html>"""
+
+
 TRACK_RECORD_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -29726,6 +29980,81 @@ def track_record_data():
 @app.route("/track-record")
 def track_record_page():
     return TRACK_RECORD_HTML
+
+
+@app.route("/signals-data")
+def signals_data():
+    """Clean public signals data for the subscriber-facing page."""
+    try:
+        with _PAPER_TRADES_LOCK:
+            v2_trades = [
+                t for t in _PAPER_TRADES
+                if t.get("signal_version") == "v2_vegas"
+                and (t.get("entry_time") or "") >= V2_LAUNCH_DATE
+            ]
+
+        settled = [t for t in v2_trades if t.get("result") in ("win", "loss")]
+        pending = [t for t in v2_trades if t.get("result") not in ("win", "loss", "expired")]
+        wins = [t for t in settled if t.get("result") == "win"]
+        win_rate = round(len(wins) / len(settled) * 100, 1) if settled else 0
+        total_pnl = sum(t.get("pnl_cents", 0) or 0 for t in settled) / 100
+
+        clv5 = [t["clv_5min"] for t in v2_trades if t.get("clv_5min") is not None]
+        clv5_avg = round(sum(clv5) / len(clv5), 2) if clv5 else None
+
+        today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+        todays_signals = [
+            t for t in pending
+            if (t.get("entry_time") or "").startswith(today_str)
+            and t.get("vegas_verdict") in ("BETTER", "AGREES")
+        ]
+
+        formatted_signals = []
+        for t in todays_signals[-5:]:
+            vg = t.get("vegas_gap_pp")
+            formatted_signals.append({
+                "title": t.get("title", ""),
+                "ticker": t.get("ticker", ""),
+                "side": t.get("side", ""),
+                "entry_price": t.get("entry_price"),
+                "vegas_verdict": t.get("vegas_verdict"),
+                "vegas_gap_pp": vg,
+                "strategy": t.get("strategy", ""),
+                "entry_time": (t.get("entry_time") or "")[:16].replace("T", " "),
+            })
+
+        streak = 0
+        streak_type = None
+        for t in reversed(settled):
+            r = t.get("result")
+            if streak_type is None:
+                streak_type = r
+                streak = 1
+            elif r == streak_type:
+                streak += 1
+            else:
+                break
+
+        return jsonify({
+            "total_signals": len(v2_trades),
+            "settled": len(settled),
+            "wins": len(wins),
+            "losses": len(settled) - len(wins),
+            "win_rate": win_rate,
+            "total_pnl_usd": round(total_pnl, 2),
+            "clv_5min_avg": clv5_avg,
+            "todays_signals": formatted_signals,
+            "streak": {"count": streak, "type": streak_type},
+            "launch_date": V2_LAUNCH_DATE,
+            "last_updated": datetime.datetime.now(tz=_PACIFIC).strftime("%I:%M %p PT"),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+@app.route("/signals")
+def signals_page():
+    return SIGNALS_HTML
 
 
 @app.route("/daily-scorecard")
