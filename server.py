@@ -12757,11 +12757,10 @@ def _background_loop():
         if len(_PERF_HISTORY) < 2:
             _selftest_warnings.append(f"Perf history only has {len(_PERF_HISTORY)} points — chart will be sparse")
 
-        # 6. Bot must be enabled
+        # 6. Bot enabled check — skipped during manual pause
+        # PAUSED: do not force-enable, bot is intentionally paused for edge validation
         if not BOT_CONFIG.get("enabled") or not BOT_STATE.get("auto_trade"):
-            _selftest_warnings.append("Bot is DISABLED after startup — forcing enable")
-            BOT_CONFIG["enabled"] = True
-            BOT_STATE["auto_trade"] = True
+            _selftest_warnings.append("Bot is PAUSED — paper trading only (intentional, skip force-enable)")
 
         # 7. Settled cache should be warm
         if not _SETTLED_CACHE.get("data"):
