@@ -502,6 +502,214 @@ _PAPER_TRADES_LOCK = _threading.Lock()
 _SKIP_REASONS_LOCK = _threading.Lock()
 _LEARNING_STATE_LOCK = _threading.Lock()
 
+# ---------------------------------------------------------------------------
+# V2 LEARNING ENGINE — Closed-loop self-improvement from settled v2 trades
+# ---------------------------------------------------------------------------
+_V2_ANALYSIS = {
+    "last_run": None,
+    "insights": [],
+    "by_sport": {},
+    "by_vegas_gap": {},
+    "by_price_range": {},
+    "by_hour": {},
+    "optimal_min_gap": 0.08,   # starts at 8%, auto-tunes from data
+    "optimal_price_low": 40,   # starts at 40c, auto-tunes
+    "optimal_price_high": 70,  # starts at 70c, auto-tunes
+    "edge_decay_alert": False,
+    "rolling_wr_20": None,
+    "total_analyzed": 0,
+}
+_V2_ANALYSIS_LOCK = _threading.Lock()
+
+
+def _run_v2_analysis():
+    """Analyze all settled v2 trades and update thresholds. Runs after every settlement."""
+    import time as _t
+
+    with _PAPER_TRADES_LOCK:
+        v2_trades = [
+            t for t in _PAPER_TRADES
+            if t.get("signal_version") == "v2_vegas"
+            and (t.get("entry_time") or "") >= V2_LAUNCH_DATE
+        ]
+
+    settled = [t for t in v2_trades if t.get("result") in ("win", "loss")]
+    if not settled:
+        return
+
+    insights = []
+    total = len(settled)
+    wins = [t for t in settled if t.get("result") == "win"]
+    overall_wr = len(wins) / total if total > 0 else 0
+
+    # --- Rolling 20-trade win rate (edge decay detection) ---
+    recent_20 = settled[-20:]
+    recent_wins = sum(1 for t in recent_20 if t.get("result") == "win")
+    rolling_wr_20 = recent_wins / len(recent_20) if recent_20 else None
+
+    edge_decay_alert = False
+    if rolling_wr_20 is not None and len(recent_20) >= 10:
+        if rolling_wr_20 < 0.45:
+            edge_decay_alert = True
+            insights.append(f"⚠️ EDGE DECAY: Rolling 20-trade WR={rolling_wr_20:.0%} — consider tightening thresholds")
+        elif rolling_wr_20 > 0.60:
+            insights.append(f"🔥 HOT STREAK: Rolling 20-trade WR={rolling_wr_20:.0%} — edge strong, could loosen thresholds")
+
+    # --- By Vegas gap bucket ---
+    gap_buckets = {"<5pp": [], "5-10pp": [], "10-15pp": [], "15-20pp": [], ">20pp": []}
+    for t in settled:
+        vg = t.get("vegas_gap_pp")
+        if vg is None:
+            continue
+        if vg < 5:
+            gap_buckets["<5pp"].append(t)
+        elif vg < 10:
+            gap_buckets["5-10pp"].append(t)
+        elif vg < 15:
+            gap_buckets["10-15pp"].append(t)
+        elif vg < 20:
+            gap_buckets["15-20pp"].append(t)
+        else:
+            gap_buckets[">20pp"].append(t)
+
+    by_vegas_gap = {}
+    best_gap_bucket = None
+    best_gap_wr = 0
+    for bucket, trades in gap_buckets.items():
+        if len(trades) >= 3:
+            w = sum(1 for t in trades if t.get("result") == "win")
+            wr = w / len(trades)
+            by_vegas_gap[bucket] = {"total": len(trades), "wins": w, "win_rate": round(wr * 100, 1)}
+            if wr > best_gap_wr:
+                best_gap_wr = wr
+                best_gap_bucket = bucket
+
+    if best_gap_bucket and best_gap_wr > overall_wr + 0.05:
+        insights.append(f"📊 BEST EDGE: Vegas gap {best_gap_bucket} has {best_gap_wr:.0%} WR vs {overall_wr:.0%} overall")
+
+    # --- By price range ---
+    price_buckets = {"<35c": [], "35-50c": [], "50-65c": [], ">65c": []}
+    for t in settled:
+        p = t.get("entry_price") or 0
+        if p < 35:
+            price_buckets["<35c"].append(t)
+        elif p < 50:
+            price_buckets["35-50c"].append(t)
+        elif p < 65:
+            price_buckets["50-65c"].append(t)
+        else:
+            price_buckets[">65c"].append(t)
+
+    by_price_range = {}
+    for bucket, trades in price_buckets.items():
+        if len(trades) >= 3:
+            w = sum(1 for t in trades if t.get("result") == "win")
+            wr = w / len(trades)
+            by_price_range[bucket] = {"total": len(trades), "wins": w, "win_rate": round(wr * 100, 1)}
+
+    # --- By hour of day (Pacific) ---
+    by_hour = {}
+    for t in settled:
+        try:
+            entry = t.get("entry_time", "")
+            if entry:
+                hour = int(entry[11:13])
+                if hour not in by_hour:
+                    by_hour[hour] = {"total": 0, "wins": 0}
+                by_hour[hour]["total"] += 1
+                if t.get("result") == "win":
+                    by_hour[hour]["wins"] += 1
+        except Exception:
+            pass
+    for h in by_hour:
+        n = by_hour[h]["total"]
+        w = by_hour[h]["wins"]
+        by_hour[h]["win_rate"] = round(w / n * 100, 1) if n > 0 else 0
+
+    # --- By sport ---
+    by_sport = {}
+    for t in settled:
+        sport = t.get("sport") or "unknown"
+        # Try to infer sport from ticker if sport field empty
+        if sport == "unknown" or not sport:
+            ticker = t.get("ticker", "").upper()
+            if "NBAGAME" in ticker:
+                sport = "nba"
+            elif "MLBGAME" in ticker:
+                sport = "mlb"
+            elif "NHLGAME" in ticker:
+                sport = "nhl"
+            elif "NCAAMBGAME" in ticker:
+                sport = "ncaab"
+            elif "MLSGAME" in ticker:
+                sport = "mls"
+        if sport not in by_sport:
+            by_sport[sport] = {"total": 0, "wins": 0, "win_rate": 0}
+        by_sport[sport]["total"] += 1
+        if t.get("result") == "win":
+            by_sport[sport]["wins"] += 1
+    for s in by_sport:
+        n = by_sport[s]["total"]
+        w = by_sport[s]["wins"]
+        by_sport[s]["win_rate"] = round(w / n * 100, 1) if n > 0 else 0
+
+    # Sport insights
+    for sport, data in by_sport.items():
+        if data["total"] >= 5:
+            if data["win_rate"] < 40:
+                insights.append(f"📉 {sport.upper()}: {data['win_rate']}% WR ({data['total']} bets) — consider blocking")
+            elif data["win_rate"] > 60:
+                insights.append(f"🎯 {sport.upper()}: {data['win_rate']}% WR ({data['total']} bets) — strong edge here")
+
+    # --- Auto-tune optimal Vegas gap threshold ---
+    # Find the lowest gap bucket with WR > 52% and at least 5 trades
+    optimal_min_gap = 0.08  # default
+    for threshold_pp, bucket_key in [(5, "5-10pp"), (8, "5-10pp"), (10, "10-15pp"), (15, "15-20pp")]:
+        b = by_vegas_gap.get(bucket_key, {})
+        if b.get("total", 0) >= 5 and b.get("win_rate", 0) > 52:
+            optimal_min_gap = threshold_pp / 100
+            break
+
+    # --- Vegas verdict accuracy ---
+    better_trades = [t for t in settled if t.get("vegas_verdict") == "BETTER"]
+    agrees_trades = [t for t in settled if t.get("vegas_verdict") == "AGREES"]
+    worse_trades  = [t for t in settled if t.get("vegas_verdict") == "WORSE"]
+
+    if len(better_trades) >= 3:
+        bwr = sum(1 for t in better_trades if t.get("result") == "win") / len(better_trades)
+        insights.append(f"Vegas BETTER: {bwr:.0%} WR ({len(better_trades)} bets)")
+    if len(agrees_trades) >= 3:
+        awr = sum(1 for t in agrees_trades if t.get("result") == "win") / len(agrees_trades)
+        insights.append(f"Vegas AGREES: {awr:.0%} WR ({len(agrees_trades)} bets)")
+    if len(worse_trades) >= 3:
+        wwr = sum(1 for t in worse_trades if t.get("result") == "win") / len(worse_trades)
+        insights.append(f"Vegas WORSE: {wwr:.0%} WR ({len(worse_trades)} bets) — stop taking these")
+        if wwr < 0.40:
+            insights.append("🚫 ACTION: Blocking Vegas WORSE trades — data shows no edge there")
+
+    # --- Minimum sample warning ---
+    if total < 20:
+        insights.append(f"📊 Only {total} settled trades — thresholds not yet auto-tuning (need 20+)")
+    elif total < 50:
+        insights.append(f"📊 {total}/50 settled trades — preliminary patterns emerging, watching closely")
+    else:
+        insights.append(f"✅ {total} settled trades — sufficient data for reliable auto-tuning")
+
+    # --- Write results ---
+    with _V2_ANALYSIS_LOCK:
+        _V2_ANALYSIS["last_run"] = datetime.datetime.now(tz=_PACIFIC).isoformat()
+        _V2_ANALYSIS["insights"] = insights[-20:]
+        _V2_ANALYSIS["by_sport"] = by_sport
+        _V2_ANALYSIS["by_vegas_gap"] = by_vegas_gap
+        _V2_ANALYSIS["by_price_range"] = by_price_range
+        _V2_ANALYSIS["by_hour"] = {str(k): v for k, v in by_hour.items()}
+        _V2_ANALYSIS["optimal_min_gap"] = optimal_min_gap
+        _V2_ANALYSIS["edge_decay_alert"] = edge_decay_alert
+        _V2_ANALYSIS["rolling_wr_20"] = round(rolling_wr_20 * 100, 1) if rolling_wr_20 is not None else None
+        _V2_ANALYSIS["total_analyzed"] = total
+
+    _log_activity(f"🧠 V2 ENGINE: Analyzed {total} settled trades. Rolling WR: {rolling_wr_20:.0%}" if rolling_wr_20 else f"🧠 V2 ENGINE: Analyzed {total} settled trades.", "info")
+
 # Paper trading — declared early so _load_state() can restore them
 _PAPER_TRADES = []       # list of paper trade dicts
 _PAPER_TRADES_MAX = 5000  # keep 30+ days of paper trades for edge analysis
@@ -9810,6 +10018,11 @@ def _paper_trade_update():
                     pt["pnl_cents"] = -entry_price
     except Exception as e:
         print(f"[PAPER] Update error: {e}")
+    # Run v2 learning engine analysis whenever trades settle
+    try:
+        _run_v2_analysis()
+    except Exception as _ae:
+        pass
 
 
 _GAME_TICKER_LEAGUE_MAP = {
@@ -13255,6 +13468,12 @@ def _ensure_bg_thread():
                         _watchdog_check()
                     except Exception as _wde:
                         print(f"[WATCHDOG] Error: {_wde}")
+                    # V2 learning engine — every 3 cycles (~30 min)
+                    if _learn_cycle % 3 == 0:
+                        try:
+                            _run_v2_analysis()
+                        except Exception:
+                            pass
                     # Heartbeat log every 20 cycles (~1 hr)
                     if _learn_cycle % 20 == 0:
                         with _LEARNING_STATE_LOCK:
@@ -22913,6 +23132,17 @@ def paper_trades_api():
         return jsonify({"error": str(e), "total": 0})
 
 
+@app.route("/v2-engine")
+def v2_engine():
+    """V2 learning engine analysis — trends, insights, auto-tuned thresholds."""
+    try:
+        with _V2_ANALYSIS_LOCK:
+            data = dict(_V2_ANALYSIS)
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
 @app.route("/paper-trades-v2")
 def paper_trades_v2_api():
     """Return paper trading stats for v2_vegas signal only (post-Vegas-primary deploy)."""
@@ -23524,6 +23754,7 @@ a:hover { color: #7da5f5; }
   <button class="tab" onclick="switchTab('trends')" style="color:#e040fb">Trends</button>
   <button class="tab" onclick="switchTab('paper')" style="color:#00dc5a">&#128196; Paper <span id="paper-tab-count" style="background:#1a1a2e;color:#00d4ff;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:2px"></span></button>
   <button class="tab" onclick="switchTab('paper2')" style="color:#00d4ff">&#9889; Edge Paper <span id="paper2-tab-count" style="background:#1a1a2e;color:#00dc5a;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:2px"></span></button>
+  <button class="tab" onclick="switchTab('engine')" style="color:#e040fb">&#129504; Engine</button>
   <!-- MoonShark tab removed -->
 </div>
 
@@ -24102,6 +24333,40 @@ a:hover { color: #7da5f5; }
   <div id="p2-trades-list" style="color:#666;font-size:13px">Loading...</div>
 </div>
 
+<div class="tab-content" id="tab-engine" style="display:none">
+  <h2 style="color:#e040fb;margin-bottom:4px">&#129504; Learning Engine &mdash; v2 Signal Analysis</h2>
+  <p style="color:#666;font-size:12px;margin-bottom:20px">Self-improving. Updates automatically as trades settle. Needs 20+ settled trades for reliable patterns.</p>
+
+  <div id="eng-decay-alert" style="display:none;background:#1a0808;border:1px solid #3a1010;border-radius:10px;padding:14px 18px;margin-bottom:16px;color:#ff5555;font-weight:600"></div>
+
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:24px">
+    <div class="metric-card"><div class="metric-label">Trades Analyzed</div><div class="metric-value" id="eng-total">--</div></div>
+    <div class="metric-card"><div class="metric-label">Rolling 20 WR</div><div class="metric-value" id="eng-rolling" style="color:#00dc5a">--</div></div>
+    <div class="metric-card"><div class="metric-label">Optimal Gap</div><div class="metric-value" id="eng-gap">--</div></div>
+    <div class="metric-card"><div class="metric-label">Last Analysis</div><div class="metric-value" style="font-size:14px" id="eng-last">--</div></div>
+  </div>
+
+  <h3 style="color:#e040fb;margin-bottom:12px">&#128161; Insights</h3>
+  <div id="eng-insights" style="margin-bottom:24px"></div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px">
+    <div>
+      <h3 style="color:#ccc;margin-bottom:12px;font-size:14px">By Vegas Gap</h3>
+      <div id="eng-by-gap"></div>
+    </div>
+    <div>
+      <h3 style="color:#ccc;margin-bottom:12px;font-size:14px">By Sport</h3>
+      <div id="eng-by-sport"></div>
+    </div>
+  </div>
+
+  <h3 style="color:#ccc;margin-bottom:12px;font-size:14px">By Price Range</h3>
+  <div id="eng-by-price" style="margin-bottom:24px"></div>
+
+  <button onclick="loadEngine()" style="background:#1a1a2e;color:#e040fb;border:1px solid #e040fb;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px">&#8635; Refresh</button>
+  <span id="eng-status" style="color:#444;font-size:11px;margin-left:10px"></span>
+</div>
+
 </div><!-- end container -->
 
 <div class="toast-container" id="toast-container"></div>
@@ -24147,6 +24412,7 @@ function switchTab(name) {
   if (name === 'brain') { loadBrain(); }
   if (name === 'paper') { loadPaperTrades(); }
   if (name === 'paper2') { loadPaper2(); }
+  if (name === 'engine') { loadEngine(); }
   // Legacy support for hidden tabs
   if (name === 'activity') { loadActivity(); loadBetsFeed(); loadAllBets(); }
 }
@@ -28378,6 +28644,91 @@ function loadPaper2() {
     .catch(e => { document.getElementById('p2-trades-list').textContent = 'Fetch error: ' + e; });
 }
 
+function loadEngine() {
+  document.getElementById('eng-status').textContent = 'Loading...';
+  fetch('/v2-engine')
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) { document.getElementById('eng-status').textContent = 'Error: ' + d.error; return; }
+      document.getElementById('eng-status').textContent = '';
+
+      document.getElementById('eng-total').textContent = d.total_analyzed || 0;
+
+      const rwr = d.rolling_wr_20;
+      const rwrEl = document.getElementById('eng-rolling');
+      rwrEl.textContent = rwr != null ? rwr + '%' : '--';
+      rwrEl.style.color = rwr == null ? '#555' : rwr >= 55 ? '#00dc5a' : rwr >= 45 ? '#ffb400' : '#ff3333';
+
+      document.getElementById('eng-gap').textContent = d.optimal_min_gap != null ? (d.optimal_min_gap * 100).toFixed(0) + 'pp' : '--';
+      document.getElementById('eng-last').textContent = d.last_run ? d.last_run.slice(11,16) + ' PT' : 'Never';
+
+      // Decay alert
+      const alertEl = document.getElementById('eng-decay-alert');
+      if (d.edge_decay_alert) {
+        alertEl.style.display = 'block';
+        alertEl.textContent = '⚠️ EDGE DECAY DETECTED — Rolling 20-trade win rate below 45%. Consider pausing real money until edge recovers.';
+      } else {
+        alertEl.style.display = 'none';
+      }
+
+      // Insights
+      const insights = d.insights || [];
+      if (!insights.length) {
+        document.getElementById('eng-insights').innerHTML = '<p style="color:#444;font-size:13px">No insights yet — need more settled trades.</p>';
+      } else {
+        document.getElementById('eng-insights').innerHTML = insights.map(i => {
+          const color = i.startsWith('⚠️') || i.startsWith('🙇') ? '#ff5555' : i.startsWith('🔥') || i.startsWith('✅') || i.startsWith('🎯') ? '#00dc5a' : '#888';
+          return '<div style="padding:8px 12px;margin-bottom:6px;background:#0d0d0f;border-left:3px solid ' + color + ';border-radius:4px;font-size:13px;color:' + color + '">' + i + '</div>';
+        }).join('');
+      }
+
+      // By gap
+      const byGap = d.by_vegas_gap || {};
+      const gapKeys = Object.keys(byGap);
+      if (!gapKeys.length) {
+        document.getElementById('eng-by-gap').innerHTML = '<p style="color:#333;font-size:12px">Need 3+ trades per bucket</p>';
+      } else {
+        document.getElementById('eng-by-gap').innerHTML = gapKeys.map(k => {
+          const b = byGap[k];
+          const wr = b.win_rate;
+          const c = wr >= 55 ? '#00dc5a' : wr >= 45 ? '#ffb400' : '#ff3333';
+          const barW = Math.min(wr, 100);
+          return '<div style="margin-bottom:10px"><div style="display:flex;justify-content:space-between;margin-bottom:3px"><span style="color:#888;font-size:12px">' + k + '</span><span style="color:' + c + ';font-size:12px;font-weight:700">' + wr + '% (' + b.total + ')</span></div><div style="background:#111;border-radius:4px;height:5px"><div style="background:' + c + ';width:' + barW + '%;height:100%;border-radius:4px"></div></div></div>';
+        }).join('');
+      }
+
+      // By sport
+      const bySport = d.by_sport || {};
+      const sportKeys = Object.keys(bySport);
+      if (!sportKeys.length) {
+        document.getElementById('eng-by-sport').innerHTML = '<p style="color:#333;font-size:12px">No sport data yet</p>';
+      } else {
+        document.getElementById('eng-by-sport').innerHTML = sportKeys.map(k => {
+          const b = bySport[k];
+          const wr = b.win_rate;
+          const c = wr >= 55 ? '#00dc5a' : wr >= 45 ? '#ffb400' : '#ff3333';
+          const barW = Math.min(wr, 100);
+          return '<div style="margin-bottom:10px"><div style="display:flex;justify-content:space-between;margin-bottom:3px"><span style="color:#888;font-size:12px">' + k.toUpperCase() + '</span><span style="color:' + c + ';font-size:12px;font-weight:700">' + wr + '% (' + b.total + ')</span></div><div style="background:#111;border-radius:4px;height:5px"><div style="background:' + c + ';width:' + barW + '%;height:100%;border-radius:4px"></div></div></div>';
+        }).join('');
+      }
+
+      // By price
+      const byPrice = d.by_price_range || {};
+      const priceKeys = Object.keys(byPrice);
+      if (!priceKeys.length) {
+        document.getElementById('eng-by-price').innerHTML = '<p style="color:#333;font-size:12px">Need 3+ trades per bucket</p>';
+      } else {
+        document.getElementById('eng-by-price').innerHTML = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px">' + priceKeys.map(k => {
+          const b = byPrice[k];
+          const wr = b.win_rate;
+          const c = wr >= 55 ? '#00dc5a' : wr >= 45 ? '#ffb400' : '#ff3333';
+          return '<div style="background:#0d0d0f;border:1px solid #161618;border-radius:10px;padding:12px;text-align:center"><div style="color:#555;font-size:10px;text-transform:uppercase;margin-bottom:6px">' + k + '</div><div style="font-size:20px;font-weight:700;color:' + c + '">' + wr + '%</div><div style="color:#333;font-size:11px">' + b.total + ' bets</div></div>';
+        }).join('') + '</div>';
+      }
+    })
+    .catch(e => { document.getElementById('eng-status').textContent = 'Error: ' + e; });
+}
+
 // --- Trends Tab ---
 // === GLOBAL NEWS FEED ===
 async function loadNewsFeed(forceRefresh) {
@@ -29041,6 +29392,7 @@ setInterval(loadHealthBanner, 30000);
 setInterval(() => { loadStatus(); loadActivity(); loadBetsFeed(); loadPortfolio(); }, 10000);
 // MEDIUM (30s): positions, trades, closing soon — changes with market activity
 setInterval(() => { loadPositions(); loadTrades(); loadClosingSoon(); loadTopPicks(); loadTodayPicks(); checkNotifications(); loadDailyHighlights(); loadPaperTrades(); loadPaper2(); }, 30000);
+setInterval(loadEngine, 30000);
 // SLOW (60s): settled stats, perf history, analytics — expensive + rarely changes
 setInterval(() => { loadSettled(); loadPerfHistory(); loadPerformance(); loadTicker(); loadSeventyFivers(); loadQuantPicks(); }, 60000);
 
