@@ -7195,6 +7195,20 @@ def floor_quota_snipe():
             if not best:
                 continue
 
+            # VEGAS GATE: require Vegas consensus before adding to candidates.
+            # If Odds API has no data for this game, skip — ESPN alone is unreliable.
+            _vp, _ve, _vl = _get_vegas_edge(ticker, title, best["price"] / 100.0, best["side"])
+            if _vp is None:
+                _log_activity(f"FLOOR SKIP: {ticker} — no Vegas data, skipping (ESPN-only = unreliable)", "info")
+                continue
+            if _ve < -0.03:
+                _log_activity(f"FLOOR SKIP: {ticker} — Vegas disagrees by {_ve:.1%}, skipping", "info")
+                continue
+            # Use Vegas probability as our_prob when available (more reliable than ESPN)
+            best["our_prob"] = _vp
+            best["edge"] = _ve
+            best["vegas_gap_pp"] = round(_ve * 100, 1)
+
             candidates.append({
                 "ticker": ticker,
                 "title": title,
@@ -7203,6 +7217,7 @@ def floor_quota_snipe():
                 "price": best["price"],
                 "edge": best["edge"],
                 "our_prob": best["our_prob"],
+                "vegas_gap_pp": best.get("vegas_gap_pp"),
                 "game": _game,
                 "mcat": mcat,
                 "close_time": mkt.get("close_time", "") if isinstance(mkt, dict) else "",
