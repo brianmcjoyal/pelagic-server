@@ -7147,67 +7147,32 @@ def floor_quota_snipe():
             except Exception:
                 continue
 
-            # ESPN validation — league-aware lookup so Kalshi team codes that
-            # differ from ESPN (WAS vs WSH, GSW vs GS, etc.) still resolve, and
-            # so shared codes across sports (CHI: Bulls vs Fire) don't collide.
-            _game, _espn_team = _find_espn_game_for_kalshi_ticker(ticker, title)
-
-            _espn_prob = None
-            if _game and _game.get("event_id"):
-                try:
-                    _is_home = _game.get("home_abbrev", "").upper() == _espn_team
-                    _espn_prob = _get_espn_win_prob(
-                        _game["event_id"],
-                        (_game.get("league") or "").lower(),
-                        home_team=_is_home,
-                    )
-                except Exception:
-                    pass
-            # Fall back to moneyline implied probability from ESPN odds feed
-            if _espn_prob is None and _game and _game.get("odds"):
-                _odds = _game["odds"]
-                if _game.get("home_abbrev", "").upper() == _espn_team:
-                    _espn_prob = _odds.get("home_implied") or None
-                elif _game.get("away_abbrev", "").upper() == _espn_team:
-                    _espn_prob = _odds.get("away_implied") or None
-
-            if _espn_prob is None or _espn_prob <= 0:
-                continue  # no ESPN signal → no bet
-
-            # MUST be LIVE — no pre-game or finished game bets
-            if not _game or _game.get("state") != "in":
-                continue
-
-            # Pick the side with the best edge
+            # KALSHI-FIRST: use Vegas odds directly — no ESPN dependency.
+            # Try each side, pick the one with the best Vegas edge.
             best = None
             for side_name, ask in (("yes", yes_ask), ("no", no_ask)):
                 if ask is None or ask < FLOOR_MIN_PRICE or ask > FLOOR_MAX_PRICE:
                     continue
                 implied = ask / 100.0
-                # For NO side, our target probability is 1 - _espn_prob
-                our_prob = _espn_prob if side_name == "yes" else (1 - _espn_prob)
-                edge = our_prob - implied
-                if edge < FLOOR_MIN_EDGE:
-                    continue
-                if best is None or edge > best["edge"]:
-                    best = {"side": side_name, "price": ask, "edge": edge, "our_prob": our_prob}
+                _vp, _ve, _vl = _get_vegas_edge(ticker, title, implied, side_name)
+                if _vp is None:
+                    continue  # no Vegas data for this side
+                if _ve < FLOOR_MIN_EDGE:
+                    continue  # gap too small
+                if _ve < -0.03:
+                    continue  # Vegas disagrees
+                if best is None or _ve > best["edge"]:
+                    best = {
+                        "side": side_name,
+                        "price": ask,
+                        "edge": _ve,
+                        "our_prob": _vp,
+                        "vegas_gap_pp": round(_ve * 100, 1),
+                    }
 
             if not best:
+                _log_activity(f"FLOOR SKIP: {ticker} — no Vegas edge found", "info")
                 continue
-
-            # VEGAS GATE: require Vegas consensus before adding to candidates.
-            # If Odds API has no data for this game, skip — ESPN alone is unreliable.
-            _vp, _ve, _vl = _get_vegas_edge(ticker, title, best["price"] / 100.0, best["side"])
-            if _vp is None:
-                _log_activity(f"FLOOR SKIP: {ticker} — no Vegas data, skipping (ESPN-only = unreliable)", "info")
-                continue
-            if _ve < -0.03:
-                _log_activity(f"FLOOR SKIP: {ticker} — Vegas disagrees by {_ve:.1%}, skipping", "info")
-                continue
-            # Use Vegas probability as our_prob when available (more reliable than ESPN)
-            best["our_prob"] = _vp
-            best["edge"] = _ve
-            best["vegas_gap_pp"] = round(_ve * 100, 1)
 
             candidates.append({
                 "ticker": ticker,
@@ -7218,7 +7183,7 @@ def floor_quota_snipe():
                 "edge": best["edge"],
                 "our_prob": best["our_prob"],
                 "vegas_gap_pp": best.get("vegas_gap_pp"),
-                "game": _game,
+                "game": None,
                 "mcat": mcat,
                 "close_time": mkt.get("close_time", "") if isinstance(mkt, dict) else "",
             })
