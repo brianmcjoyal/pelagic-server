@@ -6991,9 +6991,9 @@ def floor_quota_snipe():
 
     Uses relaxed filters to guarantee a minimum level of activity. Every bet
     feeds the trade journal so the learning engine has constant fresh data.
+    Runs in paper-only mode when bot is disabled (for edge validation).
     """
-    if not BOT_CONFIG.get("enabled"):
-        return []
+    _paper_only = not BOT_CONFIG.get("enabled")  # paper mode when paused
     # Only run when we're actually short
     if not _floor_mode_active():
         return []
@@ -7253,6 +7253,9 @@ def floor_quota_snipe():
             _log_paper_trade(ticker, title, side, price, cand.get("our_prob", 0), edge, edge * 100, strategy="floor")
         except Exception:
             pass
+        if _paper_only:
+            placed.append({"ticker": ticker, "side": side, "price": price, "paper": True})
+            continue
         result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob,
                                    win_prob=cand.get("our_prob"), edge=edge, strategy="floor")
         if "error" in result:
