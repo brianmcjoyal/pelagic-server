@@ -19784,19 +19784,25 @@ def _is_same_day_market(close_time_str):
 
 
 def _is_same_day_ticker(ticker):
-    """Return True if ticker encodes today's date (Pacific time).
+    """Return True if ticker encodes today's or tomorrow's date (Pacific time).
     Handles series-scanned markets where close_time = end of season, not game day.
     Ticker format: KXMLBGAME-26APR30... or KXNBAGAME-26APR28BOSNY-BOS
+    
+    We allow tomorrow's date because Kalshi encodes game dates in UTC, and
+    evening US games (7-10 PM PT) often fall on the next UTC date.
+    e.g. April 30 PT evening game = May 1 UTC = KXNBAGAME-26MAY01...
     """
     try:
         import re as _re
-        today_pt = datetime.datetime.now(tz=_PACIFIC).date()
+        now_pt = datetime.datetime.now(tz=_PACIFIC)
+        today_pt = now_pt.date()
+        tomorrow_pt = (now_pt + datetime.timedelta(days=1)).date()
         m = _re.search(r'-(\d{2})([A-Z]{3})(\d{2})', ticker.upper())
         if not m:
-            return True  # can't parse — allow through, let close_time filter handle it
+            return True  # can't parse — allow through
         year_short, mon_str, day = m.group(1), m.group(2), m.group(3)
         game_date = datetime.datetime.strptime(f'20{year_short} {mon_str} {day}', '%Y %b %d').date()
-        return game_date == today_pt
+        return game_date in (today_pt, tomorrow_pt)
     except Exception:
         return True  # parse error — allow through
 
