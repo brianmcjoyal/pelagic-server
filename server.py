@@ -66,11 +66,12 @@ else:
 # Bot version — tags every trade so we can separate old vs new performance
 BOT_VERSION = "v3.0-quant"  # v1=yolo, v2=disciplined, v3=quant engine
 BOT_VERSION_DATE = "2026-03-15"
+V2_LAUNCH_DATE = "2026-04-27"  # Only count paper trades from this date onwards
 
 # Bot configuration and state
 # ---------------------------------------------------------------------------
 BOT_CONFIG = {
-    "enabled": True,  # default ON — safety floor will auto-disable if needed
+    "enabled": False,  # MANUALLY PAUSED — re-enable via /config API once ESPN matching bug is fixed
     "max_bet_usd": 5.0,           # REDUCED — $5 max until live win rate proven
     "max_daily_usd": 25.0,         # REDUCED — max $25/day
     "max_daily_trades": 3,         # max 3 live trades/day
@@ -82,7 +83,7 @@ BOT_CONFIG = {
     "min_volume": 50,             # include smaller markets
     "scan_interval_seconds": 45,  # faster scanning during game hours
     "max_category_exposure": 3,   # max 3 positions per category — diversified
-    "blocked_categories": ["weather", "golf", "politics", "economics", "nfl", "other", "tech", "mma", "ufc", "entertainment", "crypto", "finance"],  # NHL/NBA unblocked
+    "blocked_categories": ["weather", "golf", "politics", "economics", "nfl", "other", "tech", "mma", "ufc", "entertainment", "crypto", "finance"],  # block everything without live-game ESPN edge
     "blocked_keywords": ["title holder", "title on dec", "prime minister", "next president", "ipo first", "gas price", "billboard", "netflix", "spotify", "golf", "pga", "lpga", "masters", "election", "congress", "senate", "governor", "ufc", "mma", "bellator", "champion", "mvp", "award", "oscar", "grammy", "emmy", "win the", "series winner", "conference winner", "division winner", "playoff", "super bowl", "world series winner", "stanley cup winner", "finals winner"],  # block long-dated + non-game markets
     "moonshark_enabled": True,  # MoonShark longshot sniper toggle
     "sport_exposure_cap_pct": 0.40, # max 40% of daily budget on any single sport (NBA correlation, MLB night, etc.)
@@ -501,6 +502,214 @@ _PAPER_TRADES_LOCK = _threading.Lock()
 _SKIP_REASONS_LOCK = _threading.Lock()
 _LEARNING_STATE_LOCK = _threading.Lock()
 
+# ---------------------------------------------------------------------------
+# V2 LEARNING ENGINE — Closed-loop self-improvement from settled v2 trades
+# ---------------------------------------------------------------------------
+_V2_ANALYSIS = {
+    "last_run": None,
+    "insights": [],
+    "by_sport": {},
+    "by_vegas_gap": {},
+    "by_price_range": {},
+    "by_hour": {},
+    "optimal_min_gap": 0.08,   # starts at 8%, auto-tunes from data
+    "optimal_price_low": 40,   # starts at 40c, auto-tunes
+    "optimal_price_high": 70,  # starts at 70c, auto-tunes
+    "edge_decay_alert": False,
+    "rolling_wr_20": None,
+    "total_analyzed": 0,
+}
+_V2_ANALYSIS_LOCK = _threading.Lock()
+
+
+def _run_v2_analysis():
+    """Analyze all settled v2 trades and update thresholds. Runs after every settlement."""
+    import time as _t
+
+    with _PAPER_TRADES_LOCK:
+        v2_trades = [
+            t for t in _PAPER_TRADES
+            if t.get("signal_version") == "v2_vegas"
+            and (t.get("entry_time") or "") >= V2_LAUNCH_DATE
+        ]
+
+    settled = [t for t in v2_trades if t.get("result") in ("win", "loss")]
+    if not settled:
+        return
+
+    insights = []
+    total = len(settled)
+    wins = [t for t in settled if t.get("result") == "win"]
+    overall_wr = len(wins) / total if total > 0 else 0
+
+    # --- Rolling 20-trade win rate (edge decay detection) ---
+    recent_20 = settled[-20:]
+    recent_wins = sum(1 for t in recent_20 if t.get("result") == "win")
+    rolling_wr_20 = recent_wins / len(recent_20) if recent_20 else None
+
+    edge_decay_alert = False
+    if rolling_wr_20 is not None and len(recent_20) >= 10:
+        if rolling_wr_20 < 0.45:
+            edge_decay_alert = True
+            insights.append(f"⚠️ EDGE DECAY: Rolling 20-trade WR={rolling_wr_20:.0%} — consider tightening thresholds")
+        elif rolling_wr_20 > 0.60:
+            insights.append(f"🔥 HOT STREAK: Rolling 20-trade WR={rolling_wr_20:.0%} — edge strong, could loosen thresholds")
+
+    # --- By Vegas gap bucket ---
+    gap_buckets = {"<5pp": [], "5-10pp": [], "10-15pp": [], "15-20pp": [], ">20pp": []}
+    for t in settled:
+        vg = t.get("vegas_gap_pp")
+        if vg is None:
+            continue
+        if vg < 5:
+            gap_buckets["<5pp"].append(t)
+        elif vg < 10:
+            gap_buckets["5-10pp"].append(t)
+        elif vg < 15:
+            gap_buckets["10-15pp"].append(t)
+        elif vg < 20:
+            gap_buckets["15-20pp"].append(t)
+        else:
+            gap_buckets[">20pp"].append(t)
+
+    by_vegas_gap = {}
+    best_gap_bucket = None
+    best_gap_wr = 0
+    for bucket, trades in gap_buckets.items():
+        if len(trades) >= 3:
+            w = sum(1 for t in trades if t.get("result") == "win")
+            wr = w / len(trades)
+            by_vegas_gap[bucket] = {"total": len(trades), "wins": w, "win_rate": round(wr * 100, 1)}
+            if wr > best_gap_wr:
+                best_gap_wr = wr
+                best_gap_bucket = bucket
+
+    if best_gap_bucket and best_gap_wr > overall_wr + 0.05:
+        insights.append(f"📊 BEST EDGE: Vegas gap {best_gap_bucket} has {best_gap_wr:.0%} WR vs {overall_wr:.0%} overall")
+
+    # --- By price range ---
+    price_buckets = {"<35c": [], "35-50c": [], "50-65c": [], ">65c": []}
+    for t in settled:
+        p = t.get("entry_price") or 0
+        if p < 35:
+            price_buckets["<35c"].append(t)
+        elif p < 50:
+            price_buckets["35-50c"].append(t)
+        elif p < 65:
+            price_buckets["50-65c"].append(t)
+        else:
+            price_buckets[">65c"].append(t)
+
+    by_price_range = {}
+    for bucket, trades in price_buckets.items():
+        if len(trades) >= 3:
+            w = sum(1 for t in trades if t.get("result") == "win")
+            wr = w / len(trades)
+            by_price_range[bucket] = {"total": len(trades), "wins": w, "win_rate": round(wr * 100, 1)}
+
+    # --- By hour of day (Pacific) ---
+    by_hour = {}
+    for t in settled:
+        try:
+            entry = t.get("entry_time", "")
+            if entry:
+                hour = int(entry[11:13])
+                if hour not in by_hour:
+                    by_hour[hour] = {"total": 0, "wins": 0}
+                by_hour[hour]["total"] += 1
+                if t.get("result") == "win":
+                    by_hour[hour]["wins"] += 1
+        except Exception:
+            pass
+    for h in by_hour:
+        n = by_hour[h]["total"]
+        w = by_hour[h]["wins"]
+        by_hour[h]["win_rate"] = round(w / n * 100, 1) if n > 0 else 0
+
+    # --- By sport ---
+    by_sport = {}
+    for t in settled:
+        sport = t.get("sport") or "unknown"
+        # Try to infer sport from ticker if sport field empty
+        if sport == "unknown" or not sport:
+            ticker = t.get("ticker", "").upper()
+            if "NBAGAME" in ticker:
+                sport = "nba"
+            elif "MLBGAME" in ticker:
+                sport = "mlb"
+            elif "NHLGAME" in ticker:
+                sport = "nhl"
+            elif "NCAAMBGAME" in ticker:
+                sport = "ncaab"
+            elif "MLSGAME" in ticker:
+                sport = "mls"
+        if sport not in by_sport:
+            by_sport[sport] = {"total": 0, "wins": 0, "win_rate": 0}
+        by_sport[sport]["total"] += 1
+        if t.get("result") == "win":
+            by_sport[sport]["wins"] += 1
+    for s in by_sport:
+        n = by_sport[s]["total"]
+        w = by_sport[s]["wins"]
+        by_sport[s]["win_rate"] = round(w / n * 100, 1) if n > 0 else 0
+
+    # Sport insights
+    for sport, data in by_sport.items():
+        if data["total"] >= 5:
+            if data["win_rate"] < 40:
+                insights.append(f"📉 {sport.upper()}: {data['win_rate']}% WR ({data['total']} bets) — consider blocking")
+            elif data["win_rate"] > 60:
+                insights.append(f"🎯 {sport.upper()}: {data['win_rate']}% WR ({data['total']} bets) — strong edge here")
+
+    # --- Auto-tune optimal Vegas gap threshold ---
+    # Find the lowest gap bucket with WR > 52% and at least 5 trades
+    optimal_min_gap = 0.08  # default
+    for threshold_pp, bucket_key in [(5, "5-10pp"), (8, "5-10pp"), (10, "10-15pp"), (15, "15-20pp")]:
+        b = by_vegas_gap.get(bucket_key, {})
+        if b.get("total", 0) >= 5 and b.get("win_rate", 0) > 52:
+            optimal_min_gap = threshold_pp / 100
+            break
+
+    # --- Vegas verdict accuracy ---
+    better_trades = [t for t in settled if t.get("vegas_verdict") == "BETTER"]
+    agrees_trades = [t for t in settled if t.get("vegas_verdict") == "AGREES"]
+    worse_trades  = [t for t in settled if t.get("vegas_verdict") == "WORSE"]
+
+    if len(better_trades) >= 3:
+        bwr = sum(1 for t in better_trades if t.get("result") == "win") / len(better_trades)
+        insights.append(f"Vegas BETTER: {bwr:.0%} WR ({len(better_trades)} bets)")
+    if len(agrees_trades) >= 3:
+        awr = sum(1 for t in agrees_trades if t.get("result") == "win") / len(agrees_trades)
+        insights.append(f"Vegas AGREES: {awr:.0%} WR ({len(agrees_trades)} bets)")
+    if len(worse_trades) >= 3:
+        wwr = sum(1 for t in worse_trades if t.get("result") == "win") / len(worse_trades)
+        insights.append(f"Vegas WORSE: {wwr:.0%} WR ({len(worse_trades)} bets) — stop taking these")
+        if wwr < 0.40:
+            insights.append("🚫 ACTION: Blocking Vegas WORSE trades — data shows no edge there")
+
+    # --- Minimum sample warning ---
+    if total < 20:
+        insights.append(f"📊 Only {total} settled trades — thresholds not yet auto-tuning (need 20+)")
+    elif total < 50:
+        insights.append(f"📊 {total}/50 settled trades — preliminary patterns emerging, watching closely")
+    else:
+        insights.append(f"✅ {total} settled trades — sufficient data for reliable auto-tuning")
+
+    # --- Write results ---
+    with _V2_ANALYSIS_LOCK:
+        _V2_ANALYSIS["last_run"] = datetime.datetime.now(tz=_PACIFIC).isoformat()
+        _V2_ANALYSIS["insights"] = insights[-20:]
+        _V2_ANALYSIS["by_sport"] = by_sport
+        _V2_ANALYSIS["by_vegas_gap"] = by_vegas_gap
+        _V2_ANALYSIS["by_price_range"] = by_price_range
+        _V2_ANALYSIS["by_hour"] = {str(k): v for k, v in by_hour.items()}
+        _V2_ANALYSIS["optimal_min_gap"] = optimal_min_gap
+        _V2_ANALYSIS["edge_decay_alert"] = edge_decay_alert
+        _V2_ANALYSIS["rolling_wr_20"] = round(rolling_wr_20 * 100, 1) if rolling_wr_20 is not None else None
+        _V2_ANALYSIS["total_analyzed"] = total
+
+    _log_activity(f"🧠 V2 ENGINE: Analyzed {total} settled trades. Rolling WR: {rolling_wr_20:.0%}" if rolling_wr_20 else f"🧠 V2 ENGINE: Analyzed {total} settled trades.", "info")
+
 # Paper trading — declared early so _load_state() can restore them
 _PAPER_TRADES = []       # list of paper trade dicts
 _PAPER_TRADES_MAX = 5000  # keep 30+ days of paper trades for edge analysis
@@ -790,7 +999,7 @@ def _load_state():
         # The old kill switch would leave the bot offline for hours/days with no
         # way to re-enable without the API secret. Better to start fresh each
         # deploy and let the circuit breaker do its job intraday.
-        BOT_CONFIG["enabled"] = True
+        # BOT_CONFIG["enabled"] = True  # PAUSED — do not auto-enable
         BOT_STATE["auto_trade"] = True
         print(f"[STATE] ✅ Bot ENABLED on startup (drawdown breaker provides intraday protection)")
 
@@ -816,8 +1025,8 @@ def _load_state():
 
     # FINAL FORCE ENABLE — no matter what happened above, bot starts enabled.
     # Drawdown circuit breaker provides all needed risk protection.
-    BOT_CONFIG["enabled"] = True
-    BOT_STATE["auto_trade"] = True
+    # BOT_CONFIG["enabled"] = True  # PAUSED — do not auto-enable
+    # BOT_STATE["auto_trade"] = True  # PAUSED — do not auto-enable
     print(f"[STATE] ✅ FINAL: bot_enabled={BOT_CONFIG['enabled']}")
 
 def _hydrate_from_kalshi():
@@ -4809,6 +5018,15 @@ def live_game_snipe():
                 # Close time check — skip for series-scanned markets (Kalshi sets
                 # close_time to series end, not individual game time)
                 close_time_str = mkt.get("close_time", "")
+                # SAME-DAY ONLY: skip markets for future games.
+                # Series-scanned markets use ticker date; others use close_time.
+                if "series_ticker" in source_params:
+                    if not _is_same_day_ticker(ticker):
+                        _ms_reasons["not_today"] = _ms_reasons.get("not_today", 0) + 1
+                        continue
+                elif close_time_str and not _is_same_day_market(close_time_str):
+                    _ms_reasons["not_today"] = _ms_reasons.get("not_today", 0) + 1
+                    continue
                 if "series_ticker" not in source_params:
                     if close_time_str:
                         try:
@@ -4962,6 +5180,32 @@ def live_game_snipe():
                     conviction -= 1
                     _log_activity(
                         f"SNIPE ESPN CHECK: {ticker} — ESPN win prob unavailable, conviction reduced to {conviction}",
+                        "info"
+                    )
+
+                # VEGAS CONSENSUS — PRIMARY EDGE SIGNAL (ticker-based, no ESPN matching needed)
+                # Uses The Odds API directly from ticker; bypasses broken ESPN game ID matching.
+                _vegas_prob, _vegas_edge, _vegas_league = _get_vegas_edge(ticker, title, implied_prob_snipe, side)
+                if _vegas_prob is not None:
+                    _log_activity(
+                        f"SNIPE VEGAS: {ticker} — Vegas={_vegas_prob:.1%} (side={side}) vs Kalshi={implied_prob_snipe:.0%} edge={_vegas_edge:+.1%}",
+                        "info"
+                    )
+                    if _vegas_edge < -0.05:
+                        _log_activity(
+                            f"SNIPE SKIP: {ticker} — Vegas overpriced by {abs(_vegas_edge):.1%}",
+                            "info"
+                        )
+                        _ms_reasons["vegas_overpriced"] = _ms_reasons.get("vegas_overpriced", 0) + 1
+                        continue
+                    if _vegas_edge >= 0.05:
+                        conviction += 3
+                        _snipe_our_prob = _vegas_prob  # Vegas becomes primary signal
+                    elif _vegas_edge >= 0.02:
+                        conviction += 1
+                else:
+                    _log_activity(
+                        f"SNIPE VEGAS: {ticker} — Vegas unavailable, relying on ESPN/sportsbook signal",
                         "info"
                     )
 
@@ -5226,6 +5470,7 @@ def live_game_snipe():
                             "conviction": conviction,
                             "win_probability": round(_snipe_our_prob, 4) if _snipe_our_prob else None,
                             "espn_edge": round(_snipe_our_prob - implied_prob_snipe, 4) if _snipe_our_prob else None,
+                            "vegas_gap_pp": round(_vegas_edge * 100, 1) if _vegas_prob is not None else None,
                             "order_id": _snipe_order_id,
                         })
                         # Track in trade journal for pattern analysis (pass orderbook if available)
@@ -6746,9 +6991,9 @@ def floor_quota_snipe():
 
     Uses relaxed filters to guarantee a minimum level of activity. Every bet
     feeds the trade journal so the learning engine has constant fresh data.
+    Runs in paper-only mode when bot is disabled (for edge validation).
     """
-    if not BOT_CONFIG.get("enabled"):
-        return []
+    _paper_only = not BOT_CONFIG.get("enabled")  # paper mode when paused
     # Only run when we're actually short
     if not _floor_mode_active():
         return []
@@ -6879,6 +7124,16 @@ def floor_quota_snipe():
             if _ask_size < 20:
                 continue
 
+            close_time_str = mkt.get("close_time", "") or ""
+            # SAME-DAY ONLY: skip floor bets on future games.
+            # When scanning by series_ticker, Kalshi sets close_time to series end
+            # (not game day), so we parse the date from the ticker directly.
+            if "series_ticker" in source_params:
+                if not _is_same_day_ticker(ticker):
+                    continue
+            elif close_time_str and not _is_same_day_market(close_time_str):
+                continue
+
             # Parse prices
             yes_ask = None
             no_ask = None
@@ -6892,52 +7147,31 @@ def floor_quota_snipe():
             except Exception:
                 continue
 
-            # ESPN validation — league-aware lookup so Kalshi team codes that
-            # differ from ESPN (WAS vs WSH, GSW vs GS, etc.) still resolve, and
-            # so shared codes across sports (CHI: Bulls vs Fire) don't collide.
-            _game, _espn_team = _find_espn_game_for_kalshi_ticker(ticker, title)
-
-            _espn_prob = None
-            if _game and _game.get("event_id"):
-                try:
-                    _is_home = _game.get("home_abbrev", "").upper() == _espn_team
-                    _espn_prob = _get_espn_win_prob(
-                        _game["event_id"],
-                        (_game.get("league") or "").lower(),
-                        home_team=_is_home,
-                    )
-                except Exception:
-                    pass
-            # Fall back to moneyline implied probability from ESPN odds feed
-            if _espn_prob is None and _game and _game.get("odds"):
-                _odds = _game["odds"]
-                if _game.get("home_abbrev", "").upper() == _espn_team:
-                    _espn_prob = _odds.get("home_implied") or None
-                elif _game.get("away_abbrev", "").upper() == _espn_team:
-                    _espn_prob = _odds.get("away_implied") or None
-
-            if _espn_prob is None or _espn_prob <= 0:
-                continue  # no ESPN signal → no bet
-
-            # MUST be LIVE — no pre-game or finished game bets
-            if not _game or _game.get("state") != "in":
-                continue
-
-            # Pick the side with the best edge
+            # KALSHI-FIRST: use Vegas odds directly — no ESPN dependency.
+            # Try each side, pick the one with the best Vegas edge.
             best = None
             for side_name, ask in (("yes", yes_ask), ("no", no_ask)):
                 if ask is None or ask < FLOOR_MIN_PRICE or ask > FLOOR_MAX_PRICE:
                     continue
                 implied = ask / 100.0
-                # For NO side, our target probability is 1 - _espn_prob
-                our_prob = _espn_prob if side_name == "yes" else (1 - _espn_prob)
-                edge = our_prob - implied
-                if edge < FLOOR_MIN_EDGE:
-                    continue
-                if best is None or edge > best["edge"]:
-                    best = {"side": side_name, "price": ask, "edge": edge, "our_prob": our_prob}
+                _vp, _ve, _vl = _get_vegas_edge(ticker, title, implied, side_name)
+                if _vp is None:
+                    continue  # no Vegas data for this side
+                if _ve < FLOOR_MIN_EDGE:
+                    continue  # gap too small
+                if _ve < -0.03:
+                    continue  # Vegas disagrees
+                if best is None or _ve > best["edge"]:
+                    best = {
+                        "side": side_name,
+                        "price": ask,
+                        "edge": _ve,
+                        "our_prob": _vp,
+                        "vegas_gap_pp": round(_ve * 100, 1),
+                    }
 
             if not best:
+                _log_activity(f"FLOOR SKIP: {ticker} — no Vegas edge found", "info")
                 continue
 
             candidates.append({
@@ -6948,7 +7182,8 @@ def floor_quota_snipe():
                 "price": best["price"],
                 "edge": best["edge"],
                 "our_prob": best["our_prob"],
-                "game": _game,
+                "vegas_gap_pp": best.get("vegas_gap_pp"),
+                "game": None,
                 "mcat": mcat,
                 "close_time": mkt.get("close_time", "") if isinstance(mkt, dict) else "",
             })
@@ -7018,6 +7253,9 @@ def floor_quota_snipe():
             _log_paper_trade(ticker, title, side, price, cand.get("our_prob", 0), edge, edge * 100, strategy="floor")
         except Exception:
             pass
+        if _paper_only:
+            placed.append({"ticker": ticker, "side": side, "price": price, "paper": True})
+            continue
         result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob,
                                    win_prob=cand.get("our_prob"), edge=edge, strategy="floor")
         if "error" in result:
@@ -9803,6 +10041,11 @@ def _paper_trade_update():
                     print(f"[PAPER] Sweep check error for {ticker}: {_swe}")
     except Exception as e:
         print(f"[PAPER] Update error: {e}")
+    # Run v2 learning engine analysis whenever trades settle
+    try:
+        _run_v2_analysis()
+    except Exception as _ae:
+        pass
 
 
 _GAME_TICKER_LEAGUE_MAP = {
@@ -9918,6 +10161,7 @@ def _log_paper_trade(ticker, title, side, price, win_prob, edge, ev_cents, strat
         "clv_final": None,
         "result": None,
         "pnl_cents": None,
+        "signal_version": "v2_vegas",
     }
 
     with _PAPER_TRADES_LOCK:
@@ -10337,7 +10581,7 @@ def _watchdog_check():
         _today_str_re = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
         _last_disable_date = BOT_STATE.get("_auto_disable_date")
         if not BOT_CONFIG.get("enabled") and _last_disable_date and _last_disable_date != _today_str_re:
-            BOT_CONFIG["enabled"] = True
+            # BOT_CONFIG["enabled"] = True  # PAUSED — do not auto-enable
             BOT_STATE["auto_trade"] = True
             BOT_STATE.pop("_auto_disable_date", None)
             alerts.append(f"✅ AUTO-RE-ENABLED: new trading day — bot restarted after previous auto-pause")
@@ -12749,11 +12993,10 @@ def _background_loop():
         if len(_PERF_HISTORY) < 2:
             _selftest_warnings.append(f"Perf history only has {len(_PERF_HISTORY)} points — chart will be sparse")
 
-        # 6. Bot must be enabled
+        # 6. Bot enabled check — skipped during manual pause
+        # PAUSED: do not force-enable, bot is intentionally paused for edge validation
         if not BOT_CONFIG.get("enabled") or not BOT_STATE.get("auto_trade"):
-            _selftest_warnings.append("Bot is DISABLED after startup — forcing enable")
-            BOT_CONFIG["enabled"] = True
-            BOT_STATE["auto_trade"] = True
+            _selftest_warnings.append("Bot is PAUSED — paper trading only (intentional, skip force-enable)")
 
         # 7. Settled cache should be warm
         if not _SETTLED_CACHE.get("data"):
@@ -13248,6 +13491,12 @@ def _ensure_bg_thread():
                         _watchdog_check()
                     except Exception as _wde:
                         print(f"[WATCHDOG] Error: {_wde}")
+                    # V2 learning engine — every 3 cycles (~30 min)
+                    if _learn_cycle % 3 == 0:
+                        try:
+                            _run_v2_analysis()
+                        except Exception:
+                            pass
                     # Heartbeat log every 20 cycles (~1 hr)
                     if _learn_cycle % 20 == 0:
                         with _LEARNING_STATE_LOCK:
@@ -19517,6 +19766,90 @@ def _get_consensus_odds(team_abbrev, league):
     return None
 
 
+def _get_vegas_edge(ticker, title, kalshi_implied_prob, side="yes"):
+    """Get edge vs Vegas consensus for a Kalshi game market.
+
+    Returns (vegas_prob, edge, league) or (None, None, None) if unavailable.
+
+    ticker format: KXNBAGAME-26APR28BOSNY-BOS  (team abbrev after last dash)
+    side: "yes" means we are betting on the team after the last dash
+    """
+    try:
+        parts = ticker.upper().split("-")
+        if len(parts) < 3:
+            return None, None, None
+
+        series = parts[0]  # e.g. KXMLBGAME
+        our_team = parts[-1]  # e.g. BOS
+
+        league = None
+        if "MLBGAME" in series:
+            league = "mlb"
+        elif "MLSGAME" in series:
+            league = "mls"
+        elif "NBAGAME" in series:
+            league = "nba"
+        elif "NHLGAME" in series:
+            league = "nhl"
+        elif "NCAAMBGAME" in series or "NCAAWBGAME" in series:
+            league = "ncaab"
+        elif "KBLGAME" in series:
+            league = "kbo"
+        elif "EPLGAME" in series:
+            league = "epl"
+        else:
+            return None, None, None
+
+        vegas_prob = _get_consensus_odds(our_team, league.upper())
+        if vegas_prob is None:
+            return None, None, league
+
+        if side == "no":
+            vegas_prob = 1.0 - vegas_prob
+
+        edge = vegas_prob - kalshi_implied_prob
+        return vegas_prob, edge, league
+    except Exception:
+        return None, None, None
+
+
+def _is_same_day_market(close_time_str):
+    """Return True if this market closes today (Pacific time)."""
+    try:
+        today_pt = datetime.datetime.now(tz=_PACIFIC).date()
+        if not close_time_str:
+            return False
+        ct = datetime.datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
+        ct_pt = ct.astimezone(_PACIFIC).date()
+        return ct_pt == today_pt
+    except Exception:
+        return False
+
+
+def _is_same_day_ticker(ticker):
+    """Return True if ticker encodes today's or tomorrow's date (Pacific time).
+    Handles series-scanned markets where close_time = end of season, not game day.
+    Ticker format: KXMLBGAME-26APR30... or KXNBAGAME-26APR28BOSNY-BOS
+    
+    We allow tomorrow's date because Kalshi encodes game dates in UTC, and
+    evening US games (7-10 PM PT) often fall on the next UTC date.
+    e.g. April 30 PT evening game = May 1 UTC = KXNBAGAME-26MAY01...
+    """
+    try:
+        import re as _re
+        now_pt = datetime.datetime.now(tz=_PACIFIC)
+        today_pt = now_pt.date()
+        tomorrow_pt = (now_pt + datetime.timedelta(days=1)).date()
+        m = _re.search(r'-(\d{2})([A-Z]{3})(\d{2})', ticker.upper())
+        if not m:
+            return True  # can't parse — allow through
+        year_short, mon_str, day = m.group(1), m.group(2), m.group(3)
+        game_date = datetime.datetime.strptime(f'20{year_short} {mon_str} {day}', '%Y %b %d').date()
+        return game_date in (today_pt, tomorrow_pt)
+    except Exception:
+        return True  # parse error — allow through
+
+
 def _parse_clock_to_seconds(clock_str, sport="nba"):
     """Convert ESPN clock string to seconds remaining in the game."""
     if not clock_str:
@@ -22828,6 +23161,118 @@ def paper_trades_api():
         return jsonify({"error": str(e), "total": 0})
 
 
+@app.route("/v2-engine")
+def v2_engine():
+    """V2 learning engine analysis — trends, insights, auto-tuned thresholds."""
+    try:
+        with _V2_ANALYSIS_LOCK:
+            data = dict(_V2_ANALYSIS)
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+@app.route("/paper-trades-v2-purge", methods=["POST"])
+def paper_trades_v2_purge():
+    """Remove stale pending v2 paper trades for games not happening today."""
+    try:
+        today_pt = datetime.datetime.now(tz=_PACIFIC).date()
+        removed = []
+        kept = []
+        with _PAPER_TRADES_LOCK:
+            for t in _PAPER_TRADES:
+                # Only touch v2 pending trades
+                if t.get("signal_version") != "v2_vegas" or t.get("result") in ("win", "loss", "expired"):
+                    kept.append(t)
+                    continue
+                # Check if ticker date is today
+                ticker = t.get("ticker", "")
+                if _is_same_day_ticker(ticker):
+                    kept.append(t)
+                else:
+                    removed.append(ticker)
+            _PAPER_TRADES[:] = kept
+        _log_activity(f"🧹 Purged {len(removed)} stale pending v2 paper trades for non-today games", "info")
+        return jsonify({"removed": len(removed), "removed_tickers": removed[:20], "kept": len(kept)})
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+@app.route("/paper-trades-v2")
+def paper_trades_v2_api():
+    """Return paper trading stats for v2_vegas signal only (post-Vegas-primary deploy)."""
+    try:
+        with _PAPER_TRADES_LOCK:
+            v2_trades = [
+                t for t in _PAPER_TRADES
+                if t.get("signal_version") == "v2_vegas"
+                and (t.get("entry_time") or "") >= V2_LAUNCH_DATE
+            ]
+
+        settled = [t for t in v2_trades if t.get("result") in ("win", "loss")]
+        pending = [t for t in v2_trades if not t.get("result") or t.get("result") not in ("win", "loss", "expired")]
+        wins = [t for t in settled if t.get("result") == "win"]
+        losses = [t for t in settled if t.get("result") == "loss"]
+        win_rate = round(len(wins) / len(settled) * 100, 1) if settled else 0
+        total_pnl = sum(t.get("pnl_cents", 0) or 0 for t in settled)
+
+        clv5 = [t["clv_5min"] for t in v2_trades if t.get("clv_5min") is not None]
+        clv15 = [t["clv_15min"] for t in v2_trades if t.get("clv_15min") is not None]
+        clv5_avg = round(sum(clv5) / len(clv5), 2) if clv5 else None
+        clv15_avg = round(sum(clv15) / len(clv15), 2) if clv15 else None
+
+        by_strategy = {}
+        for t in v2_trades:
+            s = t.get("strategy", "unknown")
+            if s not in by_strategy:
+                by_strategy[s] = {"total": 0, "wins": 0, "losses": 0, "pending": 0, "pnl_cents": 0, "win_rate": 0}
+            by_strategy[s]["total"] += 1
+            r = t.get("result")
+            if r == "win":
+                by_strategy[s]["wins"] += 1
+                by_strategy[s]["pnl_cents"] += t.get("pnl_cents", 0) or 0
+            elif r == "loss":
+                by_strategy[s]["losses"] += 1
+                by_strategy[s]["pnl_cents"] += t.get("pnl_cents", 0) or 0
+            else:
+                by_strategy[s]["pending"] += 1
+        for s in by_strategy:
+            n = by_strategy[s]["wins"] + by_strategy[s]["losses"]
+            by_strategy[s]["win_rate"] = round(by_strategy[s]["wins"] / n * 100, 1) if n > 0 else 0
+
+        def _wr(lst):
+            w = sum(1 for t in lst if t.get("result") == "win")
+            return round(w / len(lst) * 100, 1) if lst else None
+
+        vegas_better = [t for t in settled if t.get("vegas_verdict") == "BETTER"]
+        vegas_worse  = [t for t in settled if t.get("vegas_verdict") == "WORSE"]
+        vegas_agrees = [t for t in settled if t.get("vegas_verdict") == "AGREES"]
+
+        return jsonify({
+            "signal_version": "v2_vegas",
+            "total": len(v2_trades),
+            "settled": len(settled),
+            "pending": len(pending),
+            "wins": len(wins),
+            "losses": len(losses),
+            "win_rate": win_rate,
+            "total_pnl_cents": round(total_pnl, 1),
+            "clv_5min_avg": clv5_avg,
+            "clv_5min_count": len(clv5),
+            "clv_15min_avg": clv15_avg,
+            "clv_15min_count": len(clv15),
+            "by_strategy": by_strategy,
+            "vegas_accuracy": {
+                "better_wr": _wr(vegas_better), "better_n": len(vegas_better),
+                "worse_wr":  _wr(vegas_worse),  "worse_n":  len(vegas_worse),
+                "agrees_wr": _wr(vegas_agrees),  "agrees_n": len(vegas_agrees),
+            },
+            "trades": list(reversed(v2_trades[-200:])),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "total": 0})
+
+
 @app.route("/")
 def dashboard():
     return DASHBOARD_HTML
@@ -23261,6 +23706,10 @@ a:hover { color: #7da5f5; }
       <path d="M28 40l-4 10l6-8l5 12l4-11l6 8l-2-11" fill="url(#sharkFin)" stroke="#3d2510" stroke-width="0.3" opacity="0.85"/>
     </svg>
     <h1><span>Trade</span><span style="background:linear-gradient(135deg,#c9963a,#dab060,#8b5e28,#c9963a);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text">Shark</span></h1>
+    <div id="hdr-bot-badge" style="display:none;align-items:center;gap:5px;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:0.5px;margin-left:8px">
+      <div id="hdr-bot-dot" style="width:6px;height:6px;border-radius:50%"></div>
+      <span id="hdr-bot-label"></span>
+    </div>
     <div style="width:1px;height:28px;background:#333;margin-left:8px"></div>
     <!-- Header Stats: Daily + All-Time (inline with logo) -->
     <div style="display:flex;align-items:center;gap:16px;margin-left:4px">
@@ -23359,11 +23808,21 @@ a:hover { color: #7da5f5; }
   <button class="tab" onclick="switchTab('brain')" style="color:#00d4ff">&#129504; Brain</button>
   <button class="tab" onclick="switchTab('trends')" style="color:#e040fb">Trends</button>
   <button class="tab" onclick="switchTab('paper')" style="color:#00dc5a">&#128196; Paper <span id="paper-tab-count" style="background:#1a1a2e;color:#00d4ff;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:2px"></span></button>
+  <button class="tab" onclick="switchTab('paper2')" style="color:#00d4ff">&#9889; Edge Paper <span id="paper2-tab-count" style="background:#1a1a2e;color:#00dc5a;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:2px"></span></button>
+  <button class="tab" onclick="switchTab('engine')" style="color:#e040fb">&#129504; Engine</button>
   <!-- MoonShark tab removed -->
 </div>
 
 <!-- Positions Tab -->
 <div class="tab-content" id="tab-positions">
+  <!-- Bot Status Banner -->
+  <div id="bot-status-banner" style="border-radius:10px;padding:14px 18px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px">
+    <div style="display:flex;align-items:center;gap:10px">
+      <div id="bot-status-dot" style="width:10px;height:10px;border-radius:50%;flex-shrink:0"></div>
+      <span id="bot-status-text" style="font-weight:600;font-size:14px"></span>
+    </div>
+    <span id="bot-status-sub" style="color:#666;font-size:12px"></span>
+  </div>
   <!-- Live Feed + Bets Placed Today + Closing Soon -->
   <div id="dash-live-grid" style="display:grid;grid-template-columns:1fr 1.2fr 1fr;gap:12px;margin-bottom:16px;min-width:0">
     <div class="section" style="min-width:0;overflow:hidden">
@@ -23908,6 +24367,61 @@ a:hover { color: #7da5f5; }
   </div>
 </div>
 
+<div class="tab-content" id="tab-paper2" style="display:none">
+  <h2 style="color:#00d4ff;margin-bottom:4px">&#9889; Edge Paper &mdash; Vegas-Primary Signal (v2)</h2>
+  <p style="color:#666;font-size:12px;margin-bottom:16px">Only bets placed after Odds API became the primary edge signal. Clean data &mdash; no ESPN-era contamination.</p>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:18px">
+    <div class="metric-card"><div class="metric-label">Total Trades</div><div class="metric-value" id="p2-total">--</div></div>
+    <div class="metric-card"><div class="metric-label">Settled</div><div class="metric-value" id="p2-settled">--</div></div>
+    <div class="metric-card"><div class="metric-label">Win Rate</div><div class="metric-value" id="p2-wr" style="color:#00dc5a">--</div></div>
+    <div class="metric-card"><div class="metric-label">P&amp;L</div><div class="metric-value" id="p2-pnl">--</div></div>
+    <div class="metric-card"><div class="metric-label">CLV 5min</div><div class="metric-value" id="p2-clv5">--</div></div>
+    <div class="metric-card"><div class="metric-label">Pending</div><div class="metric-value" id="p2-pending">--</div></div>
+  </div>
+  <h3 style="color:#00d4ff;margin:16px 0 8px">Vegas Signal Accuracy</h3>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px">
+    <div class="metric-card"><div class="metric-label">Vegas BETTER wins</div><div class="metric-value" id="p2-va-better">--</div></div>
+    <div class="metric-card"><div class="metric-label">Vegas AGREES wins</div><div class="metric-value" id="p2-va-agrees">--</div></div>
+    <div class="metric-card"><div class="metric-label">Vegas WORSE wins</div><div class="metric-value" id="p2-va-worse">--</div></div>
+  </div>
+  <button onclick="loadPaper2()" style="background:#1a1a2e;color:#00d4ff;border:1px solid #00d4ff;padding:6px 14px;border-radius:6px;cursor:pointer;margin-bottom:12px">&#8635; Refresh</button>
+  <div id="p2-trades-list" style="color:#666;font-size:13px">Loading...</div>
+</div>
+
+<div class="tab-content" id="tab-engine" style="display:none">
+  <h2 style="color:#e040fb;margin-bottom:4px">&#129504; Learning Engine &mdash; v2 Signal Analysis</h2>
+  <p style="color:#666;font-size:12px;margin-bottom:20px">Self-improving. Updates automatically as trades settle. Needs 20+ settled trades for reliable patterns.</p>
+
+  <div id="eng-decay-alert" style="display:none;background:#1a0808;border:1px solid #3a1010;border-radius:10px;padding:14px 18px;margin-bottom:16px;color:#ff5555;font-weight:600"></div>
+
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:24px">
+    <div class="metric-card"><div class="metric-label">Trades Analyzed</div><div class="metric-value" id="eng-total">--</div></div>
+    <div class="metric-card"><div class="metric-label">Rolling 20 WR</div><div class="metric-value" id="eng-rolling" style="color:#00dc5a">--</div></div>
+    <div class="metric-card"><div class="metric-label">Optimal Gap</div><div class="metric-value" id="eng-gap">--</div></div>
+    <div class="metric-card"><div class="metric-label">Last Analysis</div><div class="metric-value" style="font-size:14px" id="eng-last">--</div></div>
+  </div>
+
+  <h3 style="color:#e040fb;margin-bottom:12px">&#128161; Insights</h3>
+  <div id="eng-insights" style="margin-bottom:24px"></div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px">
+    <div>
+      <h3 style="color:#ccc;margin-bottom:12px;font-size:14px">By Vegas Gap</h3>
+      <div id="eng-by-gap"></div>
+    </div>
+    <div>
+      <h3 style="color:#ccc;margin-bottom:12px;font-size:14px">By Sport</h3>
+      <div id="eng-by-sport"></div>
+    </div>
+  </div>
+
+  <h3 style="color:#ccc;margin-bottom:12px;font-size:14px">By Price Range</h3>
+  <div id="eng-by-price" style="margin-bottom:24px"></div>
+
+  <button onclick="loadEngine()" style="background:#1a1a2e;color:#e040fb;border:1px solid #e040fb;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px">&#8635; Refresh</button>
+  <span id="eng-status" style="color:#444;font-size:11px;margin-left:10px"></span>
+</div>
+
 </div><!-- end container -->
 
 <div class="toast-container" id="toast-container"></div>
@@ -23938,9 +24452,9 @@ function fmtTimeSec(ts) {
 }
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
-  document.querySelectorAll('.tab-content').forEach(function(t) { t.classList.remove('active'); });
+  document.querySelectorAll('.tab-content').forEach(function(t) { t.classList.remove('active'); t.style.display = ''; });
   var tabEl = document.getElementById('tab-' + name);
-  if (tabEl) tabEl.classList.add('active');
+  if (tabEl) { tabEl.classList.add('active'); tabEl.style.display = 'block'; }
   var tabs = document.querySelectorAll('.tab');
   tabs.forEach(function(t) { var oc = t.getAttribute('onclick'); if (oc && oc.indexOf(name) >= 0) t.classList.add('active'); });
   // Lazy-load tab data
@@ -23952,6 +24466,8 @@ function switchTab(name) {
   if (name === 'trends') { loadNewsFeed(); }
   if (name === 'brain') { loadBrain(); }
   if (name === 'paper') { loadPaperTrades(); }
+  if (name === 'paper2') { loadPaper2(); }
+  if (name === 'engine') { loadEngine(); }
   // Legacy support for hidden tabs
   if (name === 'activity') { loadActivity(); loadBetsFeed(); loadAllBets(); }
 }
@@ -24144,6 +24660,31 @@ async function loadStatus() {
     var atBtn = document.getElementById('auto-trade-btn');
     if (atBtn) atBtn.textContent = status.bot_enabled ? 'ON' : 'OFF';
     window._botEnabled = status.bot_enabled;
+    // Bot status banner + header badge
+    var bannerEl = document.getElementById('bot-status-banner');
+    var dotEl = document.getElementById('bot-status-dot');
+    var textEl = document.getElementById('bot-status-text');
+    var subEl = document.getElementById('bot-status-sub');
+    var hdrBadge = document.getElementById('hdr-bot-badge');
+    var hdrDot = document.getElementById('hdr-bot-dot');
+    var hdrLabel = document.getElementById('hdr-bot-label');
+    if (status.bot_enabled) {
+      if (bannerEl) { bannerEl.style.background = '#0d2b1a'; bannerEl.style.border = '1px solid #1a5c33'; }
+      if (dotEl) { dotEl.style.background = '#00dc5a'; dotEl.style.boxShadow = '0 0 8px #00dc5a'; dotEl.style.animation = 'pulse 2s infinite'; }
+      if (textEl) { textEl.style.color = '#00dc5a'; textEl.textContent = 'BOT ACTIVE — Scanning for edges'; }
+      if (subEl) subEl.textContent = 'Last scan: ' + (status.last_scan ? new Date(status.last_scan).toLocaleTimeString() : '--');
+      if (hdrBadge) { hdrBadge.style.display = 'flex'; hdrBadge.style.background = '#0d2b1a'; hdrBadge.style.border = '1px solid #00dc5a'; }
+      if (hdrDot) { hdrDot.style.background = '#00dc5a'; hdrDot.style.animation = 'pulse 2s infinite'; }
+      if (hdrLabel) { hdrLabel.style.color = '#00dc5a'; hdrLabel.textContent = 'LIVE'; }
+    } else {
+      if (bannerEl) { bannerEl.style.background = '#1a0808'; bannerEl.style.border = '1px solid #3a1010'; }
+      if (dotEl) { dotEl.style.background = '#ff3333'; dotEl.style.boxShadow = 'none'; dotEl.style.animation = 'none'; }
+      if (textEl) { textEl.style.color = '#ff5555'; textEl.textContent = '⏸ BOT PAUSED — Paper trading only'; }
+      if (subEl) subEl.textContent = 'Re-enable once edge is confirmed on v2 signals';
+      if (hdrBadge) { hdrBadge.style.display = 'flex'; hdrBadge.style.background = '#1a0808'; hdrBadge.style.border = '1px solid #ff3333'; }
+      if (hdrDot) { hdrDot.style.background = '#ff3333'; hdrDot.style.animation = 'none'; }
+      if (hdrLabel) { hdrLabel.style.color = '#ff5555'; hdrLabel.textContent = 'PAUSED'; }
+    }
   } catch(e) { console.error(e); }
 }
 
@@ -28112,6 +28653,137 @@ async function loadPaperTrades(force) {
   } catch(e) { console.log('[PAPER] Load error:', e); }
 }
 
+function loadPaper2() {
+  fetch('/paper-trades-v2')
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) { document.getElementById('p2-trades-list').textContent = 'Error: ' + d.error; return; }
+      document.getElementById('p2-total').textContent = d.total || 0;
+      document.getElementById('p2-settled').textContent = d.settled || 0;
+      const wr = d.win_rate;
+      const wrEl = document.getElementById('p2-wr');
+      wrEl.textContent = d.settled > 0 ? wr + '%' : '--';
+      wrEl.style.color = wr >= 55 ? '#00dc5a' : wr >= 45 ? '#ffb400' : '#ff3333';
+      const pnl = (d.total_pnl_cents || 0) / 100;
+      const pnlEl = document.getElementById('p2-pnl');
+      pnlEl.textContent = '$' + pnl.toFixed(2);
+      pnlEl.style.color = pnl >= 0 ? '#00dc5a' : '#ff3333';
+      document.getElementById('p2-clv5').textContent = d.clv_5min_avg != null ? (d.clv_5min_avg > 0 ? '+' : '') + d.clv_5min_avg + 'c' : '--';
+      document.getElementById('p2-pending').textContent = d.pending || 0;
+      document.getElementById('paper2-tab-count').textContent = d.total > 0 ? d.total : '';
+      const va = d.vegas_accuracy || {};
+      document.getElementById('p2-va-better').textContent = va.better_n > 0 ? va.better_wr + '% (' + va.better_n + ')' : 'No data yet';
+      document.getElementById('p2-va-agrees').textContent = va.agrees_n > 0 ? va.agrees_wr + '% (' + va.agrees_n + ')' : 'No data yet';
+      document.getElementById('p2-va-worse').textContent = va.worse_n > 0 ? va.worse_wr + '% (' + va.worse_n + ')' : 'No data yet';
+      const trades = d.trades || [];
+      if (!trades.length) {
+        document.getElementById('p2-trades-list').innerHTML = '<p style="color:#555">No v2 trades yet - waiting for first Vegas-signal bet.</p>';
+        return;
+      }
+      let html = '<table style="width:100%;border-collapse:collapse;font-size:12px"><tr style="color:#666"><th style="text-align:left;padding:4px">Time</th><th>Market</th><th>Side</th><th>Price</th><th>Vegas</th><th>Edge</th><th>CLV5</th><th>Result</th><th>P&L</th></tr>';
+      trades.slice(0, 100).forEach(t => {
+        const result = t.result || 'pending';
+        const rc = result === 'win' ? '#00dc5a' : result === 'loss' ? '#ff3333' : '#666';
+        const clv5 = t.clv_5min != null ? (t.clv_5min > 0 ? '+' : '') + t.clv_5min + 'c' : '--';
+        const pnlVal = t.pnl_cents != null ? '$' + (t.pnl_cents / 100).toFixed(2) : '--';
+        const pnlC = (t.pnl_cents || 0) >= 0 ? '#00dc5a' : '#ff3333';
+        const vg = t.vegas_gap_pp != null ? (t.vegas_gap_pp > 0 ? '+' : '') + t.vegas_gap_pp + 'pp' : '--';
+        const vv = t.vegas_verdict || '--';
+        const vvc = vv === 'BETTER' ? '#00dc5a' : vv === 'WORSE' ? '#ff3333' : '#888';
+        const timeStr = t.entry_time ? t.entry_time.slice(5,16).replace('T',' ') : '--';
+        html += '<tr style="border-bottom:1px solid #111"><td style="padding:4px;color:#888">' + timeStr + '</td><td style="padding:4px;color:#ccc;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (t.title || t.ticker) + '</td><td style="padding:4px;color:' + (t.side==='yes'?'#00dc5a':'#ff8c00') + '">' + (t.side||'').toUpperCase() + '</td><td style="padding:4px;color:#ccc">' + t.entry_price + 'c</td><td style="padding:4px;color:' + vvc + '">' + vv + '<br><span style="color:#555;font-size:10px">' + vg + '</span></td><td style="padding:4px;color:#ccc">' + (t.edge != null ? (t.edge*100).toFixed(1)+'%' : '--') + '</td><td style="padding:4px;color:' + ((t.clv_5min||0)>=0?'#00dc5a':'#ff3333') + '">' + clv5 + '</td><td style="padding:4px;color:' + rc + '">' + result + '</td><td style="padding:4px;color:' + pnlC + '">' + pnlVal + '</td></tr>';
+      });
+      html += '</table>';
+      document.getElementById('p2-trades-list').innerHTML = html;
+    })
+    .catch(e => { document.getElementById('p2-trades-list').textContent = 'Fetch error: ' + e; });
+}
+
+function loadEngine() {
+  document.getElementById('eng-status').textContent = 'Loading...';
+  fetch('/v2-engine')
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) { document.getElementById('eng-status').textContent = 'Error: ' + d.error; return; }
+      document.getElementById('eng-status').textContent = '';
+
+      document.getElementById('eng-total').textContent = d.total_analyzed || 0;
+
+      const rwr = d.rolling_wr_20;
+      const rwrEl = document.getElementById('eng-rolling');
+      rwrEl.textContent = rwr != null ? rwr + '%' : '--';
+      rwrEl.style.color = rwr == null ? '#555' : rwr >= 55 ? '#00dc5a' : rwr >= 45 ? '#ffb400' : '#ff3333';
+
+      document.getElementById('eng-gap').textContent = d.optimal_min_gap != null ? (d.optimal_min_gap * 100).toFixed(0) + 'pp' : '--';
+      document.getElementById('eng-last').textContent = d.last_run ? d.last_run.slice(11,16) + ' PT' : 'Never';
+
+      // Decay alert
+      const alertEl = document.getElementById('eng-decay-alert');
+      if (d.edge_decay_alert) {
+        alertEl.style.display = 'block';
+        alertEl.textContent = '⚠️ EDGE DECAY DETECTED — Rolling 20-trade win rate below 45%. Consider pausing real money until edge recovers.';
+      } else {
+        alertEl.style.display = 'none';
+      }
+
+      // Insights
+      const insights = d.insights || [];
+      if (!insights.length) {
+        document.getElementById('eng-insights').innerHTML = '<p style="color:#444;font-size:13px">No insights yet — need more settled trades.</p>';
+      } else {
+        document.getElementById('eng-insights').innerHTML = insights.map(i => {
+          const color = i.startsWith('⚠️') || i.startsWith('🙇') ? '#ff5555' : i.startsWith('🔥') || i.startsWith('✅') || i.startsWith('🎯') ? '#00dc5a' : '#888';
+          return '<div style="padding:8px 12px;margin-bottom:6px;background:#0d0d0f;border-left:3px solid ' + color + ';border-radius:4px;font-size:13px;color:' + color + '">' + i + '</div>';
+        }).join('');
+      }
+
+      // By gap
+      const byGap = d.by_vegas_gap || {};
+      const gapKeys = Object.keys(byGap);
+      if (!gapKeys.length) {
+        document.getElementById('eng-by-gap').innerHTML = '<p style="color:#333;font-size:12px">Need 3+ trades per bucket</p>';
+      } else {
+        document.getElementById('eng-by-gap').innerHTML = gapKeys.map(k => {
+          const b = byGap[k];
+          const wr = b.win_rate;
+          const c = wr >= 55 ? '#00dc5a' : wr >= 45 ? '#ffb400' : '#ff3333';
+          const barW = Math.min(wr, 100);
+          return '<div style="margin-bottom:10px"><div style="display:flex;justify-content:space-between;margin-bottom:3px"><span style="color:#888;font-size:12px">' + k + '</span><span style="color:' + c + ';font-size:12px;font-weight:700">' + wr + '% (' + b.total + ')</span></div><div style="background:#111;border-radius:4px;height:5px"><div style="background:' + c + ';width:' + barW + '%;height:100%;border-radius:4px"></div></div></div>';
+        }).join('');
+      }
+
+      // By sport
+      const bySport = d.by_sport || {};
+      const sportKeys = Object.keys(bySport);
+      if (!sportKeys.length) {
+        document.getElementById('eng-by-sport').innerHTML = '<p style="color:#333;font-size:12px">No sport data yet</p>';
+      } else {
+        document.getElementById('eng-by-sport').innerHTML = sportKeys.map(k => {
+          const b = bySport[k];
+          const wr = b.win_rate;
+          const c = wr >= 55 ? '#00dc5a' : wr >= 45 ? '#ffb400' : '#ff3333';
+          const barW = Math.min(wr, 100);
+          return '<div style="margin-bottom:10px"><div style="display:flex;justify-content:space-between;margin-bottom:3px"><span style="color:#888;font-size:12px">' + k.toUpperCase() + '</span><span style="color:' + c + ';font-size:12px;font-weight:700">' + wr + '% (' + b.total + ')</span></div><div style="background:#111;border-radius:4px;height:5px"><div style="background:' + c + ';width:' + barW + '%;height:100%;border-radius:4px"></div></div></div>';
+        }).join('');
+      }
+
+      // By price
+      const byPrice = d.by_price_range || {};
+      const priceKeys = Object.keys(byPrice);
+      if (!priceKeys.length) {
+        document.getElementById('eng-by-price').innerHTML = '<p style="color:#333;font-size:12px">Need 3+ trades per bucket</p>';
+      } else {
+        document.getElementById('eng-by-price').innerHTML = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px">' + priceKeys.map(k => {
+          const b = byPrice[k];
+          const wr = b.win_rate;
+          const c = wr >= 55 ? '#00dc5a' : wr >= 45 ? '#ffb400' : '#ff3333';
+          return '<div style="background:#0d0d0f;border:1px solid #161618;border-radius:10px;padding:12px;text-align:center"><div style="color:#555;font-size:10px;text-transform:uppercase;margin-bottom:6px">' + k + '</div><div style="font-size:20px;font-weight:700;color:' + c + '">' + wr + '%</div><div style="color:#333;font-size:11px">' + b.total + ' bets</div></div>';
+        }).join('') + '</div>';
+      }
+    })
+    .catch(e => { document.getElementById('eng-status').textContent = 'Error: ' + e; });
+}
+
 // --- Trends Tab ---
 // === GLOBAL NEWS FEED ===
 async function loadNewsFeed(forceRefresh) {
@@ -28774,7 +29446,8 @@ setInterval(loadHealthBanner, 30000);
 // FAST (10s): live status, activity feed, today's bets — changes frequently
 setInterval(() => { loadStatus(); loadActivity(); loadBetsFeed(); loadPortfolio(); }, 10000);
 // MEDIUM (30s): positions, trades, closing soon — changes with market activity
-setInterval(() => { loadPositions(); loadTrades(); loadClosingSoon(); loadTopPicks(); loadTodayPicks(); checkNotifications(); loadDailyHighlights(); loadPaperTrades(); }, 30000);
+setInterval(() => { loadPositions(); loadTrades(); loadClosingSoon(); loadTopPicks(); loadTodayPicks(); checkNotifications(); loadDailyHighlights(); loadPaperTrades(); loadPaper2(); }, 30000);
+setInterval(loadEngine, 30000);
 // SLOW (60s): settled stats, perf history, analytics — expensive + rarely changes
 setInterval(() => { loadSettled(); loadPerfHistory(); loadPerformance(); loadTicker(); loadSeventyFivers(); loadQuantPicks(); }, 60000);
 
@@ -29146,6 +29819,413 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
+
+SIGNALS_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TradeShark Signals</title>
+<meta name="description" content="Real-time prediction market signals. Vegas vs Kalshi edge detection.">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #08080a; color: #f0f0f0; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', sans-serif; min-height: 100vh; }
+
+/* Header */
+.header { padding: 20px 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #111; }
+.logo { display: flex; align-items: center; gap: 10px; }
+.logo-text { font-size: 20px; font-weight: 800; letter-spacing: -0.5px; }
+.logo-text span { color: #00dc5a; }
+.logo-badge { background: #0d2b1a; color: #00dc5a; border: 1px solid #1a5c33; padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; letter-spacing: 0.5px; display: flex; align-items: center; gap: 5px; }
+.live-dot { width: 6px; height: 6px; background: #00dc5a; border-radius: 50%; animation: pulse 2s infinite; }
+@keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.5;transform:scale(0.8)} }
+
+/* Hero stats */
+.hero { max-width: 960px; margin: 0 auto; padding: 48px 20px 32px; }
+.hero-label { color: #444; font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 16px; font-weight: 600; }
+.record-display { display: flex; align-items: baseline; gap: 16px; margin-bottom: 8px; flex-wrap: wrap; }
+.record-big { font-size: 64px; font-weight: 800; letter-spacing: -3px; line-height: 1; }
+.record-big.green { color: #00dc5a; }
+.record-big.red { color: #ff4444; }
+.record-big.gray { color: #333; }
+.record-sep { font-size: 40px; color: #222; font-weight: 300; }
+.win-rate-pill { background: #0d2b1a; color: #00dc5a; border: 1px solid #1a5c33; padding: 6px 14px; border-radius: 20px; font-size: 14px; font-weight: 700; align-self: center; }
+.hero-sub { color: #444; font-size: 13px; margin-top: 12px; }
+.hero-sub span { color: #666; }
+
+/* Stats row */
+.stats-row { max-width: 960px; margin: 0 auto; padding: 0 20px 40px; display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+.stat-box { background: #0d0d0f; border: 1px solid #161618; border-radius: 14px; padding: 18px 16px; }
+.stat-box-label { color: #444; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; font-weight: 600; }
+.stat-box-value { font-size: 22px; font-weight: 700; color: #fff; }
+.stat-box-sub { color: #333; font-size: 11px; margin-top: 4px; }
+
+/* Divider */
+.divider { max-width: 960px; margin: 0 auto 32px; padding: 0 20px; }
+.divider-line { border: none; border-top: 1px solid #111; }
+
+/* Signals section */
+.signals-section { max-width: 960px; margin: 0 auto; padding: 0 20px 48px; }
+.section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+.section-title { font-size: 13px; font-weight: 700; color: #fff; text-transform: uppercase; letter-spacing: 1px; }
+.section-sub { color: #444; font-size: 12px; }
+
+/* Signal cards */
+.signal-card { background: #0d0d0f; border: 1px solid #161618; border-radius: 16px; padding: 20px 22px; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; gap: 16px; transition: border-color 0.15s; }
+.signal-card:hover { border-color: #222; }
+.signal-card.better { border-left: 3px solid #00dc5a; }
+.signal-card.agrees { border-left: 3px solid #444; }
+.signal-left { flex: 1; min-width: 0; }
+.signal-title { font-size: 15px; font-weight: 600; color: #fff; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.signal-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.signal-tag { font-size: 11px; padding: 2px 8px; border-radius: 5px; font-weight: 600; }
+.tag-yes { background: #0d2b1a; color: #00dc5a; }
+.tag-no { background: #2b1a00; color: #ff8c00; }
+.tag-better { background: #0d2b1a; color: #00dc5a; }
+.tag-agrees { background: #1a1a1a; color: #666; }
+.tag-time { color: #333; font-size: 11px; }
+.signal-right { text-align: right; flex-shrink: 0; }
+.signal-price { font-size: 28px; font-weight: 800; color: #fff; letter-spacing: -1px; }
+.signal-price-label { color: #444; font-size: 11px; margin-bottom: 2px; }
+.signal-gap { color: #00dc5a; font-size: 12px; font-weight: 600; margin-top: 2px; }
+
+/* Empty state */
+.empty-state { text-align: center; padding: 60px 20px; }
+.empty-emoji { font-size: 48px; margin-bottom: 16px; }
+.empty-title { color: #333; font-size: 16px; font-weight: 600; margin-bottom: 8px; }
+.empty-sub { color: #2a2a2a; font-size: 13px; line-height: 1.6; }
+
+/* Streak badge */
+.streak { display: inline-flex; align-items: center; gap: 6px; background: #0d0d0f; border: 1px solid #161618; border-radius: 20px; padding: 6px 14px; font-size: 12px; font-weight: 700; }
+
+/* Footer */
+.footer { border-top: 1px solid #0f0f0f; padding: 32px 20px; text-align: center; }
+.footer p { color: #2a2a2a; font-size: 12px; line-height: 1.8; }
+.footer a { color: #444; text-decoration: none; }
+.footer a:hover { color: #00dc5a; }
+.cta-strip { background: linear-gradient(135deg, #0d2b1a 0%, #0a0a0a 100%); border: 1px solid #1a5c33; border-radius: 16px; padding: 28px 24px; text-align: center; margin: 0 20px 32px; max-width: 920px; margin-left: auto; margin-right: auto; }
+.cta-strip h3 { color: #fff; font-size: 18px; font-weight: 700; margin-bottom: 6px; }
+.cta-strip p { color: #555; font-size: 13px; margin-bottom: 16px; }
+.cta-btn { display: inline-block; background: #00dc5a; color: #000; font-weight: 800; font-size: 14px; padding: 12px 28px; border-radius: 10px; text-decoration: none; letter-spacing: 0.3px; transition: opacity 0.15s; }
+.cta-btn:hover { opacity: 0.88; }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="logo">
+    <div class="logo-text">Trade<span>Shark</span> 🦈</div>
+  </div>
+  <div style="display:flex;align-items:center;gap:12px">
+    <div class="logo-badge"><div class="live-dot"></div> LIVE SIGNALS</div>
+    <span id="sig-updated" style="color:#333;font-size:11px"></span>
+  </div>
+</div>
+
+<div class="hero">
+  <div class="hero-label">All-Time Record</div>
+  <div class="record-display">
+    <div class="record-big green" id="sig-wins">--</div>
+    <div class="record-sep">W</div>
+    <div class="record-big red" id="sig-losses">--</div>
+    <div class="record-sep">L</div>
+    <div class="win-rate-pill" id="sig-wr">--%</div>
+  </div>
+  <div class="hero-sub">
+    Paper trading since <span id="sig-launch">Apr 27, 2026</span> &bull;
+    P&amp;L: <span id="sig-pnl" style="color:#fff">--</span> &bull;
+    CLV: <span id="sig-clv" style="color:#fff">--</span>
+  </div>
+</div>
+
+<div class="stats-row">
+  <div class="stat-box">
+    <div class="stat-box-label">Total Signals</div>
+    <div class="stat-box-value" id="sig-total">--</div>
+    <div class="stat-box-sub">since launch</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat-box-label">Settled</div>
+    <div class="stat-box-value" id="sig-settled">--</div>
+    <div class="stat-box-sub">completed bets</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat-box-label">Edge Source</div>
+    <div class="stat-box-value" style="font-size:14px;color:#00dc5a">Vegas Lines</div>
+    <div class="stat-box-sub">15+ sportsbooks</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat-box-label">Current Streak</div>
+    <div class="stat-box-value" id="sig-streak">--</div>
+    <div class="stat-box-sub" id="sig-streak-type"></div>
+  </div>
+</div>
+
+<div class="divider"><hr class="divider-line"></div>
+
+<div class="signals-section">
+  <div class="section-header">
+    <div>
+      <div class="section-title">Today's Signals</div>
+      <div class="section-sub" style="margin-top:4px">Bets where Vegas disagrees with Kalshi by 8%+</div>
+    </div>
+  </div>
+  <div id="sig-cards">
+    <div class="empty-state">
+      <div class="empty-emoji">⏳</div>
+      <div class="empty-title">Loading signals...</div>
+    </div>
+  </div>
+</div>
+
+<div class="cta-strip">
+  <h3>Get Signals Before the Market Moves</h3>
+  <p>Join the waitlist — we're opening subscriptions once edge is confirmed. Free during the proof period.</p>
+  <a href="https://x.com/TradeShark6408" target="_blank" class="cta-btn">Follow @TradeShark6408 on X</a>
+</div>
+
+<div class="footer">
+  <p>
+    TradeShark 🦈 &bull; <a href="/track-record">Full Track Record</a> &bull; <a href="https://x.com/TradeShark6408" target="_blank">@TradeShark6408</a>
+  </p>
+  <p style="margin-top:8px;color:#1a1a1a">
+    Paper trading only. Not financial advice. All trades logged automatically — no manual selection.
+  </p>
+</div>
+
+<script>
+function loadSignals() {
+  fetch('/signals-data')
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) return;
+
+      // Header
+      document.getElementById('sig-updated').textContent = 'Updated ' + (d.last_updated || '--');
+
+      // Hero
+      document.getElementById('sig-wins').textContent = d.wins != null ? d.wins : '--';
+      document.getElementById('sig-losses').textContent = d.losses != null ? d.losses : '--';
+      const wr = d.win_rate;
+      const wrEl = document.getElementById('sig-wr');
+      wrEl.textContent = d.settled > 0 ? wr + '%' : '--%';
+      wrEl.style.background = wr >= 55 ? '#0d2b1a' : wr >= 45 ? '#2b2000' : '#2b0d0d';
+      wrEl.style.color = wr >= 55 ? '#00dc5a' : wr >= 45 ? '#ffb400' : '#ff4444';
+      wrEl.style.borderColor = wr >= 55 ? '#1a5c33' : wr >= 45 ? '#5c4400' : '#5c1a1a';
+
+      const pnl = d.total_pnl_usd || 0;
+      document.getElementById('sig-pnl').textContent = (pnl >= 0 ? '+' : '') + '$' + Math.abs(pnl).toFixed(2);
+      document.getElementById('sig-pnl').style.color = pnl >= 0 ? '#00dc5a' : '#ff4444';
+      document.getElementById('sig-clv').textContent = d.clv_5min_avg != null ? (d.clv_5min_avg > 0 ? '+' : '') + d.clv_5min_avg + '¢' : '--';
+      document.getElementById('sig-clv').style.color = (d.clv_5min_avg || 0) >= 0 ? '#00dc5a' : '#ff4444';
+
+      // Stats
+      document.getElementById('sig-total').textContent = d.total_signals || 0;
+      document.getElementById('sig-settled').textContent = d.settled || 0;
+
+      // Streak
+      const streak = d.streak || {};
+      if (streak.count && streak.type) {
+        document.getElementById('sig-streak').textContent = streak.count + (streak.type === 'win' ? 'W' : 'L');
+        document.getElementById('sig-streak').style.color = streak.type === 'win' ? '#00dc5a' : '#ff4444';
+        document.getElementById('sig-streak-type').textContent = streak.type === 'win' ? 'win streak 🔥' : 'loss streak';
+      } else {
+        document.getElementById('sig-streak').textContent = '--';
+        document.getElementById('sig-streak-type').textContent = 'no data yet';
+      }
+
+      // Signal cards
+      const signals = d.todays_signals || [];
+      const container = document.getElementById('sig-cards');
+      if (!signals.length) {
+        container.innerHTML = '<div class="empty-state"><div class="empty-emoji">🦈</div><div class="empty-title">No signals yet today</div><div class="empty-sub">The bot scans every 45 seconds during game hours.<br>Check back when games are live.</div></div>';
+        return;
+      }
+      let html = '';
+      signals.forEach(s => {
+        const isBetter = s.vegas_verdict === 'BETTER';
+        const sideClass = s.side === 'yes' ? 'tag-yes' : 'tag-no';
+        const sideLabel = s.side === 'yes' ? 'YES' : 'NO';
+        const gap = s.vegas_gap_pp != null ? '+' + s.vegas_gap_pp + 'pp edge' : '';
+        const verdictClass = isBetter ? 'tag-better' : 'tag-agrees';
+        const cardClass = isBetter ? 'better' : 'agrees';
+        html += '<div class="signal-card ' + cardClass + '">';
+        html += '<div class="signal-left">';
+        html += '<div class="signal-title">' + (s.title || s.ticker) + '</div>';
+        html += '<div class="signal-meta">';
+        html += '<span class="signal-tag ' + sideClass + '">' + sideLabel + '</span>';
+        html += '<span class="signal-tag ' + verdictClass + '">Vegas ' + (s.vegas_verdict || '--') + '</span>';
+        html += '<span class="tag-time">' + (s.entry_time || '') + '</span>';
+        html += '</div></div>';
+        html += '<div class="signal-right">';
+        html += '<div class="signal-price-label">Kalshi price</div>';
+        html += '<div class="signal-price">' + (s.entry_price || '--') + '¢</div>';
+        if (gap) html += '<div class="signal-gap">' + gap + '</div>';
+        html += '</div></div>';
+      });
+      container.innerHTML = html;
+    })
+    .catch(() => {});
+}
+
+loadSignals();
+setInterval(loadSignals, 30000);
+</script>
+</body>
+</html>"""
+
+
+TRACK_RECORD_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TradeShark | Live Track Record</title>
+<meta name="description" content="Real-time track record for TradeShark's AI prediction market trading bot. Every trade logged — wins and losses.">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0a0a0a; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; min-height: 100vh; }
+.header { background: #0d0d0d; border-bottom: 1px solid #1a1a1a; padding: 20px 24px; display: flex; align-items: center; justify-content: space-between; }
+.logo { font-size: 22px; font-weight: 700; color: #fff; }
+.logo span { color: #00dc5a; }
+.live-badge { background: #0d2b1a; color: #00dc5a; border: 1px solid #00dc5a; padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.live-dot { width: 7px; height: 7px; background: #00dc5a; border-radius: 50%; animation: pulse 2s infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+.container { max-width: 900px; margin: 0 auto; padding: 32px 20px; }
+.hero { text-align: center; margin-bottom: 40px; }
+.hero h1 { font-size: 32px; font-weight: 700; margin-bottom: 10px; }
+.hero h1 span { color: #00dc5a; }
+.hero p { color: #666; font-size: 15px; line-height: 1.6; max-width: 560px; margin: 0 auto; }
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 36px; }
+.stat-card { background: #111; border: 1px solid #1e1e1e; border-radius: 12px; padding: 20px 16px; text-align: center; }
+.stat-label { color: #555; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+.stat-value { font-size: 28px; font-weight: 700; color: #fff; }
+.stat-sub { color: #444; font-size: 11px; margin-top: 4px; }
+.section-title { font-size: 16px; font-weight: 600; color: #ccc; margin-bottom: 14px; border-bottom: 1px solid #1a1a1a; padding-bottom: 8px; }
+.trades-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 36px; }
+.trades-table th { text-align: left; padding: 8px 10px; color: #444; font-weight: 500; border-bottom: 1px solid #1a1a1a; }
+.trades-table td { padding: 9px 10px; border-bottom: 1px solid #111; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+.badge-win { background: #0d2b1a; color: #00dc5a; }
+.badge-loss { background: #2b0d0d; color: #ff4444; }
+.badge-better { background: #0d1f2b; color: #00d4ff; }
+.badge-agrees { background: #1a1a1a; color: #888; }
+.badge-worse { background: #2b1a0d; color: #ff8c00; }
+.methodology { background: #111; border: 1px solid #1e1e1e; border-radius: 12px; padding: 24px; margin-bottom: 36px; }
+.methodology h3 { color: #00dc5a; margin-bottom: 12px; }
+.methodology p { color: #666; font-size: 13px; line-height: 1.7; margin-bottom: 8px; }
+.footer { text-align: center; color: #333; font-size: 12px; padding: 24px; border-top: 1px solid #111; margin-top: 20px; }
+.footer a { color: #00dc5a; text-decoration: none; }
+.empty { text-align: center; color: #444; padding: 40px; font-size: 14px; }
+.warning { background: #1a1400; border: 1px solid #3a2f00; border-radius: 8px; padding: 12px 16px; color: #ffb400; font-size: 12px; margin-bottom: 24px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="logo">Trade<span>Shark</span> 🦈</div>
+  <div class="live-badge"><div class="live-dot"></div> LIVE TRACK RECORD</div>
+</div>
+<div class="container">
+  <div class="hero">
+    <h1>Every Bet. <span>No Cherry-Picking.</span></h1>
+    <p>TradeShark finds mispricings between Vegas sportsbook consensus and Kalshi prediction market prices. We post every trade — wins and losses — in real time.</p>
+  </div>
+  <div class="warning">
+    ⚠️ This is a live paper trading track record. No real money at risk yet — we're proving edge before deploying capital. All trades logged automatically with no manual selection.
+  </div>
+  <div class="stats-grid">
+    <div class="stat-card"><div class="stat-label">Total Signals</div><div class="stat-value" id="tr-total">--</div><div class="stat-sub">since v2 launch</div></div>
+    <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-value" id="tr-wr" style="color:#00dc5a">--</div><div class="stat-sub" id="tr-wl">-- settled</div></div>
+    <div class="stat-card"><div class="stat-label">Paper P&L</div><div class="stat-value" id="tr-pnl">--</div><div class="stat-sub">simulated</div></div>
+    <div class="stat-card"><div class="stat-label">CLV 5min</div><div class="stat-value" id="tr-clv">--</div><div class="stat-sub">closing line value</div></div>
+    <div class="stat-card"><div class="stat-label">Pending</div><div class="stat-value" id="tr-pending">--</div><div class="stat-sub">open positions</div></div>
+  </div>
+  <div class="section-title">Recent Settled Trades</div>
+  <div id="tr-trades"><div class="empty">Loading trades...</div></div>
+  <div class="methodology">
+    <h3>How It Works</h3>
+    <p><strong>Edge source:</strong> We compare Vegas consensus moneyline (averaged across 15+ sportsbooks via The Odds API) to the Kalshi prediction market price. When they disagree by 8%+, we take the bet.</p>
+    <p><strong>Same-day only:</strong> We only bet on games settling today. No multi-day exposure.</p>
+    <p><strong>CLV tracking:</strong> Closing Line Value measures whether the market moves in our direction after entry. Consistently positive CLV = real edge.</p>
+    <p><strong>No filters:</strong> Every signal that passes our edge threshold is logged here automatically. We cannot add or remove trades retroactively.</p>
+  </div>
+  <div id="tr-updated" style="text-align:center;color:#333;font-size:11px;margin-bottom:20px"></div>
+  <div style="text-align:center;margin:32px 0">
+    <button onclick="loadScorecard()" style="background:#0d2b1a;color:#00dc5a;border:1px solid #00dc5a;padding:10px 24px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600">📋 Generate Today's X Post</button>
+    <div id="tr-scorecard" style="display:none;margin-top:16px;background:#111;border:1px solid #1e1e1e;border-radius:10px;padding:20px;text-align:left">
+      <div style="color:#666;font-size:11px;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px">Ready to copy → paste to X</div>
+      <pre id="tr-scorecard-text" style="white-space:pre-wrap;font-family:inherit;color:#e0e0e0;font-size:13px;line-height:1.6"></pre>
+      <button onclick="copyScorecard()" style="margin-top:12px;background:#1a1a2e;color:#00d4ff;border:1px solid #00d4ff;padding:6px 16px;border-radius:6px;cursor:pointer;font-size:12px">📋 Copy to clipboard</button>
+    </div>
+  </div>
+</div>
+<div class="footer">
+  <p>TradeShark 🦈 &mdash; Building in public. Follow the journey at <a href="https://x.com/TradeShark6408" target="_blank">@TradeShark6408</a></p>
+</div>
+<script>
+function loadTrackRecord() {
+  fetch('/track-record-data')
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) return;
+      document.getElementById('tr-total').textContent = d.total || 0;
+      const wr = d.win_rate;
+      const wrEl = document.getElementById('tr-wr');
+      wrEl.textContent = d.settled > 0 ? wr + '%' : '--';
+      wrEl.style.color = wr >= 55 ? '#00dc5a' : wr >= 45 ? '#ffb400' : '#ff4444';
+      document.getElementById('tr-wl').textContent = d.wins + 'W / ' + d.losses + 'L settled';
+      const pnl = d.total_pnl_usd || 0;
+      const pnlEl = document.getElementById('tr-pnl');
+      pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + Math.abs(pnl).toFixed(2);
+      pnlEl.style.color = pnl >= 0 ? '#00dc5a' : '#ff4444';
+      document.getElementById('tr-clv').textContent = d.clv_5min_avg != null ? (d.clv_5min_avg > 0 ? '+' : '') + d.clv_5min_avg + 'c' : '--';
+      document.getElementById('tr-pending').textContent = d.pending || 0;
+      if (d.last_updated) {
+        document.getElementById('tr-updated').textContent = 'Last updated: ' + new Date(d.last_updated).toLocaleTimeString();
+      }
+      const trades = d.recent_trades || [];
+      if (!trades.length) {
+        document.getElementById('tr-trades').innerHTML = '<div class="empty">No settled trades yet — v2 signal launched today. Check back soon.</div>';
+        return;
+      }
+      let html = '<table class="trades-table"><tr><th>Date</th><th>Market</th><th>Side</th><th>Price</th><th>Vegas Signal</th><th>CLV 5m</th><th>Result</th><th>P&L</th></tr>';
+      trades.forEach(t => {
+        const rc = t.result === 'win' ? '#00dc5a' : '#ff4444';
+        const badgeClass = t.result === 'win' ? 'badge-win' : 'badge-loss';
+        const vvClass = t.vegas_verdict === 'BETTER' ? 'badge-better' : t.vegas_verdict === 'AGREES' ? 'badge-agrees' : t.vegas_verdict === 'WORSE' ? 'badge-worse' : '';
+        const clv5 = t.clv_5min != null ? (t.clv_5min > 0 ? '+' : '') + t.clv_5min + 'c' : '--';
+        const pnl = t.pnl_cents != null ? (t.pnl_cents >= 0 ? '+' : '') + '$' + Math.abs(t.pnl_cents / 100).toFixed(2) : '--';
+        const gap = t.vegas_gap_pp != null ? ' (' + (t.vegas_gap_pp > 0 ? '+' : '') + t.vegas_gap_pp + 'pp)' : '';
+        html += '<tr><td style="color:#555">' + (t.entry_time || '--') + '</td><td style="color:#ccc;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (t.title || '--') + '</td><td style="color:' + (t.side==='yes'?'#00dc5a':'#ff8c00') + '">' + (t.side||'').toUpperCase() + '</td><td style="color:#ccc">' + (t.entry_price||'--') + 'c</td><td><span class="badge ' + vvClass + '">' + (t.vegas_verdict||'--') + '</span><span style="color:#444;font-size:11px">' + gap + '</span></td><td style="color:' + ((t.clv_5min||0)>=0?'#00dc5a':'#ff4444') + '">' + clv5 + '</td><td><span class="badge ' + badgeClass + '">' + (t.result||'--').toUpperCase() + '</span></td><td style="color:' + rc + '">' + pnl + '</td></tr>';
+      });
+      html += '</table>';
+      document.getElementById('tr-trades').innerHTML = html;
+    })
+    .catch(() => {});
+}
+loadTrackRecord();
+setInterval(loadTrackRecord, 30000);
+function loadScorecard() {
+  fetch('/daily-scorecard')
+    .then(r => r.json())
+    .then(d => {
+      if (d.error || !d.scorecard) return;
+      document.getElementById('tr-scorecard-text').textContent = d.scorecard;
+      document.getElementById('tr-scorecard').style.display = 'block';
+    })
+    .catch(() => {});
+}
+function copyScorecard() {
+  const text = document.getElementById('tr-scorecard-text').textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = event.target;
+    btn.textContent = '✅ Copied!';
+    setTimeout(() => { btn.textContent = '📋 Copy to clipboard'; }, 2000);
+  });
+}
+</script>
+</body>
+</html>"""
+
 @app.route("/uncle-claude")
 def uncle_claude():
     from datetime import datetime
@@ -29232,6 +30312,256 @@ def claude_brief():
             "live": {"wins": len(wins), "losses": len(losses)},
             "paper": {"trades": len(p), "win_rate": round(len(pw)/len(p)*100,1) if p else 0},
             "brain": {"version": BOT_STATE.get("learning_version","?"), "insights": BOT_STATE.get("latest_insights",[])[:5]}
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+@app.route("/track-record-data")
+def track_record_data():
+    """Public JSON endpoint for v2 paper trade performance."""
+    try:
+        with _PAPER_TRADES_LOCK:
+            v2_trades = [
+                t for t in _PAPER_TRADES
+                if t.get("signal_version") == "v2_vegas"
+                and (t.get("entry_time") or "") >= V2_LAUNCH_DATE
+            ]
+
+        settled = [t for t in v2_trades if t.get("result") in ("win", "loss")]
+        wins = [t for t in settled if t.get("result") == "win"]
+        losses = [t for t in settled if t.get("result") == "loss"]
+        pending = [t for t in v2_trades if not t.get("result") or t.get("result") not in ("win", "loss", "expired")]
+
+        win_rate = round(len(wins) / len(settled) * 100, 1) if settled else 0
+        total_pnl_cents = sum(t.get("pnl_cents", 0) or 0 for t in settled)
+
+        clv5 = [t["clv_5min"] for t in v2_trades if t.get("clv_5min") is not None]
+        clv5_avg = round(sum(clv5) / len(clv5), 2) if clv5 else None
+
+        by_sport = {}
+        for t in settled:
+            sport = t.get("sport") or "unknown"
+            if sport not in by_sport:
+                by_sport[sport] = {"wins": 0, "losses": 0}
+            if t.get("result") == "win":
+                by_sport[sport]["wins"] += 1
+            else:
+                by_sport[sport]["losses"] += 1
+        for s in by_sport:
+            n = by_sport[s]["wins"] + by_sport[s]["losses"]
+            by_sport[s]["win_rate"] = round(by_sport[s]["wins"] / n * 100, 1) if n > 0 else 0
+
+        recent = []
+        for t in reversed(settled[-20:]):
+            recent.append({
+                "title": t.get("title", ""),
+                "side": t.get("side", ""),
+                "entry_price": t.get("entry_price"),
+                "vegas_verdict": t.get("vegas_verdict"),
+                "vegas_gap_pp": t.get("vegas_gap_pp"),
+                "clv_5min": t.get("clv_5min"),
+                "result": t.get("result"),
+                "pnl_cents": t.get("pnl_cents"),
+                "entry_time": t.get("entry_time", "")[:10],
+            })
+
+        return jsonify({
+            "total": len(v2_trades),
+            "settled": len(settled),
+            "pending": len(pending),
+            "wins": len(wins),
+            "losses": len(losses),
+            "win_rate": win_rate,
+            "total_pnl_usd": round(total_pnl_cents / 100, 2),
+            "clv_5min_avg": clv5_avg,
+            "by_sport": by_sport,
+            "recent_trades": recent,
+            "last_updated": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+@app.route("/track-record")
+def track_record_page():
+    return TRACK_RECORD_HTML
+
+
+@app.route("/signals-data")
+def signals_data():
+    """Clean public signals data for the subscriber-facing page."""
+    try:
+        with _PAPER_TRADES_LOCK:
+            v2_trades = [
+                t for t in _PAPER_TRADES
+                if t.get("signal_version") == "v2_vegas"
+                and (t.get("entry_time") or "") >= V2_LAUNCH_DATE
+            ]
+
+        settled = [t for t in v2_trades if t.get("result") in ("win", "loss")]
+        pending = [t for t in v2_trades if t.get("result") not in ("win", "loss", "expired")]
+        wins = [t for t in settled if t.get("result") == "win"]
+        win_rate = round(len(wins) / len(settled) * 100, 1) if settled else 0
+        total_pnl = sum(t.get("pnl_cents", 0) or 0 for t in settled) / 100
+
+        clv5 = [t["clv_5min"] for t in v2_trades if t.get("clv_5min") is not None]
+        clv5_avg = round(sum(clv5) / len(clv5), 2) if clv5 else None
+
+        today_str = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+        todays_signals = [
+            t for t in pending
+            if (t.get("entry_time") or "").startswith(today_str)
+            and t.get("vegas_verdict") in ("BETTER", "AGREES")
+        ]
+
+        formatted_signals = []
+        for t in todays_signals[-5:]:
+            vg = t.get("vegas_gap_pp")
+            formatted_signals.append({
+                "title": t.get("title", ""),
+                "ticker": t.get("ticker", ""),
+                "side": t.get("side", ""),
+                "entry_price": t.get("entry_price"),
+                "vegas_verdict": t.get("vegas_verdict"),
+                "vegas_gap_pp": vg,
+                "strategy": t.get("strategy", ""),
+                "entry_time": (t.get("entry_time") or "")[:16].replace("T", " "),
+            })
+
+        streak = 0
+        streak_type = None
+        for t in reversed(settled):
+            r = t.get("result")
+            if streak_type is None:
+                streak_type = r
+                streak = 1
+            elif r == streak_type:
+                streak += 1
+            else:
+                break
+
+        return jsonify({
+            "total_signals": len(v2_trades),
+            "settled": len(settled),
+            "wins": len(wins),
+            "losses": len(settled) - len(wins),
+            "win_rate": win_rate,
+            "total_pnl_usd": round(total_pnl, 2),
+            "clv_5min_avg": clv5_avg,
+            "todays_signals": formatted_signals,
+            "streak": {"count": streak, "type": streak_type},
+            "launch_date": V2_LAUNCH_DATE,
+            "last_updated": datetime.datetime.now(tz=_PACIFIC).strftime("%I:%M %p PT"),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+@app.route("/signals")
+def signals_page():
+    return SIGNALS_HTML
+
+
+@app.route("/daily-scorecard")
+def daily_scorecard():
+    """Generate a ready-to-post X/Twitter daily scorecard for v2 paper trades."""
+    try:
+        today_pt = datetime.datetime.now(tz=_PACIFIC)
+        today_str = today_pt.strftime("%Y-%m-%d")
+        date_label = today_pt.strftime("%b %-d")
+
+        with _PAPER_TRADES_LOCK:
+            v2_trades = [
+                t for t in _PAPER_TRADES
+                if t.get("signal_version") == "v2_vegas"
+                and (t.get("entry_time") or "") >= V2_LAUNCH_DATE
+            ]
+
+        # Today's settled trades
+        today_settled = [
+            t for t in v2_trades
+            if t.get("result") in ("win", "loss")
+            and (t.get("entry_time") or "").startswith(today_str)
+        ]
+        today_pending = [
+            t for t in v2_trades
+            if t.get("result") not in ("win", "loss", "expired")
+            and (t.get("entry_time") or "").startswith(today_str)
+        ]
+
+        wins = [t for t in today_settled if t.get("result") == "win"]
+        losses = [t for t in today_settled if t.get("result") == "loss"]
+        pnl_cents = sum(t.get("pnl_cents", 0) or 0 for t in today_settled)
+        pnl_usd = pnl_cents / 100
+
+        clv_vals = [t["clv_5min"] for t in v2_trades if t.get("clv_5min") is not None]
+        clv_avg = round(sum(clv_vals) / len(clv_vals), 1) if clv_vals else None
+
+        # Best and worst trade today
+        settled_with_pnl = [t for t in today_settled if t.get("pnl_cents") is not None]
+        best = max(settled_with_pnl, key=lambda t: t.get("pnl_cents", 0)) if settled_with_pnl else None
+        worst = min(settled_with_pnl, key=lambda t: t.get("pnl_cents", 0)) if settled_with_pnl else None
+
+        # All-time v2 stats
+        all_settled = [t for t in v2_trades if t.get("result") in ("win", "loss")]
+        all_wins = [t for t in all_settled if t.get("result") == "win"]
+        all_wr = round(len(all_wins) / len(all_settled) * 100, 1) if all_settled else 0
+        all_pnl = sum(t.get("pnl_cents", 0) or 0 for t in all_settled) / 100
+
+        # Build scorecard text
+        lines = []
+        lines.append(f"🦈 TradeShark Daily — {date_label}")
+        lines.append("")
+
+        if not today_settled and not today_pending:
+            lines.append("📊 No signals fired today.")
+            lines.append("(Games may not have started yet or no edges found)")
+        else:
+            w = len(wins)
+            l = len(losses)
+            p = len(today_pending)
+            pnl_str = (("+" if pnl_usd >= 0 else "") + f"${abs(pnl_usd):.2f}")
+            lines.append(f"📊 Today: {w}W / {l}L" + (f" ({p} pending)" if p else ""))
+            lines.append(f"💰 P&L: {pnl_str}")
+            if clv_avg is not None:
+                clv_str = ("+" if clv_avg >= 0 else "") + f"{clv_avg}¢"
+                lines.append(f"📈 CLV avg: {clv_str} ({'market agreed with us ✅' if clv_avg >= 0 else 'market pushed back ⚠️'})")
+
+            if best and best.get("pnl_cents", 0) > 0:
+                vg = f" (Vegas gap: +{best.get('vegas_gap_pp', '?')}pp)" if best.get("vegas_gap_pp") else ""
+                lines.append("")
+                lines.append(f"✅ Best bet:")
+                lines.append(f"{best.get('title', best.get('ticker', '?'))} @ {best.get('entry_price')}¢{vg}")
+
+            if worst and worst.get("pnl_cents", 0) < 0:
+                vg = f" (Vegas gap: {worst.get('vegas_gap_pp', '?')}pp)" if worst.get("vegas_gap_pp") else ""
+                lines.append("")
+                lines.append(f"❌ Toughest loss:")
+                lines.append(f"{worst.get('title', worst.get('ticker', '?'))} @ {worst.get('entry_price')}¢{vg}")
+
+        lines.append("")
+        lines.append(f"📅 All-time (v2): {len(all_wins)}W / {len(all_settled) - len(all_wins)}L ({all_wr}% WR) | P&L: {'+' if all_pnl >= 0 else ''}${abs(all_pnl):.2f}")
+        lines.append("")
+        lines.append("Full track record (every trade, no cherry-picking):")
+        lines.append("https://web-production-c6309.up.railway.app/track-record")
+        lines.append("")
+        lines.append("#Kalshi #PredictionMarkets #TradingBot 🦈")
+
+        scorecard_text = "\n".join(lines)
+
+        return jsonify({
+            "date": today_str,
+            "scorecard": scorecard_text,
+            "stats": {
+                "today_wins": len(wins),
+                "today_losses": len(losses),
+                "today_pending": len(today_pending),
+                "today_pnl_usd": round(pnl_usd, 2),
+                "clv_avg": clv_avg,
+                "alltime_win_rate": all_wr,
+                "alltime_pnl_usd": round(all_pnl, 2),
+            }
         })
     except Exception as e:
         return jsonify({"error": str(e)})
