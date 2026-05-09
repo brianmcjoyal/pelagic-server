@@ -18087,7 +18087,22 @@ def wr_truth():
         w = sum(1 for t in items if t.get("result") == "win")
         l = sum(1 for t in items if t.get("result") == "loss")
         n = w + l
-        return {"wins": w, "losses": l, "n": n, "wr": round(w / n * 100, 1) if n else None}
+        win_pnls = [float(t.get("pnl_usd") or 0) for t in items if t.get("result") == "win"]
+        loss_pnls = [float(t.get("pnl_usd") or 0) for t in items if t.get("result") == "loss"]
+        total_pnl = sum(win_pnls) + sum(loss_pnls)
+        avg_win = round(sum(win_pnls) / len(win_pnls), 2) if win_pnls else 0
+        avg_loss = round(sum(loss_pnls) / len(loss_pnls), 2) if loss_pnls else 0
+        biggest_win = max(win_pnls) if win_pnls else 0
+        biggest_loss = min(loss_pnls) if loss_pnls else 0
+        return {
+            "wins": w, "losses": l, "n": n,
+            "wr": round(w / n * 100, 1) if n else None,
+            "total_pnl": round(total_pnl, 2),
+            "avg_win": avg_win,
+            "avg_loss": avg_loss,
+            "biggest_win": biggest_win,
+            "biggest_loss": biggest_loss,
+        }
 
     def _journal_window(cutoff_iso):
         return [t for t in journal
@@ -27269,6 +27284,21 @@ async function loadPerformance() {
         total = _jat.n;
         winRate = _jat.wr;
         _wrSource = 'journal-truth';
+        if (_jat.total_pnl !== undefined) {
+          totalPnl = _jat.total_pnl;
+        }
+        if (_jat.avg_win !== undefined) {
+          winPnls = [_jat.avg_win];
+        }
+        if (_jat.avg_loss !== undefined) {
+          lossPnls = [_jat.avg_loss];
+        }
+        if (_jat.biggest_win !== undefined) {
+          bigWin = _jat.biggest_win;
+        }
+        if (_jat.biggest_loss !== undefined) {
+          bigLoss = _jat.biggest_loss;
+        }
       }
     }
     var roi = totalWagered > 0 ? (totalPnl / totalWagered * 100) : 0;
@@ -27366,6 +27396,10 @@ async function loadPerformance() {
     });
     window._closedBetsFilter = window._closedBetsFilter || 'all';
     renderClosedBets();
+    var _cbHeader = document.getElementById('closed-bets-count');
+    if (_cbHeader && _wrSource === 'journal-truth' && settled.length !== total) {
+      _cbHeader.textContent = total + ' journal / ' + settled.length + ' kalshi';
+    }
 
     // === TRADE FEED ===
     var feedEl = document.getElementById('trade-feed');
