@@ -9628,24 +9628,12 @@ def _paper_trade_update():
             _pt_snapshot = list(_PAPER_TRADES)
         for pt in _pt_snapshot:
             if pt.get("result") is not None:
-                # Already settled. Best-effort one-time CLV backfill for trades
-                # that settled before the CLV capture fallback existed — otherwise
-                # the whole paper dashboard says "-- trades" on every CLV metric.
+                # Already settled. Only backfill clv_final (which is legitimately
+                # the closing delta). Do NOT backfill clv_5min from closing price —
+                # that creates fake CLV data (closing price != 5min price).
                 _close = pt.get("closing_price")
                 _entry = pt.get("entry_price", 0)
                 if _close is not None and _entry:
-                    # Only backfill clv_5min and clv_final from the closing
-                    # delta. Previously we ALSO synthesized clv_15min and
-                    # clv_30min from the same value, which made all three
-                    # buckets show identical averages (the user observed
-                    # 5/15/30 min all reading +4.39c — a statistical artifact
-                    # from settled trades dominating every bucket with the
-                    # same synthetic number). Leaving 15/30 min as None for
-                    # settle-backfilled trades means they're excluded from
-                    # the 15/30 min averages — fewer data points, but those
-                    # points actually reflect live price evolution.
-                    if pt.get("clv_5min") is None:
-                        pt["clv_5min"] = _close - _entry
                     if pt.get("clv_final") is None:
                         pt["clv_final"] = _close - _entry
                 continue  # already settled
@@ -9688,21 +9676,15 @@ def _paper_trade_update():
                             _pm_mkt = _pm_r.json().get("market", {})
                             _pm_result = _pm_mkt.get("result", "")
                             if _pm_result:
-                                # Settled — record result and settle paper trade
                                 won = (_pm_result == side)
                                 pt["result"] = "win" if won else "loss"
                                 pt["closing_price"] = 97 if won else 3
                                 pt["clv_final"] = pt["closing_price"] - entry_price
+                                pt["settlement_time"] = datetime.datetime.utcnow().isoformat() + "Z"
                                 if won:
                                     pt["pnl_cents"] = round((100 - entry_price) * 0.93, 1)
                                 else:
                                     pt["pnl_cents"] = -entry_price
-                                # Best-effort CLV backfill: if we never captured
-                                # milestone CLV, use closing_price so the trade
-                                # isn't entirely absent from the CLV metric.
-                                if pt.get("clv_5min") is None and elapsed >= 300:
-                                    pt["clv_5min"] = pt["closing_price"] - entry_price
-                                    pt["price_5min"] = pt["closing_price"]
                                 print(f"[PAPER] Settled {ticker}: {'WIN' if won else 'LOSS'} (result={_pm_result}, side={side})")
                                 continue
                             # Still live — extract current price and let CLV logic below handle it
@@ -9747,20 +9729,78 @@ def _paper_trade_update():
                 pt["price_30min"] = current_price
                 pt["clv_30min"] = current_price - entry_price
 
-            # Check for settlement (our side's price at 97+ or 3-)
+            # Check for settlement: use Kalshi result field first, then price thresholds
             status = m.get("status", "")
-            if status in ("settled", "finalized", "closed") or current_price >= 97 or current_price <= 3:
-                # current_price is the price of OUR side's contract
-                # >= 97 means our side won (contract pays $1)
-                # <= 3 means our side lost (contract worth ~$0)
-                won = current_price >= 97
+            _m_result = m.get("result", "")
+            _settled_by_result = bool(_m_result)
+            _settled_by_price = current_price >= 97 or current_price <= 3
+            _settled_by_status = status in ("settled", "finalized", "closed")
+
+            if _settled_by_result or _settled_by_price or _settled_by_status:
+                if _settled_by_result:
+                    won = (_m_result == side)
+                else:
+                    won = current_price >= 97
                 pt["result"] = "win" if won else "loss"
                 pt["closing_price"] = current_price
                 pt["clv_final"] = current_price - entry_price
+                pt["settlement_time"] = datetime.datetime.utcnow().isoformat() + "Z"
                 if won:
-                    pt["pnl_cents"] = round((100 - entry_price) * 0.93, 1)  # profit after 7% fee
+                    pt["pnl_cents"] = round((100 - entry_price) * 0.93, 1)
                 else:
                     pt["pnl_cents"] = -entry_price
+                print(f"[PAPER] Settled {ticker}: {'WIN' if won else 'LOSS'} (result={_m_result}, status={status}, price={current_price})")
+                continue
+
+            # Periodic sweep: if trade is >2h old, check Kalshi directly for result
+            if elapsed > 7200 and not pt.get("_last_settle_check"):
+                pt["_last_settle_check"] = now_ts
+                try:
+                    _sw_h = signed_headers("GET", f"/markets/{ticker}")
+                    _sw_r = requests.get(
+                        KALSHI_BASE_URL + KALSHI_API_PREFIX + f"/markets/{ticker}",
+                        headers=_sw_h, timeout=5,
+                    )
+                    if _sw_r.ok:
+                        _sw_mkt = _sw_r.json().get("market", {})
+                        _sw_result = _sw_mkt.get("result", "")
+                        if _sw_result:
+                            won = (_sw_result == side)
+                            pt["result"] = "win" if won else "loss"
+                            pt["closing_price"] = 97 if won else 3
+                            pt["clv_final"] = pt["closing_price"] - entry_price
+                            pt["settlement_time"] = datetime.datetime.utcnow().isoformat() + "Z"
+                            if won:
+                                pt["pnl_cents"] = round((100 - entry_price) * 0.93, 1)
+                            else:
+                                pt["pnl_cents"] = -entry_price
+                            print(f"[PAPER] Sweep-settled {ticker}: {'WIN' if won else 'LOSS'} (result={_sw_result}, age={int(elapsed)}s)")
+                except Exception as _swe:
+                    print(f"[PAPER] Sweep check error for {ticker}: {_swe}")
+            elif elapsed > 7200 and (now_ts - pt.get("_last_settle_check", 0)) > 3600:
+                pt["_last_settle_check"] = now_ts
+                try:
+                    _sw_h = signed_headers("GET", f"/markets/{ticker}")
+                    _sw_r = requests.get(
+                        KALSHI_BASE_URL + KALSHI_API_PREFIX + f"/markets/{ticker}",
+                        headers=_sw_h, timeout=5,
+                    )
+                    if _sw_r.ok:
+                        _sw_mkt = _sw_r.json().get("market", {})
+                        _sw_result = _sw_mkt.get("result", "")
+                        if _sw_result:
+                            won = (_sw_result == side)
+                            pt["result"] = "win" if won else "loss"
+                            pt["closing_price"] = 97 if won else 3
+                            pt["clv_final"] = pt["closing_price"] - entry_price
+                            pt["settlement_time"] = datetime.datetime.utcnow().isoformat() + "Z"
+                            if won:
+                                pt["pnl_cents"] = round((100 - entry_price) * 0.93, 1)
+                            else:
+                                pt["pnl_cents"] = -entry_price
+                            print(f"[PAPER] Sweep-settled {ticker}: {'WIN' if won else 'LOSS'} (result={_sw_result}, age={int(elapsed)}s)")
+                except Exception as _swe:
+                    print(f"[PAPER] Sweep check error for {ticker}: {_swe}")
     except Exception as e:
         print(f"[PAPER] Update error: {e}")
 
