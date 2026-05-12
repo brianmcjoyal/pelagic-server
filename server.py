@@ -76,6 +76,7 @@ BOT_CONFIG = {
     "max_daily_usd": 25.0,         # $25/day cap
     "max_daily_trades": 5,         # 5 trades/day — enough to learn but limited risk
     "min_balance_usd": 50.0,      # SAFETY FLOOR: stop all trading if cash below $50
+    "cumulative_loss_cap_usd": 200.0,  # HARD KILL: stop forever if lifetime losses exceed -$200
     "min_cash_reserve_pct": 0.05, # keep 5% of portfolio in cash — legacy positions skew ratio
     "max_open_positions": 150,    # no hard cap — quality is controlled by conviction + edge gates, not position count
     "min_deviation": 0.04,  # lowered from 0.08 to find more candidates        # 8% mispricing — catch more edges
@@ -995,13 +996,22 @@ def _load_state():
             _PAPER_TRADES.extend(saved_paper[-_PAPER_TRADES_MAX:])
             print(f"[STATE] Restored {len(_PAPER_TRADES)} paper trades from disk")
 
-        # ALWAYS START ENABLED — the drawdown circuit breaker handles risk now.
-        # The old kill switch would leave the bot offline for hours/days with no
-        # way to re-enable without the API secret. Better to start fresh each
-        # deploy and let the circuit breaker do its job intraday.
-        # BOT_CONFIG["enabled"] = True  # PAUSED — do not auto-enable
+        # START ENABLED — but cumulative/strategy safeguards will re-disable within
+        # one scan cycle if conditions warrant. The pretrade gateway also blocks
+        # every individual order if cumulative loss cap is breached.
         BOT_STATE["auto_trade"] = True
-        print(f"[STATE] ✅ Bot ENABLED on startup (drawdown breaker provides intraday protection)")
+        # Check cumulative loss cap at startup so we don't trade even briefly
+        _cum_cap = float(BOT_CONFIG.get("cumulative_loss_cap_usd", 200.0))
+        if _cum_cap > 0 and saved_journal:
+            _startup_pnl = sum(float(t.get("pnl_usd") or 0) for t in saved_journal
+                               if t.get("is_live") and t.get("result") in ("win", "loss"))
+            if _startup_pnl <= -_cum_cap:
+                BOT_CONFIG["enabled"] = False
+                print(f"[STATE] 🛑 CUMULATIVE LOSS CAP at startup: ${_startup_pnl:.2f} exceeds -${_cum_cap:.0f} — bot DISABLED")
+            else:
+                print(f"[STATE] ✅ Bot ENABLED on startup (lifetime P&L: ${_startup_pnl:.2f}, cap: -${_cum_cap:.0f})")
+        else:
+            print(f"[STATE] ✅ Bot ENABLED on startup (drawdown breaker provides intraday protection)")
 
         # Restore HWM — protects against Kalshi pruning old settled data
         # Take the MAX of saved state vs hard-coded floor (floor survives deploy wipes)
@@ -3351,6 +3361,24 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
         _PRETRADE_STATS["reasons"]["uncle_claude_stop"] = _PRETRADE_STATS["reasons"].get("uncle_claude_stop", 0) + 1
         return False, _uc_reason
 
+    # 2D. CUMULATIVE LOSS CAP — hard kill if lifetime losses exceed threshold.
+    # Unlike daily drawdown which resets at midnight, this never resets.
+    # Requires manual re-enable via /config API after reviewing what went wrong.
+    _cum_cap = float(BOT_CONFIG.get("cumulative_loss_cap_usd", 200.0))
+    if _cum_cap > 0:
+        try:
+            with _TRADE_JOURNAL_LOCK:
+                _cum_pnl = sum(float(t.get("pnl_usd") or 0) for t in _TRADE_JOURNAL
+                               if t.get("is_live") and t.get("result") in ("win", "loss"))
+            if _cum_pnl <= -_cum_cap:
+                BOT_CONFIG["enabled"] = False
+                _PRETRADE_STATS["blocked"] += 1
+                _PRETRADE_STATS["reasons"]["cumulative_loss_cap"] = _PRETRADE_STATS["reasons"].get("cumulative_loss_cap", 0) + 1
+                _log_activity(f"🛑 CUMULATIVE LOSS CAP: lifetime P&L ${_cum_pnl:.2f} exceeds -${_cum_cap:.0f} — bot DISABLED", "error")
+                return False, f"Cumulative loss cap: ${_cum_pnl:.2f} lifetime (limit -${_cum_cap:.0f}). Bot disabled. Re-enable via /config."
+        except Exception:
+            pass
+
     # 3. MAX BET: no single trade bigger than config allows
     max_bet = BOT_CONFIG.get("max_bet_usd", 25.0)
     if cost_usd > max_bet * 1.5:  # 50% buffer for price bumps
@@ -3530,7 +3558,7 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
 # ---------------------------------------------------------------------------
 
 def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggressive=True, orderbook_hint=None,
-                       win_prob=None, edge=None, strategy=None):
+                       win_prob=None, edge=None, strategy=None, conviction=None):
     # PRE-TRADE VALIDATION — the last line of defense. Every buy must pass.
     if action == "buy":
         # Budget/cap validation must reflect the WORST-CASE actual fill cost,
@@ -3543,7 +3571,7 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
         cost_est = (_worst_fill_cents * count) / 100.0
         ok, reason = _pretrade_validate(
             ticker, side, price_cents, count, cost_est,
-            strategy=strategy, win_prob=win_prob, edge=edge
+            strategy=strategy, win_prob=win_prob, edge=edge, conviction=conviction
         )
         # TRADE RECEIPT — log every attempt (pass or fail) for full audit trail
         _receipt = (f"{'✅ PASS' if ok else '🚫 BLOCK'} | {strategy or 'unknown'} | "
@@ -6985,6 +7013,9 @@ FLOOR_MIN_PRICE = 15        # widest allowed range — 15c to 88c (floor at 15c 
 FLOOR_MAX_PRICE = 65  # aligned with gateway ceiling (was 88, dead code above 65c)
 FLOOR_MIN_EDGE = 0.05       # 5% ESPN edge minimum — same bar as moonshark, no charity bets
 FLOOR_MIN_CONVICTION = 3    # relaxed but not reckless — 2 was too loose
+FLOOR_TRADING_HOURS = (10, 23)  # 10am-11pm PT — games happen in this window
+FLOOR_FADE_MIN_LIVE_TRADES = 20  # need 20+ settled live trades before evaluating WR
+FLOOR_FADE_MIN_LIVE_WR = 0.35   # auto-disable if live WR drops below 35% over 20+ trades
 
 def floor_quota_snipe():
     """Safety-net strategy. Runs when total bets today < DAILY_BET_FLOOR.
@@ -6997,6 +7028,35 @@ def floor_quota_snipe():
     # Only run when we're actually short
     if not _floor_mode_active():
         return []
+
+    # TRADING HOURS GATE — only place LIVE bets during game hours (10am-11pm PT).
+    # Outside hours: force paper mode so learning engine still collects data.
+    _now_pt = datetime.datetime.now(tz=_PACIFIC)
+    _hour_pt = _now_pt.hour
+    _start_h, _end_h = FLOOR_TRADING_HOURS
+    if _hour_pt < _start_h or _hour_pt >= _end_h:
+        _paper_only = True
+
+    # STRATEGY KILL SWITCH — auto-disable if live WR degrades below threshold
+    if not _paper_only:
+        try:
+            with _TRADE_JOURNAL_LOCK:
+                _ff_live = [t for t in _TRADE_JOURNAL
+                            if t.get("strategy") == "floor_fade" and t.get("is_live")
+                            and t.get("result") in ("win", "loss")]
+            if len(_ff_live) >= FLOOR_FADE_MIN_LIVE_TRADES:
+                _ff_wins = sum(1 for t in _ff_live if t["result"] == "win")
+                _ff_wr = _ff_wins / len(_ff_live)
+                if _ff_wr < FLOOR_FADE_MIN_LIVE_WR:
+                    BOT_CONFIG["enabled"] = False
+                    _log_activity(
+                        f"🛑 FLOOR_FADE KILL SWITCH: live WR {_ff_wr:.1%} ({_ff_wins}/{len(_ff_live)}) "
+                        f"< {FLOOR_FADE_MIN_LIVE_WR:.0%} threshold — bot DISABLED. Re-enable via /config.",
+                        "error"
+                    )
+                    return []
+        except Exception:
+            pass
 
     today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
     if BOT_STATE.get("floor_date") != today:
@@ -7249,7 +7309,7 @@ def floor_quota_snipe():
             pass
 
         _log_activity(
-            f"🎯 FLOOR-FADE {side.upper()} {title[:35]} @ {price}c x{count} (${cost_usd:.2f}) edge={edge:+.1%}",
+            f"🎯 FLOOR-FADE {side.upper()} {title[:35]} @ {price}c x{count} (${cost_usd:.2f}) fade_signal={edge:+.1%}",
             "info"
         )
         try:
@@ -7260,7 +7320,7 @@ def floor_quota_snipe():
             placed.append({"ticker": ticker, "side": side, "price": price, "paper": True})
             continue
         result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob,
-                                   win_prob=cand.get("our_prob"), edge=edge, strategy="floor_fade")
+                                   win_prob=cand.get("our_prob"), edge=edge, strategy="floor_fade", conviction=2)
         if "error" in result:
             # Surface Kalshi's response body (not just our exception str) so
             # we can actually diagnose what the API is rejecting.
@@ -7304,7 +7364,7 @@ def floor_quota_snipe():
             "category": cand["mcat"],
             "espn_edge": round(edge, 4),
             "win_probability": round(cand.get("our_prob") or 0, 4) or None,
-            "edge_reasons": [f"fade signal +{edge:.1%}", f"cat={cand['mcat']}"],
+            "edge_reasons": [f"fade_signal={edge:+.1%} (original signal strength)", f"cat={cand['mcat']}"],
             "conviction": 2,
             "order_id": order_data.get("order_id", ""),
         })
@@ -7313,16 +7373,18 @@ def floor_quota_snipe():
             with _KNOWN_FILL_IDS_LOCK:
                 _known_fill_ids.add(_order_id)
 
-        _edge_data = {"espn_implied": cand["our_prob"], "espn_edge": edge}
+        _edge_data = {"espn_implied": cand["our_prob"], "espn_edge": edge,
+                      "fade_mode": True, "original_side": _orig_side,
+                      "original_price": cand["price"]}
         _journal_trade(
             ticker, title, side, price, filled, actual_cost, "floor_fade",
             is_live=True, close_time=cand.get("close_time", ""),
             game_info=cand.get("game"), espn_edge_data=_edge_data,
-            conviction=3, conviction_reasons=[f"fade+{edge:.0%}", "floor_fade_mode"],
+            conviction=2, conviction_reasons=[f"fade_signal={edge:+.1%}", "floor_fade_mode"],
         )
 
         _log_activity(
-            f"🎯 FLOOR HIT! {side.upper()} {ticker} @ {price}c x{filled} = ${actual_cost:.2f} (edge +{edge:.1%})",
+            f"🎯 FLOOR-FADE HIT! {side.upper()} {ticker} @ {price}c x{filled} = ${actual_cost:.2f} (fade_signal={edge:+.1%})",
             "success"
         )
         placed.append({"ticker": ticker, "cost": actual_cost, "edge": edge})
