@@ -3423,13 +3423,12 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
             return False, f"Category '{cat}' is blocked"
 
     # 5. EV CHECK: if we have win_prob, verify positive EV after fees AND slippage.
-    # This is THE most important check. Every trade must have a mathematical
-    # path to profit. We account for:
-    #   - Kalshi fee: 7% of profit on winning trades
-    #   - Slippage: we typically pay 2-3c above ask for IOC fills
-    #   - Model uncertainty: our win_prob estimate could be off by 3-5%
-    # We require EV > 0 even in the PESSIMISTIC case.
-    if win_prob is not None and win_prob > 0:
+    # Skip for floor_fade — fade strategies bet AGAINST the signal, so the
+    # standard EV model (which assumes we're betting WITH win_prob) gives the
+    # wrong answer. floor_fade has its own edge filtering (FLOOR_MIN_EDGE).
+    if strategy == "floor_fade":
+        pass  # skip EV check — fade model is empirical, not probabilistic
+    elif win_prob is not None and win_prob > 0:
         slippage_cents = 3  # worst case IOC bump
         actual_price = price_cents + slippage_cents  # what we'll actually pay
         if actual_price >= 99:
@@ -3452,7 +3451,11 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
     # This is enforced by requiring 7% edge minimum for all trades (see #6 below)
 
     # 6. EDGE CHECK: if we have edge, verify it's meaningful (> fee drag + slippage)
-    if edge is not None:
+    # Skip for floor_fade — edge represents signal strength to fade, not
+    # traditional edge. floor_fade enforces its own FLOOR_MIN_EDGE (5%).
+    if strategy == "floor_fade":
+        pass  # skip global edge check — floor_fade has its own threshold
+    elif edge is not None:
         # Real cost of a trade: 7% fee on wins + 2-3c slippage + model error.
         # Break-even is ~5%, but during model downturn we require an extra safety
         # margin. Raised 8% → 10% on 2026-04-18 (Uncle Claude review): profit
