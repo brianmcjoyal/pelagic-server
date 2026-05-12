@@ -1221,7 +1221,7 @@ def _hydrate_from_kalshi():
         BOT_STATE["closegame_date"] = today_str
 
         # Hydrate floor/swing/goalie daily counters (same pattern)
-        _fl_today = [t for t in today_trades if t.get("strategy") == "floor"]
+        _fl_today = [t for t in today_trades if t.get("strategy") in ("floor", "floor_fade")]
         _existing_fl_ids = set(t.get("order_id") or t.get("ticker", "") + str(t.get("timestamp", "")) for t in BOT_STATE.get("floor_trades_today", []))
         _new_fl = [t for t in _fl_today if (t.get("order_id") or t.get("ticker", "") + str(t.get("timestamp", ""))) not in _existing_fl_ids]
         if _new_fl:
@@ -1612,7 +1612,7 @@ def _rebuild_strategy_stats_from_journal():
 
     # Rebuild CloseGame, Swing, Goalie, Floor stats (for completeness)
     for _rebuild_strat, _rebuild_key in [("closegame", "closegame"), ("swing", "momentum_swing"),
-                                          ("goalie", "goalie_pulled"), ("floor", "floor")]:
+                                          ("goalie", "goalie_pulled"), ("floor", "floor"), ("floor_fade", "floor_fade")]:
         _rw = _strat_wins.get(_rebuild_strat, 0) + _strat_wins.get(_rebuild_key, 0)
         _rl = _strat_losses.get(_rebuild_strat, 0) + _strat_losses.get(_rebuild_key, 0)
         _rp = _strat_profit.get(_rebuild_strat, 0) + _strat_profit.get(_rebuild_key, 0)
@@ -3466,7 +3466,7 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
     # 9. CLV HARD GATE — if a strategy has proven negative CLV over 15+ trades,
     # the market consistently moves against us after entry = no real edge.
     # This is stronger than the learning engine sizing penalty — it's a full block.
-    if strategy and strategy not in ("arb", "hedge", "floor"):
+    if strategy and strategy not in ("arb", "hedge", "floor", "floor_fade"):
         try:
             _clv_data = _LEARNING_STATE.get("clv_by_strategy", {}).get(strategy, {})
             if _clv_data.get("sample_size", 0) >= 15:
@@ -10443,7 +10443,7 @@ def _watchdog_check():
 
     # CHECK 6: Strategy counters should reset on new day
     today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
-    for strat in ["snipe", "moonshark", "closegame", "floor", "swing", "goalie"]:
+    for strat in ["snipe", "moonshark", "closegame", "floor", "floor_fade", "swing", "goalie"]:
         date_key = f"{strat}_date"
         spent_key = f"{strat}_daily_spent"
         strat_date = BOT_STATE.get(date_key)
