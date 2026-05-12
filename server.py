@@ -10288,7 +10288,9 @@ def _paper_trade_stats():
     settled = [p for p in _pts if p.get("result") in ("win", "loss")]
     wins = [p for p in settled if p["result"] == "win"]
     losses = [p for p in settled if p["result"] == "loss"]
-    pending = total - len(settled)
+    expired = [p for p in _pts if p.get("result") == "expired"]
+    truly_pending = [p for p in _pts if p.get("result") is None]
+    pending = len(expired) + len(truly_pending)
 
     # CLV analysis — the key metric
     clv_5 = [p["clv_5min"] for p in _pts if p.get("clv_5min") is not None]
@@ -10359,6 +10361,8 @@ def _paper_trade_stats():
         "wins": len(wins),
         "losses": len(losses),
         "pending": pending,
+        "expired": len(expired),
+        "truly_pending": len(truly_pending),
         "win_rate": win_rate,
         "total_pnl_cents": round(total_pnl, 1),
         "avg_edge_at_entry": avg_edge,
@@ -23230,7 +23234,12 @@ def paper_trades_resolve():
     details = []
 
     with _PAPER_TRADES_LOCK:
-        pending = [pt for pt in _PAPER_TRADES if pt.get("result") is None]
+        all_trades = list(_PAPER_TRADES)
+    result_breakdown = {}
+    for pt in all_trades:
+        r = pt.get("result") or "none"
+        result_breakdown[r] = result_breakdown.get(r, 0) + 1
+    pending = [pt for pt in all_trades if pt.get("result") not in ("win", "loss")]
 
     unique_tickers = {}
     for pt in pending:
@@ -23318,6 +23327,7 @@ def paper_trades_resolve():
         "errors": errors,
         "total_checked": len(pending),
         "unique_tickers": len(ticker_results),
+        "result_breakdown_before": result_breakdown,
         "details": details[:100],
     })
 
