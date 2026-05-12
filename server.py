@@ -23213,6 +23213,115 @@ def paper_trades_v2_purge():
         return jsonify({"error": str(e)})
 
 
+@app.route("/paper-trades-resolve", methods=["POST"])
+def paper_trades_resolve():
+    """Force-resolve ALL pending paper trades by checking Kalshi for results.
+
+    Batches tickers to avoid hammering the API, with a 0.1s delay between calls.
+    Returns summary of resolved trades.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import time as _resolve_time
+
+    resolved_wins = 0
+    resolved_losses = 0
+    still_pending = 0
+    errors = 0
+    details = []
+
+    with _PAPER_TRADES_LOCK:
+        pending = [pt for pt in _PAPER_TRADES if pt.get("result") is None]
+
+    unique_tickers = {}
+    for pt in pending:
+        tk = pt.get("ticker", "")
+        if tk and tk not in unique_tickers:
+            unique_tickers[tk] = None
+
+    def _check_ticker(ticker):
+        try:
+            h = signed_headers("GET", f"/markets/{ticker}")
+            r = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + f"/markets/{ticker}",
+                headers=h, timeout=5,
+            )
+            if r.ok:
+                mkt = r.json().get("market", {})
+                return (ticker, mkt.get("result", ""), mkt.get("status", ""))
+            elif r.status_code == 429:
+                return (ticker, "__rate_limited__", "")
+            else:
+                return (ticker, "", f"http_{r.status_code}")
+        except Exception as e:
+            return (ticker, "", str(e))
+
+    ticker_results = {}
+    ticker_list = list(unique_tickers.keys())
+    batch_size = 20
+    for i in range(0, len(ticker_list), batch_size):
+        batch = ticker_list[i:i + batch_size]
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(_check_ticker, tk): tk for tk in batch}
+            for future in as_completed(futures, timeout=30):
+                try:
+                    tk, result, status = future.result()
+                    ticker_results[tk] = (result, status)
+                except Exception:
+                    pass
+        if i + batch_size < len(ticker_list):
+            _resolve_time.sleep(0.5)
+
+    now_iso = datetime.datetime.utcnow().isoformat() + "Z"
+    for pt in pending:
+        ticker = pt.get("ticker", "")
+        if ticker not in ticker_results:
+            still_pending += 1
+            continue
+        result_str, status = ticker_results[ticker]
+        if result_str == "__rate_limited__":
+            still_pending += 1
+            continue
+        if not result_str:
+            still_pending += 1
+            continue
+
+        side = pt.get("side", "")
+        entry_price = pt.get("entry_price", 0)
+        won = (result_str == side)
+        pt["result"] = "win" if won else "loss"
+        pt["closing_price"] = 97 if won else 3
+        pt["clv_final"] = pt["closing_price"] - entry_price
+        pt["settlement_time"] = now_iso
+        if won:
+            pt["pnl_cents"] = round((100 - entry_price) * 0.93, 1)
+            resolved_wins += 1
+        else:
+            pt["pnl_cents"] = -entry_price
+            resolved_losses += 1
+        details.append({
+            "ticker": ticker[:40],
+            "side": side,
+            "result": pt["result"],
+            "entry_price": entry_price,
+            "pnl_cents": pt["pnl_cents"],
+        })
+
+    try:
+        _save_state()
+    except Exception:
+        pass
+
+    return jsonify({
+        "resolved_wins": resolved_wins,
+        "resolved_losses": resolved_losses,
+        "still_pending": still_pending,
+        "errors": errors,
+        "total_checked": len(pending),
+        "unique_tickers": len(ticker_results),
+        "details": details[:100],
+    })
+
+
 @app.route("/paper-trades-v2")
 def paper_trades_v2_api():
     """Return paper trading stats for v2_vegas signal only (post-Vegas-primary deploy)."""
