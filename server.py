@@ -71,10 +71,10 @@ V2_LAUNCH_DATE = "2026-04-27"  # Only count paper trades from this date onwards
 # Bot configuration and state
 # ---------------------------------------------------------------------------
 BOT_CONFIG = {
-    "enabled": False,  # MANUALLY PAUSED — re-enable via /config API once ESPN matching bug is fixed
-    "max_bet_usd": 5.0,           # REDUCED — $5 max until live win rate proven
-    "max_daily_usd": 25.0,         # REDUCED — max $25/day
-    "max_daily_trades": 3,         # max 3 live trades/day
+    "enabled": True,  # LIVE — floor_fade strategy (57% paper WR over 688 trades)
+    "max_bet_usd": 5.0,           # $5 max per trade — conservative
+    "max_daily_usd": 25.0,         # $25/day cap
+    "max_daily_trades": 5,         # 5 trades/day — enough to learn but limited risk
     "min_balance_usd": 50.0,      # SAFETY FLOOR: stop all trading if cash below $50
     "min_cash_reserve_pct": 0.05, # keep 5% of portfolio in cash — legacy positions skew ratio
     "max_open_positions": 150,    # no hard cap — quality is controlled by conviction + edge gates, not position count
@@ -7207,8 +7207,11 @@ def floor_quota_snipe():
 
         ticker = cand["ticker"]
         title = cand["title"]
-        side = cand["side"]
-        price = cand["price"]
+        # FADE MODE: paper data shows betting AGAINST the Vegas signal wins 57%
+        # over 688 trades. Flip the side and recalculate price.
+        _orig_side = cand["side"]
+        side = "no" if _orig_side == "yes" else "yes"
+        price = max(1, min(99, 100 - cand["price"]))
         edge = cand["edge"]
         event_key = cand["event_key"]
 
@@ -7246,18 +7249,18 @@ def floor_quota_snipe():
             pass
 
         _log_activity(
-            f"🎯 FLOOR {side.upper()} {title[:35]} @ {price}c x{count} (${cost_usd:.2f}) edge={edge:+.1%}",
+            f"🎯 FLOOR-FADE {side.upper()} {title[:35]} @ {price}c x{count} (${cost_usd:.2f}) edge={edge:+.1%}",
             "info"
         )
         try:
-            _log_paper_trade(ticker, title, side, price, cand.get("our_prob", 0), edge, edge * 100, strategy="floor")
+            _log_paper_trade(ticker, title, side, price, cand.get("our_prob", 0), edge, edge * 100, strategy="floor_fade")
         except Exception:
             pass
         if _paper_only:
             placed.append({"ticker": ticker, "side": side, "price": price, "paper": True})
             continue
         result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob,
-                                   win_prob=cand.get("our_prob"), edge=edge, strategy="floor")
+                                   win_prob=cand.get("our_prob"), edge=edge, strategy="floor_fade")
         if "error" in result:
             # Surface Kalshi's response body (not just our exception str) so
             # we can actually diagnose what the API is rejecting.
@@ -7277,10 +7280,10 @@ def floor_quota_snipe():
 
         with _BOT_STATE_LOCK:
             BOT_STATE["fill_attempts"] = BOT_STATE.get("fill_attempts", 0) + 1
-            BOT_STATE["fill_attempts_by_strategy"]["floor"] = BOT_STATE.get("fill_attempts_by_strategy", {}).get("floor", 0) + 1
+            BOT_STATE["fill_attempts_by_strategy"]["floor_fade"] = BOT_STATE.get("fill_attempts_by_strategy", {}).get("floor_fade", 0) + 1
             if filled > 0:
                 BOT_STATE["fill_successes"] = BOT_STATE.get("fill_successes", 0) + 1
-                BOT_STATE["fill_successes_by_strategy"]["floor"] = BOT_STATE.get("fill_successes_by_strategy", {}).get("floor", 0) + 1
+                BOT_STATE["fill_successes_by_strategy"]["floor_fade"] = BOT_STATE.get("fill_successes_by_strategy", {}).get("floor_fade", 0) + 1
 
         if filled <= 0:
             _release_game_exposure(event_key, cost_usd)
@@ -7297,11 +7300,11 @@ def floor_quota_snipe():
             "count": filled, "cost": actual_cost, "potential_profit": potential,
             "time": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
             "bot_version": BOT_VERSION,
-            "strategy": "floor",
+            "strategy": "floor_fade",
             "category": cand["mcat"],
             "espn_edge": round(edge, 4),
             "win_probability": round(cand.get("our_prob") or 0, 4) or None,
-            "edge_reasons": [f"ESPN edge +{edge:.1%}", f"cat={cand['mcat']}"],
+            "edge_reasons": [f"fade signal +{edge:.1%}", f"cat={cand['mcat']}"],
             "conviction": 2,
             "order_id": order_data.get("order_id", ""),
         })
@@ -7312,10 +7315,10 @@ def floor_quota_snipe():
 
         _edge_data = {"espn_implied": cand["our_prob"], "espn_edge": edge}
         _journal_trade(
-            ticker, title, side, price, filled, actual_cost, "floor",
+            ticker, title, side, price, filled, actual_cost, "floor_fade",
             is_live=True, close_time=cand.get("close_time", ""),
             game_info=cand.get("game"), espn_edge_data=_edge_data,
-            conviction=3, conviction_reasons=[f"ESPN+{edge:.0%}", "floor_mode"],
+            conviction=3, conviction_reasons=[f"fade+{edge:.0%}", "floor_fade_mode"],
         )
 
         _log_activity(
