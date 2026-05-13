@@ -19615,9 +19615,9 @@ def _get_espn_win_prob(event_id, league, home_team=True):
 # The Odds API — real-time sportsbook odds from 15+ bookmakers
 # ---------------------------------------------------------------------------
 _ODDS_API_CACHE = {}  # sport_key -> {"data": [...], "ts": float}
-_ODDS_API_TTL = 7200  # 2-hour default cache — overridden dynamically during game hours
-_ODDS_API_TTL_GAME_HOURS = 900   # 15-min cache during active game hours — pre-game lines go stale fast
-_ODDS_API_TTL_OFF_HOURS = 7200   # 2-hour cache during off-hours
+_ODDS_API_TTL = 21600  # 6-hour default cache
+_ODDS_API_TTL_GAME_HOURS = 21600  # 6h during game hours — pre-game lines barely move; 500 free req/month budget
+_ODDS_API_TTL_OFF_HOURS = 43200   # 12h off-hours — lines don't change overnight
 _ODDS_API_STATS = {
     "last_fetch": None,
     "total_requests": 0,
@@ -19714,11 +19714,11 @@ def _fetch_odds_api(sport_key):
     except Exception:
         _is_game_hours = True  # default to shorter TTL if timezone fails
     if _remaining is not None and _remaining < 50:
-        _effective_ttl = 14400  # 4h — conserve remaining quota
+        _effective_ttl = 43200  # 12h — conserve remaining quota
     elif _is_game_hours:
-        _effective_ttl = _ODDS_API_TTL_GAME_HOURS  # 30min during games
+        _effective_ttl = _ODDS_API_TTL_GAME_HOURS  # 6h during games
     else:
-        _effective_ttl = _ODDS_API_TTL_OFF_HOURS    # 2h off-hours
+        _effective_ttl = _ODDS_API_TTL_OFF_HOURS    # 12h off-hours
     cached = _ODDS_API_CACHE.get(sport_key)
     if cached and now - cached["ts"] < _effective_ttl:
         return cached["data"]
