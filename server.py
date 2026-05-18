@@ -86,7 +86,7 @@ BOT_CONFIG = {
     "max_category_exposure": 3,   # max 3 positions per category — diversified
     "blocked_categories": ["weather", "golf", "politics", "economics", "nfl", "other", "tech", "mma", "ufc", "entertainment", "crypto", "finance", "soccer"],  # block soccer (ties make Winner markets non-binary)
     "blocked_keywords": ["title holder", "title on dec", "prime minister", "next president", "ipo first", "gas price", "billboard", "netflix", "spotify", "golf", "pga", "lpga", "masters", "election", "congress", "senate", "governor", "ufc", "mma", "bellator", "champion", "mvp", "award", "oscar", "grammy", "emmy", "win the", "series winner", "conference winner", "division winner", "playoff", "super bowl", "world series winner", "stanley cup winner", "finals winner"],  # block long-dated + non-game markets
-    "moonshark_enabled": True,  # MoonShark longshot sniper toggle
+    "moonshark_enabled": False,  # DISABLED: 3.57% live WR, paper fade barely breaks even, floor_fade does it better
     "sport_exposure_cap_pct": 0.40, # max 40% of daily budget on any single sport (NBA correlation, MLB night, etc.)
     "smart_exit_enabled": True,     # take-profit / trailing-stop / stop-loss on live game positions
 }
