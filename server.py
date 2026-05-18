@@ -4468,8 +4468,8 @@ LIVE_GAME_SERIES = [
 ]
 
 # Sniper settings
-SNIPE_MIN_PRICE = 25   # cents — value range: 25-75c (data: 61-80c has 73% WR)
-SNIPE_MAX_PRICE = 75   # cents — raised from 65c; 61-80c is the most profitable range
+SNIPE_MIN_PRICE = 55   # cents — shifted to high-probability favorites (data: 61-80c has 73% WR)
+SNIPE_MAX_PRICE = 88   # cents — wider ceiling to catch strong favorites most likely to settle YES
 SNIPE_BET_USD = 15.0   # fallback — now uses _smart_bet_size() for bankroll scaling
 SNIPE_MAX_DAILY = 50.0   # daily safety cap — reduced to 25% of bankroll total across strategies
 SNIPE_MAX_TRADES = 20    # more room — this is our best strategy
@@ -4624,7 +4624,7 @@ def _snap_game_exposure():
 # ---------------------------------------------------------------------------
 # DAILY BET FLOOR — guarantee minimum activity so we always learn & earn
 # ---------------------------------------------------------------------------
-DAILY_BET_FLOOR = 3  # minimum bets placed per day — 5 was too aggressive, caused spray-betting
+DAILY_BET_FLOOR = 5  # minimum bets placed per day — user wants 5 high-probability bets daily
 
 def _today_str_pt():
     return datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
@@ -5155,8 +5155,8 @@ def live_game_snipe():
                 # Signal 2: High volume / liquidity
                 if _ask_size >= 50:
                     conviction += 1
-                # Signal 3: Price in sweet spot (75-88c for sniper = highest win rate)
-                if 75 <= price <= 88:
+                # Signal 3: Price in sweet spot (65-88c for sniper = highest win rate)
+                if 65 <= price <= 88:
                     conviction += 1
                 # Signal 4: Closing soon (live edge)
                 if closing_boost > 1:
@@ -7012,8 +7012,8 @@ def closegame_snipe():
 
 FLOOR_MAX_DAILY_USD = 30.0  # total cap for the floor strategy per day
 FLOOR_BET_USD = 3.0         # default bet size — small so losses stay small
-FLOOR_MIN_PRICE = 15        # widest allowed range — 15c to 88c (floor at 15c minimum)
-FLOOR_MAX_PRICE = 65  # aligned with gateway ceiling (was 88, dead code above 65c)
+FLOOR_MIN_PRICE = 50        # shifted to favorites — higher win probability
+FLOOR_MAX_PRICE = 85  # allow high-probability favorites (most likely to win)
 FLOOR_MIN_EDGE = 0.05       # 5% ESPN edge minimum — same bar as moonshark, no charity bets
 FLOOR_MIN_CONVICTION = 3    # relaxed but not reckless — 2 was too loose
 FLOOR_TRADING_HOURS = (10, 23)  # 10am-11pm PT — games happen in this window
