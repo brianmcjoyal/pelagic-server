@@ -4461,7 +4461,7 @@ LIVE_GAME_SERIES = [
     "KXNCAAWBGAME",        # NCAA Women's Basketball game winners
     "KXKBLGAME",           # KBO Korean baseball (morning hours, less competition)
     # REMOVED: "KXUFCFIGHT" — UFC/MMA has 13% win rate, -$20 P&L, no live ESPN win prob
-    "KXMLSGAME",           # MLS — season March-October
+    # REMOVED: "KXMLSGAME" — MLS has 30.8% paper WR over 26 trades, signal is noise
     "KXEPLGAME",           # EPL — season Aug-May
     "KXSOCCERGAME",        # Other soccer markets
     # REMOVED: Tennis (0% win rate), NFL (off-season)
@@ -4870,6 +4870,10 @@ def live_game_snipe():
     bal = 10000  # default for paper-only mode; overwritten below when bot is enabled
     if _strategy_is_paused("live_sniper"):
         return []
+    # DEAD HOURS — paper data shows <26% WR during these hours
+    _snipe_hour_pt = datetime.datetime.now(tz=_PACIFIC).hour
+    if _snipe_hour_pt in _DEAD_HOURS_PT:
+        _paper_only = True
 
     # Daily reset check (Pacific time — matches dashboard display)
     today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
@@ -5571,6 +5575,10 @@ def moonshark_snipe():
         return []
     if not BOT_CONFIG.get("moonshark_enabled", True):
         return []
+    # DEAD HOURS — paper data shows <26% WR during these hours
+    _ms_hour_pt = datetime.datetime.now(tz=_PACIFIC).hour
+    if _ms_hour_pt in _DEAD_HOURS_PT:
+        _paper_only = True
 
     # Daily reset check (Pacific time — matches dashboard display)
     today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
@@ -6431,6 +6439,10 @@ def closegame_snipe():
         return []
     if not BOT_CONFIG.get("closegame_enabled", True):
         return []
+    # DEAD HOURS — paper data shows <26% WR during these hours
+    _cg_hour_pt = datetime.datetime.now(tz=_PACIFIC).hour
+    if _cg_hour_pt in _DEAD_HOURS_PT:
+        _paper_only = True
 
     # Daily reset (Pacific time — matches dashboard display)
     today = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
@@ -7020,6 +7032,9 @@ FLOOR_MAX_PRICE = 85  # allow high-probability favorites (most likely to win)
 FLOOR_MIN_EDGE = 0.05       # 5% ESPN edge minimum — same bar as moonshark, no charity bets
 FLOOR_MIN_CONVICTION = 3    # relaxed but not reckless — 2 was too loose
 FLOOR_TRADING_HOURS = (10, 23)  # 10am-11pm PT — games happen in this window
+# Dead hours: paper data shows <26% WR during these PT hours.
+# Paper still runs (learning), but live bets are blocked.
+_DEAD_HOURS_PT = {10, 12, 17, 19}  # 10am, 12pm, 5pm, 7pm PT
 FLOOR_FADE_MIN_LIVE_TRADES = 20  # need 20+ settled live trades before evaluating WR
 FLOOR_FADE_MIN_LIVE_WR = 0.35   # auto-disable if live WR drops below 35% over 20+ trades
 
@@ -7041,6 +7056,9 @@ def floor_quota_snipe():
     _hour_pt = _now_pt.hour
     _start_h, _end_h = FLOOR_TRADING_HOURS
     if _hour_pt < _start_h or _hour_pt >= _end_h:
+        _paper_only = True
+    # DEAD HOURS — paper data shows <26% WR during these hours
+    if _hour_pt in _DEAD_HOURS_PT:
         _paper_only = True
 
     # STRATEGY KILL SWITCH — auto-disable if live WR degrades below threshold
@@ -7121,6 +7139,7 @@ def floor_quota_snipe():
     _blocked_prefixes = [
         "KXKHLGAME", "KXVTBGAME", "KXCS2GAME", "KXVALGAME",
         "KXDOTAGAME", "KXLOLGAME", "KXCOD", "KXCRICKET", "KXKABADDI",
+        "KXMLSGAME",  # MLS: 30.8% paper WR over 26 trades
     ]
     _allowed_prefixes = [
         "KXMLBGAME", "KXNBAGAME", "KXNHLGAME", "KXNFLGAME",
