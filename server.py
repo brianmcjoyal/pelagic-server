@@ -5150,8 +5150,11 @@ def live_game_snipe():
                 elif _snipe_game and _snipe_game.get("state") == "post":
                     conviction += 1  # finished, might be settling
                 else:
-                    # No ESPN data — cannot verify game state, skip this trade
-                    continue
+                    # No ESPN data — allow high-probability favorites (>=65c) through
+                    if price >= 65:
+                        conviction += 1
+                    else:
+                        continue
                 # Signal 2: High volume / liquidity
                 if _ask_size >= 50:
                     conviction += 1
@@ -7219,7 +7222,18 @@ def floor_quota_snipe():
                 implied = ask / 100.0
                 _vp, _ve, _vl = _get_vegas_edge(ticker, title, implied, side_name)
                 if _vp is None:
-                    continue  # no Vegas data for this side
+                    # Vegas unavailable — allow high-probability favorites (>=65c)
+                    # as price-only candidates with a synthetic edge of 0.05
+                    if ask >= 65:
+                        if best is None or 0.05 > best["edge"]:
+                            best = {
+                                "side": side_name,
+                                "price": ask,
+                                "edge": 0.05,
+                                "our_prob": implied,
+                                "vegas_gap_pp": 0.0,
+                            }
+                    continue
                 if _ve < FLOOR_MIN_EDGE:
                     continue  # gap too small
                 if _ve < -0.03:
@@ -7234,7 +7248,6 @@ def floor_quota_snipe():
                     }
 
             if not best:
-                _log_activity(f"FLOOR SKIP: {ticker} — no Vegas edge found", "info")
                 continue
 
             candidates.append({
