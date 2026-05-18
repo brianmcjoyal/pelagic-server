@@ -84,7 +84,7 @@ BOT_CONFIG = {
     "min_volume": 50,             # include smaller markets
     "scan_interval_seconds": 45,  # faster scanning during game hours
     "max_category_exposure": 3,   # max 3 positions per category — diversified
-    "blocked_categories": ["weather", "golf", "politics", "economics", "nfl", "other", "tech", "mma", "ufc", "entertainment", "crypto", "finance"],  # block everything without live-game ESPN edge
+    "blocked_categories": ["weather", "golf", "politics", "economics", "nfl", "other", "tech", "mma", "ufc", "entertainment", "crypto", "finance", "soccer"],  # block soccer (ties make Winner markets non-binary)
     "blocked_keywords": ["title holder", "title on dec", "prime minister", "next president", "ipo first", "gas price", "billboard", "netflix", "spotify", "golf", "pga", "lpga", "masters", "election", "congress", "senate", "governor", "ufc", "mma", "bellator", "champion", "mvp", "award", "oscar", "grammy", "emmy", "win the", "series winner", "conference winner", "division winner", "playoff", "super bowl", "world series winner", "stanley cup winner", "finals winner"],  # block long-dated + non-game markets
     "moonshark_enabled": True,  # MoonShark longshot sniper toggle
     "sport_exposure_cap_pct": 0.40, # max 40% of daily budget on any single sport (NBA correlation, MLB night, etc.)
@@ -4461,9 +4461,9 @@ LIVE_GAME_SERIES = [
     "KXNCAAWBGAME",        # NCAA Women's Basketball game winners
     "KXKBLGAME",           # KBO Korean baseball (morning hours, less competition)
     # REMOVED: "KXUFCFIGHT" — UFC/MMA has 13% win rate, -$20 P&L, no live ESPN win prob
-    # REMOVED: "KXMLSGAME" — MLS has 30.8% paper WR over 26 trades, signal is noise
-    "KXEPLGAME",           # EPL — season Aug-May
-    "KXSOCCERGAME",        # Other soccer markets
+    # REMOVED: "KXMLSGAME" — MLS has 30.8% paper WR, games can end in ties
+    # REMOVED: "KXEPLGAME" — soccer games can end in ties, Winner markets aren't truly binary
+    # REMOVED: "KXSOCCERGAME" — same tie problem as MLS/EPL
     # REMOVED: Tennis (0% win rate), NFL (off-season)
 ]
 
@@ -7139,11 +7139,11 @@ def floor_quota_snipe():
     _blocked_prefixes = [
         "KXKHLGAME", "KXVTBGAME", "KXCS2GAME", "KXVALGAME",
         "KXDOTAGAME", "KXLOLGAME", "KXCOD", "KXCRICKET", "KXKABADDI",
-        "KXMLSGAME",  # MLS: 30.8% paper WR over 26 trades
+        "KXMLSGAME", "KXEPLGAME", "KXSOCCERGAME",  # soccer: ties make Winner markets non-binary
     ]
     _allowed_prefixes = [
         "KXMLBGAME", "KXNBAGAME", "KXNHLGAME", "KXNFLGAME",
-        "KXSOCCERGAME", "KXATPMATCH", "KXWTAMATCH", "KXATPCHALLENGERMATCH",
+        "KXATPMATCH", "KXWTAMATCH", "KXATPCHALLENGERMATCH",
         "KXUFCFIGHT", "KXAFLGAME", "KXNCAAMBGAME", "KXNCAAWBGAME", "KXKBLGAME",
     ]
 
