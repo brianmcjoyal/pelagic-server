@@ -3569,7 +3569,7 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
         # guarantee fills (see fill_price computation below). Previously
         # cost_est used raw price_cents → daily budget cap could be exceeded
         # by ~5-10% because actual fills were higher.
-        _max_bump_cents = 3  # conservative upper bound of the adaptive bump
+        _max_bump_cents = 5  # conservative upper bound of the adaptive bump
         _worst_fill_cents = min(price_cents + _max_bump_cents, 99) if aggressive else price_cents
         cost_est = (_worst_fill_cents * count) / 100.0
         ok, reason = _pretrade_validate(
@@ -3595,10 +3595,10 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
     if not headers:
         return {"error": "No API key"}
 
-    # Adaptive fill pricing: +2c for liquid markets, +3c for thin markets
+    # Adaptive fill pricing: +4c for liquid markets, +5c for thin markets
     # IOC orders need to cross the spread to fill — being aggressive avoids
     # the 0% fill rate problem caused by stale ask prices in market data.
-    bump = 2  # default: +2c
+    bump = 4  # default: +4c (raised from +2c after 0/7 fill rate on 2026-05-18)
     if aggressive and orderbook_hint and isinstance(orderbook_hint, dict):
         spread = orderbook_hint.get("spread", 0)
         liquidity = orderbook_hint.get("liquidity_score", 50)
@@ -3607,10 +3607,10 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
         total_depth = bid_depth + ask_depth
         # Thin market: wide spread (>5c) or low total depth (<20 contracts)
         if spread > 5 or total_depth < 20 or liquidity < 25:
-            bump = 3  # thin market — bump by 3c for better fill probability
+            bump = 5  # thin market — bump by 5c for better fill probability
             print(f"[ORDER] Adaptive pricing: +3c bump (spread={spread}, depth={total_depth}, liq={liquidity})")
         elif spread <= 2 and total_depth > 50:
-            bump = 1  # tight spread + deep book — 1c is enough
+            bump = 2  # tight spread + deep book — 2c is enough
             print(f"[ORDER] Tight market: +1c bump (spread={spread}, depth={total_depth})")
 
     # Bump price above ask to ensure fills
@@ -7032,9 +7032,10 @@ FLOOR_MAX_PRICE = 85  # allow high-probability favorites (most likely to win)
 FLOOR_MIN_EDGE = 0.05       # 5% ESPN edge minimum — same bar as moonshark, no charity bets
 FLOOR_MIN_CONVICTION = 3    # relaxed but not reckless — 2 was too loose
 FLOOR_TRADING_HOURS = (10, 23)  # 10am-11pm PT — games happen in this window
-# Dead hours: paper data shows <26% WR during these PT hours.
-# Paper still runs (learning), but live bets are blocked.
-_DEAD_HOURS_PT = {10, 12, 17, 19}  # 10am, 12pm, 5pm, 7pm PT
+# Dead hours: paper data showed <26% WR during these PT hours under the
+# old fade strategy. With direct-bet (non-fade) mode, re-evaluate over time.
+# Narrowed to morning-only so evening game windows stay open.
+_DEAD_HOURS_PT = {10, 12}  # 10am, 12pm PT only — 5pm/7pm reopened for prime game hours
 FLOOR_FADE_MIN_LIVE_TRADES = 20  # need 20+ settled live trades before evaluating WR
 FLOOR_FADE_MIN_LIVE_WR = 0.35   # auto-disable if live WR drops below 35% over 20+ trades
 
@@ -7302,11 +7303,10 @@ def floor_quota_snipe():
 
         ticker = cand["ticker"]
         title = cand["title"]
-        # FADE MODE: paper data shows betting AGAINST the Vegas signal wins 57%
-        # over 688 trades. Flip the side and recalculate price.
-        _orig_side = cand["side"]
-        side = "no" if _orig_side == "yes" else "yes"
-        price = max(1, min(99, 100 - cand["price"]))
+        # BET WITH the signal — back the high-probability favorite directly.
+        # Fade mode (betting against) produced 6.9% live WR; abandoned.
+        side = cand["side"]
+        price = cand["price"]
         edge = cand["edge"]
         event_key = cand["event_key"]
 
