@@ -3319,10 +3319,10 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
     # GLOBAL MAXIMUM PRICE CEILING — data shows 61-80c is the most profitable range
     # (73.2% WR, +$139 across 224 bets). Cap at 80c; above that payoff is too thin.
     # Exception: arb and hedge strategies buy opposite sides to lock in guaranteed profit
-    if price_cents > 80 and strategy not in ("arb", "hedge"):
+    if price_cents > 85 and strategy not in ("arb", "hedge"):
         _PRETRADE_STATS["blocked"] += 1
         _PRETRADE_STATS["reasons"]["above_price_ceiling"] = _PRETRADE_STATS["reasons"].get("above_price_ceiling", 0) + 1
-        return False, f"Price {price_cents}c above 80c ceiling — payoff too thin"
+        return False, f"Price {price_cents}c above 85c ceiling — payoff too thin"
 
     if count < 1:
         _PRETRADE_STATS["blocked"] += 1
@@ -5053,15 +5053,22 @@ def live_game_snipe():
                 # Close time check — skip for series-scanned markets (Kalshi sets
                 # close_time to series end, not individual game time)
                 close_time_str = mkt.get("close_time", "")
-                # SAME-DAY ONLY: skip markets for future games.
-                # Series-scanned markets use ticker date; others use close_time.
+                # NEAR-FUTURE ONLY: allow games within 2 days.
+                # Kalshi often doesn't list same-day markets until close to
+                # game time, causing zero candidates during morning hours.
                 if "series_ticker" in source_params:
-                    if not _is_same_day_ticker(ticker):
+                    if not _is_near_future_ticker(ticker, max_days=2):
                         _ms_reasons["not_today"] = _ms_reasons.get("not_today", 0) + 1
                         continue
-                elif close_time_str and not _is_same_day_market(close_time_str):
-                    _ms_reasons["not_today"] = _ms_reasons.get("not_today", 0) + 1
-                    continue
+                elif close_time_str:
+                    try:
+                        _ct_chk = datetime.datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
+                        _days_out = (_ct_chk.astimezone(_PACIFIC).date() - datetime.datetime.now(tz=_PACIFIC).date()).days
+                        if _days_out > 2 or _days_out < 0:
+                            _ms_reasons["not_today"] = _ms_reasons.get("not_today", 0) + 1
+                            continue
+                    except Exception:
+                        pass
                 if "series_ticker" not in source_params:
                     if close_time_str:
                         try:
@@ -7228,16 +7235,26 @@ def floor_quota_snipe():
                 continue
 
             close_time_str = mkt.get("close_time", "") or ""
-            # SAME-DAY ONLY: skip floor bets on future games.
-            # When scanning by series_ticker, Kalshi sets close_time to series end
-            # (not game day), so we parse the date from the ticker directly.
+            # RELAXED DATE FILTER: allow games within the next 3 days.
+            # Kalshi often doesn't list same-day game markets until close to
+            # game time, so restricting to today-only caused zero candidates
+            # during morning hours. Prices on near-future games reflect current
+            # probability — a 70c favorite tomorrow is the same edge as today.
             if "series_ticker" in source_params:
-                if not _is_same_day_ticker(ticker):
-                    _floor_skip_reasons["not_today"] = _floor_skip_reasons.get("not_today", 0) + 1
+                if not _is_near_future_ticker(ticker, max_days=3):
+                    _floor_skip_reasons["not_near_future"] = _floor_skip_reasons.get("not_near_future", 0) + 1
                     continue
-            elif close_time_str and not _is_same_day_market(close_time_str):
-                _floor_skip_reasons["not_today_close"] = _floor_skip_reasons.get("not_today_close", 0) + 1
-                continue
+            elif close_time_str:
+                try:
+                    ct = datetime.datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
+                    ct_pt = ct.astimezone(_PACIFIC).date()
+                    today_pt = datetime.datetime.now(tz=_PACIFIC).date()
+                    days_out = (ct_pt - today_pt).days
+                    if days_out > 3 or days_out < 0:
+                        _floor_skip_reasons["not_near_future_close"] = _floor_skip_reasons.get("not_near_future_close", 0) + 1
+                        continue
+                except Exception:
+                    pass
 
             # Parse prices
             yes_ask = None
@@ -19994,6 +20011,23 @@ def _is_same_day_ticker(ticker):
         return game_date in (today_pt, tomorrow_pt)
     except Exception:
         return True  # parse error — allow through
+
+
+def _is_near_future_ticker(ticker, max_days=3):
+    """Return True if ticker encodes a date within max_days from now (Pacific time)."""
+    try:
+        import re as _re
+        now_pt = datetime.datetime.now(tz=_PACIFIC)
+        today_pt = now_pt.date()
+        m = _re.search(r'-(\d{2})([A-Z]{3})(\d{2})', ticker.upper())
+        if not m:
+            return True
+        year_short, mon_str, day = m.group(1), m.group(2), m.group(3)
+        game_date = datetime.datetime.strptime(f'20{year_short} {mon_str} {day}', '%Y %b %d').date()
+        days_out = (game_date - today_pt).days
+        return 0 <= days_out <= max_days
+    except Exception:
+        return True
 
 
 def _parse_clock_to_seconds(clock_str, sport="nba"):
