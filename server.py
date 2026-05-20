@@ -7280,17 +7280,18 @@ def floor_quota_snipe():
                 implied = ask / 100.0
                 _vp, _ve, _vl = _get_vegas_edge(ticker, title, implied, side_name)
                 if _vp is None:
-                    # Vegas unavailable — allow high-probability favorites (>=65c)
-                    # as price-only candidates with a synthetic edge of 0.05
-                    if ask >= 65:
-                        if best is None or 0.05 > best["edge"]:
-                            best = {
-                                "side": side_name,
-                                "price": ask,
-                                "edge": 0.05,
-                                "our_prob": implied,
-                                "vegas_gap_pp": 0.0,
-                            }
+                    # Vegas unavailable — allow any in-range candidate with
+                    # synthetic edge scaled by price (higher price = more likely
+                    # to win = more edge). Floor's job is guaranteed activity.
+                    _synth_edge = 0.03 + (ask - FLOOR_MIN_PRICE) * 0.001
+                    if best is None or _synth_edge > best["edge"]:
+                        best = {
+                            "side": side_name,
+                            "price": ask,
+                            "edge": round(_synth_edge, 4),
+                            "our_prob": implied,
+                            "vegas_gap_pp": 0.0,
+                        }
                     continue
                 if _ve < FLOOR_MIN_EDGE:
                     continue  # gap too small
