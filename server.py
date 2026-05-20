@@ -4665,27 +4665,35 @@ def _total_daily_spent():
         + BOT_STATE.get("goalie_daily_spent", 0)
         + BOT_STATE.get("misc_daily_spent", 0)
     )
-    persisted_sum = sum(float(t.get("cost_usd", 0) or 0) for t in _all_trades_today())
+    # Exclude fill-synced trades (re-detected after deploy) from budget
+    persisted_sum = sum(
+        float(t.get("cost_usd", 0) or 0) for t in _all_trades_today()
+        if t.get("source") != "kalshi_fill"
+    )
     return max(bucket_sum, persisted_sum)
 
 
 def _total_bets_today():
-    """Count every bet placed today across every strategy.
+    """Count bets actively placed by the bot today (not synced fills).
 
-    Returns max(per-strategy lists, persisted all_trades count) so the count
-    survives a process restart (RAM-only buckets get wiped but all_trades is
-    persisted to disk by _save_state).
+    Excludes manual_trades_today (fill sync re-detections after deploy)
+    since those inflate the count and block the daily quota from working.
+    Uses max(per-strategy buckets, persisted non-manual all_trades) so
+    the count survives a process restart.
     """
     bucket_count = (
         len(BOT_STATE.get("snipe_trades_today", []))
         + len(BOT_STATE.get("moonshark_trades_today", []))
         + len(BOT_STATE.get("closegame_trades_today", []))
-        + len(BOT_STATE.get("manual_trades_today", []))
         + len(BOT_STATE.get("floor_trades_today", []))
         + len(BOT_STATE.get("swing_trades_today", []))
         + len(BOT_STATE.get("goalie_trades_today", []))
     )
-    persisted_count = len(_all_trades_today())
+    # Count persisted trades but exclude fill-synced ones
+    persisted_count = sum(
+        1 for t in _all_trades_today()
+        if t.get("source") != "kalshi_fill"
+    )
     return max(bucket_count, persisted_count)
 
 
@@ -12370,8 +12378,18 @@ def check_settlements_and_reinvest():
                         _closing_price = 3 if won else 97
             # Track in trade journal for pattern analysis
             _journal_settle(ticker, won, pnl_usd, closing_price_cents=_closing_price)
-            # Update drawdown circuit breaker
-            _update_drawdown(pnl_usd)
+            # Update drawdown circuit breaker — only for positions opened today.
+            # Old positions settling shouldn't halt today's new trading.
+            _opened_today = False
+            for _tr in BOT_STATE.get("all_trades", []):
+                if _tr.get("ticker") == ticker:
+                    _tr_ts = (_tr.get("timestamp") or "")[:10]
+                    _today_dd = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+                    if _tr_ts == _today_dd:
+                        _opened_today = True
+                    break
+            if _opened_today:
+                _update_drawdown(pnl_usd)
             new_settlements.append({
                 "ticker": ticker,
                 "pnl_usd": round(pnl_usd, 2),
@@ -13023,12 +13041,35 @@ def _background_loop():
     except Exception as e:
         print(f"[BG] Perf history seed error (non-fatal): {e}")
 
-    # Seed known fill IDs so sync doesn't re-detect existing trades.
-    # Snapshot all_trades under BOT_STATE lock, then batch-add fill IDs
-    # under KNOWN_FILL_IDS lock — holds each lock for the minimum time.
+    # Seed known fill IDs from BOTH local state AND the Kalshi API.
+    # Local state may be empty after an ephemeral deploy, so we MUST
+    # also fetch recent fills from the API to prevent the sync loop
+    # from re-detecting old fills as "new external" bets.
     with _BOT_STATE_LOCK:
         _seed_trades_snap = list(BOT_STATE.get("all_trades", []))
     _seed_ids = [t["order_id"] for t in _seed_trades_snap if t.get("order_id")]
+    # Fetch today's fills from Kalshi to seed the dedupe set
+    try:
+        _seed_path = "/portfolio/fills"
+        _seed_h = signed_headers("GET", _seed_path)
+        if _seed_h:
+            _seed_start = datetime.datetime.now(tz=_PACIFIC).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ).astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            _seed_resp = requests.get(
+                KALSHI_BASE_URL + KALSHI_API_PREFIX + _seed_path,
+                headers=_seed_h,
+                params={"limit": 200, "min_ts": _seed_start},
+                timeout=15,
+            )
+            if _seed_resp.ok:
+                for _sf in _seed_resp.json().get("fills", []):
+                    _sfid = _sf.get("order_id", "")
+                    if _sfid:
+                        _seed_ids.append(_sfid)
+                print(f"[SYNC] Fetched {len(_seed_resp.json().get('fills', []))} fills from Kalshi API for seeding")
+    except Exception as _se:
+        print(f"[SYNC] Kalshi fill seed error (non-fatal): {_se}")
     with _KNOWN_FILL_IDS_LOCK:
         for _oid in _seed_ids:
             _known_fill_ids.add(_oid)
