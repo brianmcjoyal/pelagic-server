@@ -4685,43 +4685,50 @@ def _all_trades_today():
 
 
 def _total_daily_spent():
-    """Sum daily spending across all strategy buckets. Used for global budget enforcement.
+    """Sum daily spending for BOT-placed trades only. Used for global budget enforcement.
 
-    Returns max(per-strategy buckets, persisted all_trades cost). The max()
-    handles two cases: (a) normal operation — buckets and all_trades agree;
-    (b) post-restart — buckets are 0 because RAM was wiped, but all_trades
-    was rehydrated from disk, so it carries the real spend.
+    Excludes kalshi_fill (manually placed on Kalshi) so they don't consume
+    the bot's budget — only trades the bot itself placed count.
     """
+    def _bot_spent(trades):
+        return sum(
+            float(t.get("cost_usd", 0) or t.get("cost", 0) or 0)
+            for t in trades if t.get("source") != "kalshi_fill"
+        )
     bucket_sum = (
-        BOT_STATE.get("snipe_daily_spent", 0)
-        + BOT_STATE.get("moonshark_daily_spent", 0)
-        + BOT_STATE.get("closegame_daily_spent", 0)
-        + BOT_STATE.get("floor_daily_spent", 0)
-        + BOT_STATE.get("swing_daily_spent", 0)
-        + BOT_STATE.get("goalie_daily_spent", 0)
+        _bot_spent(BOT_STATE.get("snipe_trades_today", []))
+        + _bot_spent(BOT_STATE.get("moonshark_trades_today", []))
+        + _bot_spent(BOT_STATE.get("closegame_trades_today", []))
+        + _bot_spent(BOT_STATE.get("floor_trades_today", []))
+        + _bot_spent(BOT_STATE.get("swing_trades_today", []))
+        + _bot_spent(BOT_STATE.get("goalie_trades_today", []))
         + BOT_STATE.get("misc_daily_spent", 0)
     )
-    persisted_sum = sum(float(t.get("cost_usd", 0) or 0) for t in _all_trades_today())
+    persisted_sum = sum(
+        float(t.get("cost_usd", 0) or 0) for t in _all_trades_today()
+        if t.get("source") != "kalshi_fill"
+    )
     return max(bucket_sum, persisted_sum)
 
 
 def _total_bets_today():
-    """Count every bet placed today across every strategy.
-
-    Returns max(per-strategy lists, persisted all_trades count) so the count
-    survives a process restart (RAM-only buckets get wiped but all_trades is
-    persisted to disk by _save_state).
+    """Count bot-placed bets today. Excludes kalshi_fill (manual Kalshi trades)
+    so they don't consume the bot's trade quota.
     """
+    def _exclude_synced(trades):
+        return sum(1 for t in trades if t.get("source") != "kalshi_fill")
     bucket_count = (
-        len(BOT_STATE.get("snipe_trades_today", []))
-        + len(BOT_STATE.get("moonshark_trades_today", []))
-        + len(BOT_STATE.get("closegame_trades_today", []))
-        + len(BOT_STATE.get("manual_trades_today", []))
-        + len(BOT_STATE.get("floor_trades_today", []))
-        + len(BOT_STATE.get("swing_trades_today", []))
-        + len(BOT_STATE.get("goalie_trades_today", []))
+        _exclude_synced(BOT_STATE.get("snipe_trades_today", []))
+        + _exclude_synced(BOT_STATE.get("moonshark_trades_today", []))
+        + _exclude_synced(BOT_STATE.get("closegame_trades_today", []))
+        + _exclude_synced(BOT_STATE.get("floor_trades_today", []))
+        + _exclude_synced(BOT_STATE.get("swing_trades_today", []))
+        + _exclude_synced(BOT_STATE.get("goalie_trades_today", []))
     )
-    persisted_count = len(_all_trades_today())
+    persisted_count = sum(
+        1 for t in _all_trades_today()
+        if t.get("source") != "kalshi_fill"
+    )
     return max(bucket_count, persisted_count)
 
 
@@ -12787,6 +12794,7 @@ def _sync_kalshi_fills():
                 "time": created,
                 "strategy": "manual",
                 "order_id": order_id,
+                "source": "kalshi_fill",
             })
 
             # Also add to all_trades
