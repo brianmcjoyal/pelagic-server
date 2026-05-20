@@ -7166,6 +7166,8 @@ def floor_quota_snipe():
 
     # Build candidate list — go wide
     candidates = []
+    _floor_skip_reasons = {}
+    _floor_scanned = 0
     _blocked_prefixes = [
         "KXKHLGAME", "KXVTBGAME", "KXCS2GAME", "KXVALGAME",
         "KXDOTAGAME", "KXLOLGAME", "KXCOD", "KXCRICKET", "KXKABADDI",
@@ -7201,16 +7203,20 @@ def floor_quota_snipe():
         for mkt in markets:
             ticker = mkt.get("ticker", "") or ""
             title = mkt.get("title", "") or ""
+            _floor_scanned += 1
             if not ticker or ticker in existing_tickers:
+                _floor_skip_reasons["dupe_ticker"] = _floor_skip_reasons.get("dupe_ticker", 0) + 1
                 continue
 
             t_upper = ticker.upper()
             if any(t_upper.startswith(bp) for bp in _blocked_prefixes):
+                _floor_skip_reasons["blocked_prefix"] = _floor_skip_reasons.get("blocked_prefix", 0) + 1
                 continue
 
             _parts = ticker.split("-")
             event_key = "-".join(_parts[:2]) if len(_parts) >= 2 else ticker
             if event_key in existing_events or event_key in _EVENTS_BET_TODAY:
+                _floor_skip_reasons["dupe_event"] = _floor_skip_reasons.get("dupe_event", 0) + 1
                 continue
 
             # ── HARD SPORTS-ONLY GATE ──
@@ -7218,35 +7224,40 @@ def floor_quota_snipe():
             _SPORTS_ONLY = {"nba", "nfl", "nhl", "mlb", "soccer", "tennis",
                             "mma", "ncaa", "kbo", "afl"}
             if mcat not in _SPORTS_ONLY:
+                _floor_skip_reasons["not_sports"] = _floor_skip_reasons.get("not_sports", 0) + 1
                 continue
             blocked = BOT_CONFIG.get("blocked_categories", [])
             if mcat in blocked:
+                _floor_skip_reasons["blocked_cat"] = _floor_skip_reasons.get("blocked_cat", 0) + 1
                 continue
             t_lower = title.lower()
             if any(kw in t_lower for kw in BOT_CONFIG.get("blocked_keywords", [])):
+                _floor_skip_reasons["blocked_kw"] = _floor_skip_reasons.get("blocked_kw", 0) + 1
                 continue
 
             # Require whitelisted prefix when scanning the catch-all time window
             if "series_ticker" not in source_params:
                 if not any(t_upper.startswith(ap) for ap in _allowed_prefixes):
+                    _floor_skip_reasons["no_prefix"] = _floor_skip_reasons.get("no_prefix", 0) + 1
                     continue
-                # Must be a binary GAME/MATCH/FIGHT market
                 if not any(kw in t_upper for kw in ["GAME", "MATCH", "FIGHT"]):
+                    _floor_skip_reasons["not_game"] = _floor_skip_reasons.get("not_game", 0) + 1
                     continue
 
             # Liquidity: still require something tradeable
             _ask_size = float(str(mkt.get("yes_ask_size_fp") or mkt.get("no_ask_size_fp") or 0))
             if _ask_size < 20:
+                _floor_skip_reasons["low_liq"] = _floor_skip_reasons.get("low_liq", 0) + 1
                 continue
 
             close_time_str = mkt.get("close_time", "") or ""
             # SAME-DAY ONLY: skip floor bets on future games.
-            # When scanning by series_ticker, Kalshi sets close_time to series end
-            # (not game day), so we parse the date from the ticker directly.
             if "series_ticker" in source_params:
                 if not _is_same_day_ticker(ticker):
+                    _floor_skip_reasons["not_today"] = _floor_skip_reasons.get("not_today", 0) + 1
                     continue
             elif close_time_str and not _is_same_day_market(close_time_str):
+                _floor_skip_reasons["not_today"] = _floor_skip_reasons.get("not_today", 0) + 1
                 continue
 
             # Parse prices
@@ -7298,6 +7309,7 @@ def floor_quota_snipe():
                     }
 
             if not best:
+                _floor_skip_reasons["no_edge"] = _floor_skip_reasons.get("no_edge", 0) + 1
                 continue
 
             candidates.append({
@@ -7314,9 +7326,11 @@ def floor_quota_snipe():
                 "close_time": mkt.get("close_time", "") if isinstance(mkt, dict) else "",
             })
 
+    _skip_str = ", ".join(f"{k}:{v}" for k, v in sorted(_floor_skip_reasons.items(), key=lambda x: -x[1]))
     if not candidates:
-        _log_activity("🎯 FLOOR: no edges found this scan", "info")
+        _log_activity(f"🎯 FLOOR: no edges found (scanned {_floor_scanned}, skips: {_skip_str or 'none'})", "info")
         return []
+    _log_activity(f"🎯 FLOOR: {len(candidates)} candidates found (scanned {_floor_scanned}, skips: {_skip_str or 'none'})", "info")
 
     # Rank by edge, take top N (shortfall)
     candidates.sort(key=lambda c: c["edge"], reverse=True)
