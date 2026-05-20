@@ -71,7 +71,7 @@ V2_LAUNCH_DATE = "2026-04-27"  # Only count paper trades from this date onwards
 # Bot configuration and state
 # ---------------------------------------------------------------------------
 BOT_CONFIG = {
-    "enabled": True,  # LIVE — floor_fade strategy (57% paper WR over 688 trades)
+    "enabled": True,  # LIVE — direct-bet on favorites (floor + sniper strategies)
     "max_bet_usd": 5.0,           # $5 max per trade — conservative
     "max_daily_usd": 25.0,         # $25/day cap
     "max_daily_trades": 5,         # 5 trades/day — enough to learn but limited risk
@@ -3459,12 +3459,7 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
             return False, f"Category '{cat}' is blocked"
 
     # 5. EV CHECK: if we have win_prob, verify positive EV after fees AND slippage.
-    # Skip for floor_fade — fade strategies bet AGAINST the signal, so the
-    # standard EV model (which assumes we're betting WITH win_prob) gives the
-    # wrong answer. floor_fade has its own edge filtering (FLOOR_MIN_EDGE).
-    if strategy == "floor_fade":
-        pass  # skip EV check — fade model is empirical, not probabilistic
-    elif win_prob is not None and win_prob > 0:
+    if win_prob is not None and win_prob > 0:
         slippage_cents = 3  # worst case IOC bump
         actual_price = price_cents + slippage_cents  # what we'll actually pay
         if actual_price >= 99:
@@ -3487,11 +3482,7 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
     # This is enforced by requiring 7% edge minimum for all trades (see #6 below)
 
     # 6. EDGE CHECK: if we have edge, verify it's meaningful (> fee drag + slippage)
-    # Skip for floor_fade — edge represents signal strength to fade, not
-    # traditional edge. floor_fade enforces its own FLOOR_MIN_EDGE (5%).
-    if strategy == "floor_fade":
-        pass  # skip global edge check — floor_fade has its own threshold
-    elif edge is not None:
+    if edge is not None:
         # Real cost of a trade: 7% fee on wins + 2-3c slippage + model error.
         # Break-even is ~5%, but during model downturn we require an extra safety
         # margin. Raised 8% → 10% on 2026-04-18 (Uncle Claude review): profit
@@ -3605,7 +3596,7 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
         # guarantee fills (see fill_price computation below). Previously
         # cost_est used raw price_cents → daily budget cap could be exceeded
         # by ~5-10% because actual fills were higher.
-        _max_bump_cents = 3  # conservative upper bound of the adaptive bump
+        _max_bump_cents = 5  # conservative upper bound of the adaptive bump
         _worst_fill_cents = min(price_cents + _max_bump_cents, 99) if aggressive else price_cents
         cost_est = (_worst_fill_cents * count) / 100.0
         ok, reason = _pretrade_validate(
@@ -3631,23 +3622,19 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
     if not headers:
         return {"error": "No API key"}
 
-    # Adaptive fill pricing: +2c for liquid markets, +3c for thin markets
-    # IOC orders need to cross the spread to fill — being aggressive avoids
-    # the 0% fill rate problem caused by stale ask prices in market data.
-    bump = 2  # default: +2c
+    # Adaptive fill pricing — IOC must cross the spread to fill.
+    # Previous +2/+3c bumps produced 0% fill rate. Raised to +4/+5c.
+    bump = 4  # default: +4c
     if aggressive and orderbook_hint and isinstance(orderbook_hint, dict):
         spread = orderbook_hint.get("spread", 0)
         liquidity = orderbook_hint.get("liquidity_score", 50)
         bid_depth = orderbook_hint.get("bid_depth", 0)
         ask_depth = orderbook_hint.get("ask_depth", 0)
         total_depth = bid_depth + ask_depth
-        # Thin market: wide spread (>5c) or low total depth (<20 contracts)
         if spread > 5 or total_depth < 20 or liquidity < 25:
-            bump = 3  # thin market — bump by 3c for better fill probability
-            print(f"[ORDER] Adaptive pricing: +3c bump (spread={spread}, depth={total_depth}, liq={liquidity})")
+            bump = 5  # thin market
         elif spread <= 2 and total_depth > 50:
-            bump = 1  # tight spread + deep book — 1c is enough
-            print(f"[ORDER] Tight market: +1c bump (spread={spread}, depth={total_depth})")
+            bump = 2  # tight spread + deep book
 
     # Bump price above ask to ensure fills
     fill_price = price_cents
@@ -7345,11 +7332,8 @@ def floor_quota_snipe():
 
         ticker = cand["ticker"]
         title = cand["title"]
-        # FADE MODE: paper data shows betting AGAINST the Vegas signal wins 57%
-        # over 688 trades. Flip the side and recalculate price.
-        _orig_side = cand["side"]
-        side = "no" if _orig_side == "yes" else "yes"
-        price = max(1, min(99, 100 - cand["price"]))
+        side = cand["side"]
+        price = cand["price"]
         edge = cand["edge"]
         event_key = cand["event_key"]
 
@@ -7387,18 +7371,18 @@ def floor_quota_snipe():
             pass
 
         _log_activity(
-            f"🎯 FLOOR-FADE {side.upper()} {title[:35]} @ {price}c x{count} (${cost_usd:.2f}) fade_signal={edge:+.1%}",
+            f"🎯 FLOOR {side.upper()} {title[:35]} @ {price}c x{count} (${cost_usd:.2f}) edge={edge:+.1%}",
             "info"
         )
         try:
-            _log_paper_trade(ticker, title, side, price, cand.get("our_prob", 0), edge, edge * 100, strategy="floor_fade")
+            _log_paper_trade(ticker, title, side, price, cand.get("our_prob", 0), edge, edge * 100, strategy="floor")
         except Exception:
             pass
         if _paper_only:
             placed.append({"ticker": ticker, "side": side, "price": price, "paper": True})
             continue
         result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob,
-                                   win_prob=cand.get("our_prob"), edge=edge, strategy="floor_fade", conviction=2)
+                                   win_prob=cand.get("our_prob"), edge=edge, strategy="floor", conviction=2)
         if "error" in result:
             # Surface Kalshi's response body (not just our exception str) so
             # we can actually diagnose what the API is rejecting.
@@ -7418,10 +7402,10 @@ def floor_quota_snipe():
 
         with _BOT_STATE_LOCK:
             BOT_STATE["fill_attempts"] = BOT_STATE.get("fill_attempts", 0) + 1
-            BOT_STATE["fill_attempts_by_strategy"]["floor_fade"] = BOT_STATE.get("fill_attempts_by_strategy", {}).get("floor_fade", 0) + 1
+            BOT_STATE["fill_attempts_by_strategy"]["floor"] = BOT_STATE.get("fill_attempts_by_strategy", {}).get("floor", 0) + 1
             if filled > 0:
                 BOT_STATE["fill_successes"] = BOT_STATE.get("fill_successes", 0) + 1
-                BOT_STATE["fill_successes_by_strategy"]["floor_fade"] = BOT_STATE.get("fill_successes_by_strategy", {}).get("floor_fade", 0) + 1
+                BOT_STATE["fill_successes_by_strategy"]["floor"] = BOT_STATE.get("fill_successes_by_strategy", {}).get("floor", 0) + 1
 
         if filled <= 0:
             _release_game_exposure(event_key, cost_usd)
@@ -7438,11 +7422,11 @@ def floor_quota_snipe():
             "count": filled, "cost": actual_cost, "potential_profit": potential,
             "time": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
             "bot_version": BOT_VERSION,
-            "strategy": "floor_fade",
+            "strategy": "floor",
             "category": cand["mcat"],
             "espn_edge": round(edge, 4),
             "win_probability": round(cand.get("our_prob") or 0, 4) or None,
-            "edge_reasons": [f"fade_signal={edge:+.1%} (original signal strength)", f"cat={cand['mcat']}"],
+            "edge_reasons": [f"edge={edge:+.1%}", f"cat={cand['mcat']}"],
             "conviction": 2,
             "order_id": order_data.get("order_id", ""),
         })
@@ -7451,18 +7435,16 @@ def floor_quota_snipe():
             with _KNOWN_FILL_IDS_LOCK:
                 _known_fill_ids.add(_order_id)
 
-        _edge_data = {"espn_implied": cand["our_prob"], "espn_edge": edge,
-                      "fade_mode": True, "original_side": _orig_side,
-                      "original_price": cand["price"]}
+        _edge_data = {"espn_implied": cand["our_prob"], "espn_edge": edge}
         _journal_trade(
-            ticker, title, side, price, filled, actual_cost, "floor_fade",
+            ticker, title, side, price, filled, actual_cost, "floor",
             is_live=True, close_time=cand.get("close_time", ""),
             game_info=cand.get("game"), espn_edge_data=_edge_data,
-            conviction=2, conviction_reasons=[f"fade_signal={edge:+.1%}", "floor_fade_mode"],
+            conviction=2, conviction_reasons=[f"edge={edge:+.1%}", "floor_direct"],
         )
 
         _log_activity(
-            f"🎯 FLOOR-FADE HIT! {side.upper()} {ticker} @ {price}c x{filled} = ${actual_cost:.2f} (fade_signal={edge:+.1%})",
+            f"🎯 FLOOR HIT! {side.upper()} {ticker} @ {price}c x{filled} = ${actual_cost:.2f} (edge={edge:+.1%})",
             "success"
         )
         placed.append({"ticker": ticker, "cost": actual_cost, "edge": edge})
