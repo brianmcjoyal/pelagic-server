@@ -875,12 +875,12 @@ def _load_state():
             BOT_STATE["misc_daily_spent"] = data.get("misc_daily_spent", 0.0)
             # Restore manual trades for same-day
             BOT_STATE["manual_trades_today"] = data.get("manual_trades_today", [])
-            # Restore drawdown circuit breaker for same-day
-            saved_dd = data.get("drawdown_today", {})
-            if saved_dd and saved_dd.get("date") == today_str:
-                with _DRAWDOWN_LOCK:
-                    _DRAWDOWN_TODAY.update(saved_dd)
-                print(f"[STATE] Restored drawdown: level={_DRAWDOWN_TODAY['level']}, pnl=${_DRAWDOWN_TODAY['realized_pnl']:.2f}")
+            # Drawdown starts fresh each deploy — only same-day position
+            # settlements feed it now, so stale saved state would be wrong.
+            with _DRAWDOWN_LOCK:
+                _DRAWDOWN_TODAY["date"] = today_str
+                _DRAWDOWN_TODAY["realized_pnl"] = 0.0
+                _DRAWDOWN_TODAY["level"] = 0
             # Restore per-game exposure for same-day
             saved_exposure = data.get("game_exposure", {})
             if saved_exposure:
@@ -12367,8 +12367,18 @@ def check_settlements_and_reinvest():
                         _closing_price = 3 if won else 97
             # Track in trade journal for pattern analysis
             _journal_settle(ticker, won, pnl_usd, closing_price_cents=_closing_price)
-            # Update drawdown circuit breaker
-            _update_drawdown(pnl_usd)
+            # Only count same-day positions toward drawdown — old positions
+            # settling with losses shouldn't halt today's trading.
+            _opened_today = False
+            _today_dd = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
+            for _tr in BOT_STATE.get("all_trades", []):
+                if _tr.get("ticker") == ticker:
+                    _tr_ts = (_tr.get("timestamp") or "")[:10]
+                    if _tr_ts == _today_dd:
+                        _opened_today = True
+                    break
+            if _opened_today:
+                _update_drawdown(pnl_usd)
             new_settlements.append({
                 "ticker": ticker,
                 "pnl_usd": round(pnl_usd, 2),
