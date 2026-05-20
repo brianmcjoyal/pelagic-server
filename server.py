@@ -3355,10 +3355,10 @@ def _pretrade_validate(ticker, side, price_cents, count, cost_usd, strategy=None
     # GLOBAL MAXIMUM PRICE CEILING — data shows 61-80c is the most profitable range
     # (73.2% WR, +$139 across 224 bets). Cap at 80c; above that payoff is too thin.
     # Exception: arb and hedge strategies buy opposite sides to lock in guaranteed profit
-    if price_cents > 85 and strategy not in ("arb", "hedge"):
+    if price_cents > 80 and strategy not in ("arb", "hedge"):
         _PRETRADE_STATS["blocked"] += 1
         _PRETRADE_STATS["reasons"]["above_price_ceiling"] = _PRETRADE_STATS["reasons"].get("above_price_ceiling", 0) + 1
-        return False, f"Price {price_cents}c above 85c ceiling — payoff too thin"
+        return False, f"Price {price_cents}c above 80c ceiling — payoff too thin"
 
     if count < 1:
         _PRETRADE_STATS["blocked"] += 1
@@ -3605,7 +3605,7 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
         # guarantee fills (see fill_price computation below). Previously
         # cost_est used raw price_cents → daily budget cap could be exceeded
         # by ~5-10% because actual fills were higher.
-        _max_bump_cents = 5  # conservative upper bound of the adaptive bump
+        _max_bump_cents = 3  # conservative upper bound of the adaptive bump
         _worst_fill_cents = min(price_cents + _max_bump_cents, 99) if aggressive else price_cents
         cost_est = (_worst_fill_cents * count) / 100.0
         ok, reason = _pretrade_validate(
@@ -3631,10 +3631,10 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
     if not headers:
         return {"error": "No API key"}
 
-    # Adaptive fill pricing: +4c for liquid markets, +5c for thin markets
+    # Adaptive fill pricing: +2c for liquid markets, +3c for thin markets
     # IOC orders need to cross the spread to fill — being aggressive avoids
     # the 0% fill rate problem caused by stale ask prices in market data.
-    bump = 4  # default: +4c (raised from +2c after 0/7 fill rate on 2026-05-18)
+    bump = 2  # default: +2c
     if aggressive and orderbook_hint and isinstance(orderbook_hint, dict):
         spread = orderbook_hint.get("spread", 0)
         liquidity = orderbook_hint.get("liquidity_score", 50)
@@ -3643,10 +3643,10 @@ def place_kalshi_order(ticker, side, price_cents, count=1, action="buy", aggress
         total_depth = bid_depth + ask_depth
         # Thin market: wide spread (>5c) or low total depth (<20 contracts)
         if spread > 5 or total_depth < 20 or liquidity < 25:
-            bump = 5  # thin market — bump by 5c for better fill probability
+            bump = 3  # thin market — bump by 3c for better fill probability
             print(f"[ORDER] Adaptive pricing: +3c bump (spread={spread}, depth={total_depth}, liq={liquidity})")
         elif spread <= 2 and total_depth > 50:
-            bump = 2  # tight spread + deep book — 2c is enough
+            bump = 1  # tight spread + deep book — 1c is enough
             print(f"[ORDER] Tight market: +1c bump (spread={spread}, depth={total_depth})")
 
     # Bump price above ask to ensure fills
@@ -4685,23 +4685,25 @@ def _all_trades_today():
 
 
 def _total_daily_spent():
-    """Sum daily spending across all strategy buckets. Used for global budget enforcement.
+    """Sum daily spending for BOT-placed trades only. Used for global budget enforcement.
 
-    Returns max(per-strategy buckets, persisted all_trades cost). The max()
-    handles two cases: (a) normal operation — buckets and all_trades agree;
-    (b) post-restart — buckets are 0 because RAM was wiped, but all_trades
-    was rehydrated from disk, so it carries the real spend.
+    Excludes kalshi_fill (manually placed on Kalshi) so they don't consume
+    the bot's budget — only trades the bot itself placed count.
     """
+    def _bot_spent(trades):
+        return sum(
+            float(t.get("cost_usd", 0) or t.get("cost", 0) or 0)
+            for t in trades if t.get("source") != "kalshi_fill"
+        )
     bucket_sum = (
-        BOT_STATE.get("snipe_daily_spent", 0)
-        + BOT_STATE.get("moonshark_daily_spent", 0)
-        + BOT_STATE.get("closegame_daily_spent", 0)
-        + BOT_STATE.get("floor_daily_spent", 0)
-        + BOT_STATE.get("swing_daily_spent", 0)
-        + BOT_STATE.get("goalie_daily_spent", 0)
+        _bot_spent(BOT_STATE.get("snipe_trades_today", []))
+        + _bot_spent(BOT_STATE.get("moonshark_trades_today", []))
+        + _bot_spent(BOT_STATE.get("closegame_trades_today", []))
+        + _bot_spent(BOT_STATE.get("floor_trades_today", []))
+        + _bot_spent(BOT_STATE.get("swing_trades_today", []))
+        + _bot_spent(BOT_STATE.get("goalie_trades_today", []))
         + BOT_STATE.get("misc_daily_spent", 0)
     )
-    # Exclude fill-synced trades (re-detected after deploy) from budget
     persisted_sum = sum(
         float(t.get("cost_usd", 0) or 0) for t in _all_trades_today()
         if t.get("source") != "kalshi_fill"
@@ -4710,22 +4712,19 @@ def _total_daily_spent():
 
 
 def _total_bets_today():
-    """Count bets actively placed by the bot today (not synced fills).
-
-    Excludes manual_trades_today (fill sync re-detections after deploy)
-    since those inflate the count and block the daily quota from working.
-    Uses max(per-strategy buckets, persisted non-manual all_trades) so
-    the count survives a process restart.
+    """Count bot-placed bets today. Excludes kalshi_fill (manual Kalshi trades)
+    so they don't consume the bot's trade quota.
     """
+    def _exclude_synced(trades):
+        return sum(1 for t in trades if t.get("source") != "kalshi_fill")
     bucket_count = (
-        len(BOT_STATE.get("snipe_trades_today", []))
-        + len(BOT_STATE.get("moonshark_trades_today", []))
-        + len(BOT_STATE.get("closegame_trades_today", []))
-        + len(BOT_STATE.get("floor_trades_today", []))
-        + len(BOT_STATE.get("swing_trades_today", []))
-        + len(BOT_STATE.get("goalie_trades_today", []))
+        _exclude_synced(BOT_STATE.get("snipe_trades_today", []))
+        + _exclude_synced(BOT_STATE.get("moonshark_trades_today", []))
+        + _exclude_synced(BOT_STATE.get("closegame_trades_today", []))
+        + _exclude_synced(BOT_STATE.get("floor_trades_today", []))
+        + _exclude_synced(BOT_STATE.get("swing_trades_today", []))
+        + _exclude_synced(BOT_STATE.get("goalie_trades_today", []))
     )
-    # Count persisted trades but exclude fill-synced ones
     persisted_count = sum(
         1 for t in _all_trades_today()
         if t.get("source") != "kalshi_fill"
@@ -5097,22 +5096,15 @@ def live_game_snipe():
                 # Close time check — skip for series-scanned markets (Kalshi sets
                 # close_time to series end, not individual game time)
                 close_time_str = mkt.get("close_time", "")
-                # NEAR-FUTURE ONLY: allow games within 2 days.
-                # Kalshi often doesn't list same-day markets until close to
-                # game time, causing zero candidates during morning hours.
+                # SAME-DAY ONLY: skip markets for future games.
+                # Series-scanned markets use ticker date; others use close_time.
                 if "series_ticker" in source_params:
-                    if not _is_near_future_ticker(ticker, max_days=2):
+                    if not _is_same_day_ticker(ticker):
                         _ms_reasons["not_today"] = _ms_reasons.get("not_today", 0) + 1
                         continue
-                elif close_time_str:
-                    try:
-                        _ct_chk = datetime.datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
-                        _days_out = (_ct_chk.astimezone(_PACIFIC).date() - datetime.datetime.now(tz=_PACIFIC).date()).days
-                        if _days_out > 2 or _days_out < 0:
-                            _ms_reasons["not_today"] = _ms_reasons.get("not_today", 0) + 1
-                            continue
-                    except Exception:
-                        pass
+                elif close_time_str and not _is_same_day_market(close_time_str):
+                    _ms_reasons["not_today"] = _ms_reasons.get("not_today", 0) + 1
+                    continue
                 if "series_ticker" not in source_params:
                     if close_time_str:
                         try:
@@ -7083,10 +7075,9 @@ FLOOR_MAX_PRICE = 85  # allow high-probability favorites (most likely to win)
 FLOOR_MIN_EDGE = 0.05       # 5% ESPN edge minimum — same bar as moonshark, no charity bets
 FLOOR_MIN_CONVICTION = 3    # relaxed but not reckless — 2 was too loose
 FLOOR_TRADING_HOURS = (10, 23)  # 10am-11pm PT — games happen in this window
-# Dead hours: paper data showed <26% WR during these PT hours under the
-# old fade strategy. With direct-bet (non-fade) mode, re-evaluate over time.
-# Narrowed to morning-only so evening game windows stay open.
-_DEAD_HOURS_PT = {10, 12}  # 10am, 12pm PT only — 5pm/7pm reopened for prime game hours
+# Dead hours: paper data shows <26% WR during these PT hours.
+# Paper still runs (learning), but live bets are blocked.
+_DEAD_HOURS_PT = {10, 12, 17, 19}  # 10am, 12pm, 5pm, 7pm PT
 FLOOR_FADE_MIN_LIVE_TRADES = 20  # need 20+ settled live trades before evaluating WR
 FLOOR_FADE_MIN_LIVE_WR = 0.35   # auto-disable if live WR drops below 35% over 20+ trades
 
@@ -7205,10 +7196,6 @@ def floor_quota_snipe():
     close_cutoff = (datetime.datetime.utcnow() + datetime.timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
     scan_sources.append({"close_time_max": close_cutoff, "status": "open"})
 
-    _floor_skip_reasons = {}
-    _floor_total_scanned = 0
-    _floor_sample_tickers = []
-
     for source_params in scan_sources:
         try:
             mh = signed_headers("GET", "/markets")
@@ -7225,22 +7212,18 @@ def floor_quota_snipe():
             continue
 
         for mkt in markets:
-            _floor_total_scanned += 1
             ticker = mkt.get("ticker", "") or ""
             title = mkt.get("title", "") or ""
             if not ticker or ticker in existing_tickers:
-                _floor_skip_reasons["dupe_ticker"] = _floor_skip_reasons.get("dupe_ticker", 0) + 1
                 continue
 
             t_upper = ticker.upper()
             if any(t_upper.startswith(bp) for bp in _blocked_prefixes):
-                _floor_skip_reasons["blocked_prefix"] = _floor_skip_reasons.get("blocked_prefix", 0) + 1
                 continue
 
             _parts = ticker.split("-")
             event_key = "-".join(_parts[:2]) if len(_parts) >= 2 else ticker
             if event_key in existing_events or event_key in _EVENTS_BET_TODAY:
-                _floor_skip_reasons["dupe_event"] = _floor_skip_reasons.get("dupe_event", 0) + 1
                 continue
 
             # ── HARD SPORTS-ONLY GATE ──
@@ -7248,57 +7231,36 @@ def floor_quota_snipe():
             _SPORTS_ONLY = {"nba", "nfl", "nhl", "mlb", "soccer", "tennis",
                             "mma", "ncaa", "kbo", "afl"}
             if mcat not in _SPORTS_ONLY:
-                _floor_skip_reasons["not_sports"] = _floor_skip_reasons.get("not_sports", 0) + 1
                 continue
             blocked = BOT_CONFIG.get("blocked_categories", [])
             if mcat in blocked:
-                _floor_skip_reasons["blocked_cat"] = _floor_skip_reasons.get("blocked_cat", 0) + 1
                 continue
             t_lower = title.lower()
             if any(kw in t_lower for kw in BOT_CONFIG.get("blocked_keywords", [])):
-                _floor_skip_reasons["blocked_kw"] = _floor_skip_reasons.get("blocked_kw", 0) + 1
                 continue
 
             # Require whitelisted prefix when scanning the catch-all time window
             if "series_ticker" not in source_params:
                 if not any(t_upper.startswith(ap) for ap in _allowed_prefixes):
-                    _floor_skip_reasons["not_allowed_prefix"] = _floor_skip_reasons.get("not_allowed_prefix", 0) + 1
                     continue
                 # Must be a binary GAME/MATCH/FIGHT market
                 if not any(kw in t_upper for kw in ["GAME", "MATCH", "FIGHT"]):
-                    _floor_skip_reasons["not_game_market"] = _floor_skip_reasons.get("not_game_market", 0) + 1
                     continue
-
-            if len(_floor_sample_tickers) < 10:
-                _floor_sample_tickers.append(ticker[:50])
 
             # Liquidity: still require something tradeable
             _ask_size = float(str(mkt.get("yes_ask_size_fp") or mkt.get("no_ask_size_fp") or 0))
             if _ask_size < 20:
-                _floor_skip_reasons["low_liquidity"] = _floor_skip_reasons.get("low_liquidity", 0) + 1
                 continue
 
             close_time_str = mkt.get("close_time", "") or ""
-            # RELAXED DATE FILTER: allow games within the next 3 days.
-            # Kalshi often doesn't list same-day game markets until close to
-            # game time, so restricting to today-only caused zero candidates
-            # during morning hours. Prices on near-future games reflect current
-            # probability — a 70c favorite tomorrow is the same edge as today.
+            # SAME-DAY ONLY: skip floor bets on future games.
+            # When scanning by series_ticker, Kalshi sets close_time to series end
+            # (not game day), so we parse the date from the ticker directly.
             if "series_ticker" in source_params:
-                if not _is_near_future_ticker(ticker, max_days=3):
-                    _floor_skip_reasons["not_near_future"] = _floor_skip_reasons.get("not_near_future", 0) + 1
+                if not _is_same_day_ticker(ticker):
                     continue
-            elif close_time_str:
-                try:
-                    ct = datetime.datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
-                    ct_pt = ct.astimezone(_PACIFIC).date()
-                    today_pt = datetime.datetime.now(tz=_PACIFIC).date()
-                    days_out = (ct_pt - today_pt).days
-                    if days_out > 3 or days_out < 0:
-                        _floor_skip_reasons["not_near_future_close"] = _floor_skip_reasons.get("not_near_future_close", 0) + 1
-                        continue
-                except Exception:
-                    pass
+            elif close_time_str and not _is_same_day_market(close_time_str):
+                continue
 
             # Parse prices
             yes_ask = None
@@ -7316,26 +7278,23 @@ def floor_quota_snipe():
             # KALSHI-FIRST: use Vegas odds directly — no ESPN dependency.
             # Try each side, pick the one with the best Vegas edge.
             best = None
-            _any_side_in_range = False
             for side_name, ask in (("yes", yes_ask), ("no", no_ask)):
                 if ask is None or ask < FLOOR_MIN_PRICE or ask > FLOOR_MAX_PRICE:
                     continue
-                _any_side_in_range = True
                 implied = ask / 100.0
                 _vp, _ve, _vl = _get_vegas_edge(ticker, title, implied, side_name)
                 if _vp is None:
-                    # Vegas unavailable — allow any in-range candidate with
-                    # synthetic edge scaled by price (higher price = more likely
-                    # to win = more edge). Floor's job is guaranteed activity.
-                    _synth_edge = 0.03 + (ask - FLOOR_MIN_PRICE) * 0.001
-                    if best is None or _synth_edge > best["edge"]:
-                        best = {
-                            "side": side_name,
-                            "price": ask,
-                            "edge": round(_synth_edge, 4),
-                            "our_prob": implied,
-                            "vegas_gap_pp": 0.0,
-                        }
+                    # Vegas unavailable — allow high-probability favorites (>=65c)
+                    # as price-only candidates with a synthetic edge of 0.05
+                    if ask >= 65:
+                        if best is None or 0.05 > best["edge"]:
+                            best = {
+                                "side": side_name,
+                                "price": ask,
+                                "edge": 0.05,
+                                "our_prob": implied,
+                                "vegas_gap_pp": 0.0,
+                            }
                     continue
                 if _ve < FLOOR_MIN_EDGE:
                     continue  # gap too small
@@ -7351,10 +7310,6 @@ def floor_quota_snipe():
                     }
 
             if not best:
-                if not _any_side_in_range:
-                    _floor_skip_reasons["price_out_of_range"] = _floor_skip_reasons.get("price_out_of_range", 0) + 1
-                else:
-                    _floor_skip_reasons["no_edge"] = _floor_skip_reasons.get("no_edge", 0) + 1
                 continue
 
             candidates.append({
@@ -7372,9 +7327,7 @@ def floor_quota_snipe():
             })
 
     if not candidates:
-        _skip_summary = ", ".join(f"{k}:{v}" for k, v in sorted(_floor_skip_reasons.items(), key=lambda x: -x[1])[:5])
-        _samples = ", ".join(_floor_sample_tickers[:5])
-        _log_activity(f"🎯 FLOOR: no edges found (scanned {_floor_total_scanned}, skips: {_skip_summary}, samples: {_samples})", "info")
+        _log_activity("🎯 FLOOR: no edges found this scan", "info")
         return []
 
     # Rank by edge, take top N (shortfall)
@@ -7392,10 +7345,11 @@ def floor_quota_snipe():
 
         ticker = cand["ticker"]
         title = cand["title"]
-        # BET WITH the signal — back the high-probability favorite directly.
-        # Fade mode (betting against) produced 6.9% live WR; abandoned.
-        side = cand["side"]
-        price = cand["price"]
+        # FADE MODE: paper data shows betting AGAINST the Vegas signal wins 57%
+        # over 688 trades. Flip the side and recalculate price.
+        _orig_side = cand["side"]
+        side = "no" if _orig_side == "yes" else "yes"
+        price = max(1, min(99, 100 - cand["price"]))
         edge = cand["edge"]
         event_key = cand["event_key"]
 
@@ -12416,18 +12370,8 @@ def check_settlements_and_reinvest():
                         _closing_price = 3 if won else 97
             # Track in trade journal for pattern analysis
             _journal_settle(ticker, won, pnl_usd, closing_price_cents=_closing_price)
-            # Update drawdown circuit breaker — only for positions opened today.
-            # Old positions settling shouldn't halt today's new trading.
-            _opened_today = False
-            for _tr in BOT_STATE.get("all_trades", []):
-                if _tr.get("ticker") == ticker:
-                    _tr_ts = (_tr.get("timestamp") or "")[:10]
-                    _today_dd = datetime.datetime.now(tz=_PACIFIC).strftime("%Y-%m-%d")
-                    if _tr_ts == _today_dd:
-                        _opened_today = True
-                    break
-            if _opened_today:
-                _update_drawdown(pnl_usd)
+            # Update drawdown circuit breaker
+            _update_drawdown(pnl_usd)
             new_settlements.append({
                 "ticker": ticker,
                 "pnl_usd": round(pnl_usd, 2),
@@ -12850,6 +12794,7 @@ def _sync_kalshi_fills():
                 "time": created,
                 "strategy": "manual",
                 "order_id": order_id,
+                "source": "kalshi_fill",
             })
 
             # Also add to all_trades
@@ -13082,35 +13027,12 @@ def _background_loop():
     except Exception as e:
         print(f"[BG] Perf history seed error (non-fatal): {e}")
 
-    # Seed known fill IDs from BOTH local state AND the Kalshi API.
-    # Local state may be empty after an ephemeral deploy, so we MUST
-    # also fetch recent fills from the API to prevent the sync loop
-    # from re-detecting old fills as "new external" bets.
+    # Seed known fill IDs so sync doesn't re-detect existing trades.
+    # Snapshot all_trades under BOT_STATE lock, then batch-add fill IDs
+    # under KNOWN_FILL_IDS lock — holds each lock for the minimum time.
     with _BOT_STATE_LOCK:
         _seed_trades_snap = list(BOT_STATE.get("all_trades", []))
     _seed_ids = [t["order_id"] for t in _seed_trades_snap if t.get("order_id")]
-    # Fetch today's fills from Kalshi to seed the dedupe set
-    try:
-        _seed_path = "/portfolio/fills"
-        _seed_h = signed_headers("GET", _seed_path)
-        if _seed_h:
-            _seed_start = datetime.datetime.now(tz=_PACIFIC).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            ).astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            _seed_resp = requests.get(
-                KALSHI_BASE_URL + KALSHI_API_PREFIX + _seed_path,
-                headers=_seed_h,
-                params={"limit": 200, "min_ts": _seed_start},
-                timeout=15,
-            )
-            if _seed_resp.ok:
-                for _sf in _seed_resp.json().get("fills", []):
-                    _sfid = _sf.get("order_id", "")
-                    if _sfid:
-                        _seed_ids.append(_sfid)
-                print(f"[SYNC] Fetched {len(_seed_resp.json().get('fills', []))} fills from Kalshi API for seeding")
-    except Exception as _se:
-        print(f"[SYNC] Kalshi fill seed error (non-fatal): {_se}")
     with _KNOWN_FILL_IDS_LOCK:
         for _oid in _seed_ids:
             _known_fill_ids.add(_oid)
@@ -20097,23 +20019,6 @@ def _is_same_day_ticker(ticker):
         return game_date in (today_pt, tomorrow_pt)
     except Exception:
         return True  # parse error — allow through
-
-
-def _is_near_future_ticker(ticker, max_days=3):
-    """Return True if ticker encodes a date within max_days from now (Pacific time)."""
-    try:
-        import re as _re
-        now_pt = datetime.datetime.now(tz=_PACIFIC)
-        today_pt = now_pt.date()
-        m = _re.search(r'-(\d{2})([A-Z]{3})(\d{2})', ticker.upper())
-        if not m:
-            return True
-        year_short, mon_str, day = m.group(1), m.group(2), m.group(3)
-        game_date = datetime.datetime.strptime(f'20{year_short} {mon_str} {day}', '%Y %b %d').date()
-        days_out = (game_date - today_pt).days
-        return 0 <= days_out <= max_days
-    except Exception:
-        return True
 
 
 def _parse_clock_to_seconds(clock_str, sport="nba"):
