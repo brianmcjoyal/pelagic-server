@@ -1107,6 +1107,9 @@ def _hydrate_from_kalshi():
             except Exception:
                 pass
 
+            if count <= 0 or price_cents <= 0:
+                continue
+
             created = fill.get("created_time", "")
             cost_usd = (price_cents * count) / 100
             # Infer strategy for bot attribution after restart
@@ -1321,6 +1324,39 @@ def _hydrate_from_kalshi():
         traceback.print_exc()
 
 _load_state()
+
+# Purge ghost entries (0¢ x0) from all_trades and trade journal on every startup.
+_ghost_before = len(BOT_STATE["all_trades"])
+BOT_STATE["all_trades"] = [
+    t for t in BOT_STATE["all_trades"]
+    if (t.get("price_cents") or 0) > 0 or (t.get("count") or 0) > 0 or t.get("action") == "sell"
+]
+_ghost_purged = _ghost_before - len(BOT_STATE["all_trades"])
+if _ghost_purged:
+    print(f"[CLEANUP] Purged {_ghost_purged} ghost entries (0¢ x0) from all_trades")
+
+with _TRADE_JOURNAL_LOCK:
+    _jl_before = len(_TRADE_JOURNAL)
+    _TRADE_JOURNAL[:] = [
+        j for j in _TRADE_JOURNAL
+        if (j.get("price_cents") or 0) > 0 or (j.get("count") or 0) > 0
+    ]
+    _jl_purged = _jl_before - len(_TRADE_JOURNAL)
+if _jl_purged:
+    print(f"[CLEANUP] Purged {_jl_purged} ghost entries from trade journal")
+
+# Also purge ghost entries from manual_trades_today
+_mt_before = len(BOT_STATE.get("manual_trades_today", []))
+BOT_STATE["manual_trades_today"] = [
+    t for t in BOT_STATE.get("manual_trades_today", [])
+    if (t.get("price") or t.get("price_cents") or 0) > 0 and (t.get("count") or 0) > 0
+]
+_mt_purged = _mt_before - len(BOT_STATE["manual_trades_today"])
+if _mt_purged:
+    print(f"[CLEANUP] Purged {_mt_purged} ghost entries from manual_trades_today")
+
+if _ghost_purged or _jl_purged or _mt_purged:
+    _save_state()
 
 
 def _seed_perf_history_from_fills():
@@ -12005,6 +12041,8 @@ def _journal_trade(ticker, title, side, price_cents, count, cost_usd, strategy,
     caller doesn't supply an espn_edge_data dict (e.g. manual trades).
     Stored as top-level edge_at_entry / win_prob_at_entry fields.
     """
+    if price_cents <= 0 or count <= 0:
+        return None
     rec = _enrich_trade_record(ticker, title, side, price_cents, count, cost_usd, strategy, is_live, close_time=close_time, game_info=game_info, espn_edge_data=espn_edge_data, orderbook_data=orderbook_data, conviction=conviction, conviction_reasons=conviction_reasons)
     # Force-capture entry-time signal — falls back to values nested in
     # espn_edge_data if explicit kwargs weren't passed. Stored even when
@@ -12788,6 +12826,9 @@ def _sync_kalshi_fills():
                     price_cents = int(round(float(str(no_price)) * 100))
             except Exception:
                 pass
+
+            if count <= 0 or price_cents <= 0:
+                continue
 
             cost_usd = round((price_cents * count) / 100, 2)
 
@@ -18766,6 +18807,9 @@ def trades_today_endpoint():
             })
             seen_tickers.add(ticker)
 
+    # Filter out ghost entries (0¢ x0)
+    all_today = [t for t in all_today if (t.get("price_cents") or 0) > 0 and (t.get("count") or 0) > 0]
+
     # Consolidate duplicate fills: group by ticker+side, sum count/cost
     _consolidated = {}
     for t in all_today:
@@ -20966,9 +21010,11 @@ def trades():
             pnl = round(_sells[tk] - _buys[tk], 2)
             _fill_pnl[tk] = {"result": "win" if pnl > 0 else "loss", "pnl_usd": pnl}
 
-    # Enrich all_trades with settlement outcome
+    # Enrich all_trades with settlement outcome (skip ghost entries with 0 price/count)
     enriched = []
     for t in BOT_STATE["all_trades"]:
+        if (t.get("price_cents") or 0) <= 0 and (t.get("count") or 0) <= 0:
+            continue
         tc = dict(t)
         ticker = tc.get("ticker", "")
         if ticker in settle_map:
