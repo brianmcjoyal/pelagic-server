@@ -7147,16 +7147,18 @@ def floor_quota_snipe():
                 existing_events.add("-".join(parts[:2]))
     except Exception:
         pass
+    # Only exclude events the BOT actually placed (not synced manual fills)
     for _tlist in [
         BOT_STATE.get("snipe_trades_today", []),
         BOT_STATE.get("moonshark_trades_today", []),
         BOT_STATE.get("closegame_trades_today", []),
-        BOT_STATE.get("manual_trades_today", []),
         BOT_STATE.get("floor_trades_today", []),
         BOT_STATE.get("swing_trades_today", []),
         BOT_STATE.get("goalie_trades_today", []),
     ]:
         for _t in _tlist:
+            if _t.get("source") == "kalshi_fill":
+                continue
             _tk = _t.get("ticker", "")
             if _tk:
                 existing_tickers.add(_tk)
@@ -7368,7 +7370,15 @@ def floor_quota_snipe():
         count = max(1, int(bet_usd * 100 / price))
         cost_usd = (price * count) / 100.0
 
-        # Honor game exposure cap but shrink to fit
+        try:
+            _log_paper_trade(ticker, title, side, price, cand.get("our_prob", 0), edge, edge * 100, strategy="floor")
+        except Exception:
+            pass
+        if _paper_only:
+            placed.append({"ticker": ticker, "side": side, "price": price, "paper": True})
+            continue
+
+        # Honor game exposure cap but shrink to fit (only for live trades)
         if not _check_game_exposure(event_key, cost_usd):
             new_count, new_cost = _fit_to_game_cap(event_key, price, count)
             if new_count <= 0:
@@ -7389,13 +7399,6 @@ def floor_quota_snipe():
             f"🎯 FLOOR {side.upper()} {title[:35]} @ {price}c x{count} (${cost_usd:.2f}) edge={edge:+.1%}",
             "info"
         )
-        try:
-            _log_paper_trade(ticker, title, side, price, cand.get("our_prob", 0), edge, edge * 100, strategy="floor")
-        except Exception:
-            pass
-        if _paper_only:
-            placed.append({"ticker": ticker, "side": side, "price": price, "paper": True})
-            continue
         result = place_kalshi_order(ticker, side, price, count=count, orderbook_hint=_ob,
                                    win_prob=cand.get("our_prob"), edge=edge, strategy="floor", conviction=2)
         if "error" in result:
