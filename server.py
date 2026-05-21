@@ -4455,7 +4455,7 @@ def run_bot_scan():
 
         # Count live game markets for the log
         _live_count = sum(1 for m in all_markets if m.get("platform") == "kalshi" and any(pfx in (m.get("id") or "") for pfx in LIVE_GAME_SERIES))
-        _total_bets = len(BOT_STATE.get("trades_today", [])) + len(BOT_STATE.get("snipe_trades_today", [])) + len(BOT_STATE.get("moonshark_trades_today", [])) + len(BOT_STATE.get("closegame_trades_today", [])) + len(BOT_STATE.get("manual_trades_today", []))
+        _total_bets = _total_bets_today()
         _log_activity(f"Scan: {_live_count} live | {_total_bets} bets today")
 
         if not BOT_CONFIG["enabled"]:
@@ -7293,7 +7293,7 @@ def floor_quota_snipe():
                             "side": side_name,
                             "price": ask,
                             "edge": round(_synth_edge, 4),
-                            "our_prob": implied,
+                            "our_prob": min(0.95, implied + _synth_edge),
                             "vegas_gap_pp": 0.0,
                         }
                     continue
@@ -7379,14 +7379,18 @@ def floor_quota_snipe():
             continue
 
         # Honor game exposure cap but shrink to fit (only for live trades)
-        if not _check_game_exposure(event_key, cost_usd):
+        _exposure_reserved = _check_game_exposure(event_key, cost_usd)
+        if not _exposure_reserved:
             new_count, new_cost = _fit_to_game_cap(event_key, price, count)
             if new_count <= 0:
                 continue
             count = new_count
             cost_usd = new_cost
+            if not _check_game_exposure(event_key, cost_usd):
+                continue
 
         if not _check_and_claim_event(event_key):
+            _release_game_exposure(event_key, cost_usd)
             continue
 
         _ob = None
@@ -7740,14 +7744,18 @@ def momentum_swing_snipe():
             cost_usd = (price * count) / 100.0
 
             # Honor per-game exposure cap
-            if not _check_game_exposure(event_key, cost_usd):
+            _exposure_reserved = _check_game_exposure(event_key, cost_usd)
+            if not _exposure_reserved:
                 new_count, new_cost = _fit_to_game_cap(event_key, price, count)
                 if new_count <= 0:
                     continue
                 count = new_count
                 cost_usd = new_cost
+                if not _check_game_exposure(event_key, cost_usd):
+                    continue
 
             if not _check_and_claim_event(event_key):
+                _release_game_exposure(event_key, cost_usd)
                 continue
 
             _ob = None
@@ -8086,14 +8094,18 @@ def goalie_pulled_snipe():
         count = max(1, int(bet_usd * 100 / price))
         cost_usd = (price * count) / 100.0
 
-        if not _check_game_exposure(event_key, cost_usd):
+        _exposure_reserved = _check_game_exposure(event_key, cost_usd)
+        if not _exposure_reserved:
             new_count, new_cost = _fit_to_game_cap(event_key, price, count)
             if new_count <= 0:
                 continue
             count = new_count
             cost_usd = new_cost
+            if not _check_game_exposure(event_key, cost_usd):
+                continue
 
         if not _check_and_claim_event(event_key):
+            _release_game_exposure(event_key, cost_usd)
             continue
 
         _ob = None
